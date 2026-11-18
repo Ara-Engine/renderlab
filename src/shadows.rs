@@ -35,8 +35,12 @@ pub enum SoftShadows {
 /// The acceleration-structure instance mask bit of a placement that blocks light
 /// (`Instances::set_casts_shadows`), and the cull mask of every shadow ray. WGSL declares it
 /// as `SHADOW_CASTER_MASK` in shaders/scene.wgsl; modules without scene.wgsl prepend
-/// `SHADOW_CASTER_MASK_WGSL`. Camera, reflection and bounce rays cull with 0xFF.
+/// `SHADOW_CASTER_MASK_WGSL`.
 pub(crate) const SHADOW_CASTER_MASK: u32 = 0x01;
+/// The instance mask bit every drawn placement carries, and the cull mask of camera, reflection
+/// and bounce rays (`VISIBLE_MASK` in WGSL, declared beside `SHADOW_CASTER_MASK`). A placement
+/// without it (a see-through surface under a bit of its own) is invisible to those rays.
+pub(crate) const VISIBLE_MASK: u32 = 0x02;
 /// `source` with `SHADOW_CASTER_MASK_WGSL` after its leading `enable` directives (which WGSL
 /// puts before every declaration), for a module without shaders/scene.wgsl.
 pub(crate) fn with_shadow_caster_mask(source: &str) -> String {
@@ -51,8 +55,10 @@ pub(crate) fn with_shadow_caster_mask(source: &str) -> String {
         &source[at..]
     )
 }
-/// `SHADOW_CASTER_MASK`'s WGSL declaration, as shaders/scene.wgsl has it.
-pub(crate) const SHADOW_CASTER_MASK_WGSL: &str = "const SHADOW_CASTER_MASK:u32=1u;\n";
+/// The instance masks' WGSL declarations (`SHADOW_CASTER_MASK`, `VISIBLE_MASK`), as
+/// shaders/scene.wgsl has them.
+pub(crate) const SHADOW_CASTER_MASK_WGSL: &str =
+    "const SHADOW_CASTER_MASK:u32=1u;\nconst VISIBLE_MASK:u32=2u;\n";
 
 /// Entries correspond exactly to the current `Lighting::lights` vector.
 #[derive(Clone, Debug, PartialEq)]

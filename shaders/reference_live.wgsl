@@ -500,7 +500,7 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
     if (path.state&RF_ALIVE)==0u {return;}
     rng_state=path.rng;
     var query:ray_query<vertex_return>;
-    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_NO_OPAQUE,255u,0.0,1e30,path.origin,path.direction));
+    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_NO_OPAQUE,VISIBLE_MASK,0.0,1e30,path.origin,path.direction));
     while rayQueryProceed(&query) {
         // primary_trace.wgsl: single-sided draws hide source-back faces, by the object-space
         // winding against the object-space ray.

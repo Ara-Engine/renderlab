@@ -12,7 +12,7 @@
 struct GiHit { hit:bool, t:f32, normal:vec3<f32>, inst:u32, tri:vec3<u32>, bary:vec2<f32> };
 fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
     var query:ray_query<vertex_return>;
-    rayQueryInitialize(&query,gi_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,tmax,origin,direction));
+    rayQueryInitialize(&query,gi_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE,VISIBLE_MASK,tmin,tmax,origin,direction));
     while rayQueryProceed(&query) {}
     let hit=rayQueryGetCommittedIntersection(&query);
     let none=vec2<f32>(0.0);

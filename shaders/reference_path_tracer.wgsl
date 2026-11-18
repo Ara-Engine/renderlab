@@ -169,7 +169,7 @@ struct Hit {hit:bool, p:vec3<f32>, n:vec3<f32>, ng:vec3<f32>, material:u32, uv:v
 
 fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
     var query:ray_query;
-    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,0.0,1e30,origin,direction));
+    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE,VISIBLE_MASK,0.0,1e30,origin,direction));
     while rayQueryProceed(&query) {}
     let h=rayQueryGetCommittedIntersection(&query);
     if h.kind==0u {return Hit(false,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0u,vec2<f32>(0.0),vec3<f32>(1.0),vec2<u32>(0u));}
