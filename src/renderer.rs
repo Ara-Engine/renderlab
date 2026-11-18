@@ -3815,7 +3815,7 @@ impl Renderer {
                 mark(&mut encoder, "cpu:gi_receiver_ensure");
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
-                self.encode_gi_receiver_pass(&mut encoder, shading);
+                self.encode_gi_receiver_pass(&mut encoder, shading, &mut mark);
                 // Visibility feeds both the optional detail probes and final shading.
                 if primary_ray_gpu::light_vis_pass::on() {
                     self.ensure_light_vis(shading)?;

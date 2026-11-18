@@ -554,10 +554,13 @@ impl Renderer {
         }
         Ok(())
     }
+    /// The receiver kernel, or with the final gather its five kernels, each in its own compute
+    /// pass behind a `mark` of its name, so the pass log times them apart.
     pub(crate) fn encode_gi_receiver_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         shading: Shading,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
         if !enabled(&self.device) {
             return;
@@ -577,22 +580,7 @@ impl Renderer {
         }
         let bindings = state.bindings.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("GI receiver"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(
-            0,
-            &**bindings.shade[shading as usize].as_ref().unwrap(),
-            &[],
-        );
-        pass.set_bind_group(1, &*g.arrays, &[]);
-        match target.empty.as_ref().filter(|_| target.lean[shading as usize]) {
-            Some(empty) => pass.set_bind_group(2, &**empty, &[]),
-            None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
-        }
-        pass.set_bind_group(3, self.lighting.bind(), &[]);
+        let shade = &**bindings.shade[shading as usize].as_ref().unwrap();
         if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in)) = (
             target.gather[shading as usize].as_ref(),
             target.gather_group.as_ref(),
@@ -606,17 +594,45 @@ impl Renderer {
                 layout,
                 entries: &[wgpu::BindGroupEntry { binding: 30, resource: requests.as_entire_binding() }],
             });
-            pass.set_bind_group(2, &group, &[]);
-            pass.set_pipeline(trace);
-            pass.dispatch_workgroups(target.tiles[0], target.tiles[1], 1);
-            pass.set_pipeline(filter);
-            pass.dispatch_workgroups(target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4), 1);
-            pass.set_pipeline(classify);
-            pass.dispatch_workgroups(target.blocks[0], target.blocks[1], 1);
-            pass.set_pipeline(adapt);
-            pass.dispatch_workgroups(target.blocks[0].div_ceil(2), target.blocks[1], 1);
-            pass.set_pipeline(resolve);
+            // Grids: probe tiles, the filter's 8x4 tiles a group, blocks, two blocks a group,
+            // and the resolve's indirect pixel grid (None).
+            let steps: [(&'static str, &wgpu::ComputePipeline, Option<[u32; 2]>); 5] = [
+                ("fg_trace", trace, Some(target.tiles)),
+                ("fg_filter", filter, Some([target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4)])),
+                ("fg_classify", classify, Some(target.blocks)),
+                ("fg_adapt", adapt, Some([target.blocks[0].div_ceil(2), target.blocks[1]])),
+                ("fg_resolve", resolve, None),
+            ];
+            for (name, kernel, grid) in steps {
+                mark(encoder, name);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(name),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(kernel);
+                pass.set_bind_group(0, shade, &[]);
+                pass.set_bind_group(1, &*g.arrays, &[]);
+                pass.set_bind_group(2, &group, &[]);
+                pass.set_bind_group(3, self.lighting.bind(), &[]);
+                match grid {
+                    Some([x, y]) => pass.dispatch_workgroups(x, y, 1),
+                    None => pass.dispatch_workgroups_indirect(&target.args.value, 0),
+                }
+            }
+            return;
         }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("GI receiver"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, shade, &[]);
+        pass.set_bind_group(1, &*g.arrays, &[]);
+        match target.empty.as_ref().filter(|_| target.lean[shading as usize]) {
+            Some(empty) => pass.set_bind_group(2, &**empty, &[]),
+            None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
+        }
+        pass.set_bind_group(3, self.lighting.bind(), &[]);
         pass.dispatch_workgroups_indirect(&target.args.value, 0);
     }
 }
