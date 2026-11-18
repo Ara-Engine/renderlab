@@ -71,14 +71,47 @@ pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
         count: None,
     }
 }
+/// The lighting cache's emitter list readers the final gather samples (shaders/gi_emitters.wgsl,
+/// read through gi_word): its constants, the pick's struct and the functions that need no cache
+/// binding. The build kernels in that file bind the cache's own buffers and stay out.
+fn emitter_readers() -> String {
+    const SOURCE: &str = include_str!("../shaders/gi_emitters.wgsl");
+    let block = |start: usize| {
+        let brace = start + SOURCE[start..].find('{').unwrap();
+        let mut depth = 1;
+        let mut end = brace + 1;
+        while depth != 0 {
+            depth += i32::from(SOURCE.as_bytes()[end] == b'{') - i32::from(SOURCE.as_bytes()[end] == b'}');
+            end += 1;
+        }
+        format!("{}\n", &SOURCE[start..end])
+    };
+    let mut out: String = SOURCE.lines().filter(|l| l.starts_with("const GI_")).map(|l| format!("{l}\n")).collect();
+    out.push_str(&block(SOURCE.find("struct GiEmitterPick").unwrap()));
+    for name in [
+        "gi_emitter_draws_at",
+        "gi_emitter_cdf_at",
+        "gi_emitter_vec",
+        "gi_emitter_power",
+        "gi_emitter_pick",
+        "gi_batch_emission",
+        "gi_emitter_sh",
+    ] {
+        out.push_str(&block(SOURCE.find(&format!("fn {name}(")).unwrap()));
+    }
+    out
+}
 /// The GI receiver kernel's module on a traced shading `head`, exactly as the engine compiles
 /// it: the standard program's traced composition (which carries the shading-side definitions
-/// `shade_source` appends) and the kernel half of gi_receiver_pass.wgsl.
+/// `shade_source` appends), the emitter list's readers and the kernel half of
+/// gi_receiver_pass.wgsl.
 pub(crate) fn kernel_module(head: &str) -> program::Composed {
     let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
     if program::final_gather() {
         composed.source = program::with_cache_lookup(composed.source);
     }
+    // The gather's kernels are in the kernel half whether or not it runs.
+    composed.source.push_str(&emitter_readers());
     let mut kernel = SOURCE.split_once(ENTRY_SEAM).unwrap().1.to_string();
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
@@ -396,6 +429,7 @@ impl Renderer {
         }
         if gathers {
             self.gi.request_external();
+            self.gi.request_emitters();
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
@@ -689,6 +723,7 @@ mod tests {
             } else {
                 shade_source_for(source, true, true, true)
             };
+            source.push_str(&emitter_readers());
             source.push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
             // The final gather's module carries the cache lookup on both paths.
             let source = program::with_cache_lookup(source);
