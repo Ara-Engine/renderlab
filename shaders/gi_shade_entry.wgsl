@@ -204,6 +204,32 @@ fn gs_draw_emission(batch:u32) -> vec3<f32> {
 // 0 a draw whose program reflects nothing (written as no emission), -1 another program's
 // (mixed_cell_entry replaces this).
 fn gs_owns_draw(batch:u32) -> i32 { return 1; }
+// Listed emitter triangle k's mean emission (gi_cells.wgsl GI_EMITTER_WORDS: batch, placement and
+// triangle after its geometry): the program's emission at the three points of the degree-2
+// triangle rule, averaged. A draw's probe takes the brightest of three triangles, which is right
+// only to say whether it emits: as an estimate it overstated every dimmer part of the draw.
+fn gs_triangle_emission(k:u32) -> vec3<f32> {
+    let r=gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS;
+    let batch=gi_word(r+12u);let p=gi_word(r+13u);let t=gi_word(r+14u);
+    let i=t*3u;
+    let ia=primary_indices[batch].data[i];let ib=primary_indices[batch].data[i+1u];let ic=primary_indices[batch].data[i+2u];
+    let a=world_position(gs_input(batch,ia,p).position,p).xyz;
+    let b=world_position(gs_input(batch,ib,p).position,p).xyz;
+    let c=world_position(gs_input(batch,ic,p).position,p).xyz;
+    let g=cross(b-a,c-a);
+    if dot(g,g)<=0.0 { return vec3<f32>(0.0); }
+    let n=normalize(g);
+    var sum=vec3<f32>(0.0);
+    for(var j=0u;j<3u;j+=1u) {
+        let bary=select(select(vec2<f32>(1.0/6.0,1.0/6.0),vec2<f32>(2.0/3.0,1.0/6.0),j==1u),vec2<f32>(1.0/6.0,2.0/3.0),j==2u);
+        let q=a*(1.0-bary.x-bary.y)+b*bary.x+c*bary.y;
+        let input=decal_prepare(gs_triangle_input(p,t,bary,q,n,0.01));
+        rl_load_parameters(input.receiver.slot);
+        let e=rl_emission(surface(input),input);
+        sum+=select(vec3<f32>(0.0),e,e>=vec3<f32>(0.0));
+    }
+    return min(sum*(1.0/3.0),vec3<f32>(3.4028235e38));
+}
 @compute @workgroup_size(64) fn gi_shade_cells(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     // The emission probe, one thread per draw (gs_draw_emission).
     if id.x<gi_shade_draws[PRIMARY_BATCHES].x {
@@ -211,6 +237,12 @@ fn gs_owns_draw(batch:u32) -> i32 { return 1; }
         let at=gi_word(GI_H_MASK)+1u+id.x;
         if own==1 { gi_shade_out[at]=vec4<f32>(gs_draw_emission(id.x),1.0); }
         if own==0 { gi_shade_out[at]=vec4<f32>(0.0); }
+    }
+    // Each listed emitter triangle's mean emission, for the list's next build.
+    for(var k=id.x;k<gi_word(GI_H_EMITTER_COUNT);k+=groups.x*64u) {
+        let own=gs_owns_draw(gi_word(gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS+12u));
+        if own==1 { gi_shade_out[gi_emitter_mean_at(k)]=vec4<f32>(gs_triangle_emission(k),1.0); }
+        if own==0 { gi_shade_out[gi_emitter_mean_at(k)]=vec4<f32>(0.0,0.0,0.0,1.0); }
     }
     let count=min(gi_shade_work[GS_COUNT],gi_word(GI_H_MASK)+1u);
     let queue=gi_word(GI_H_SHADE_QUEUE);

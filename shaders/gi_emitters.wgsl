@@ -15,19 +15,18 @@
 //   (gi_hit_radiance subtracts the draw's emission), so no emitter is counted twice.
 // Shading and the final gather read the same list through gi_word (the table): one list and one
 // rule for every reader.
-const GI_H_EMITTERS:u32=57u;
-const GI_H_EMITTER_COUNT:u32=58u;
+// GI_H_EMITTERS (57), GI_H_EMITTER_COUNT (58) and GI_EMITTER_WORDS: gi_cells.wgsl.
 const GI_H_EMITTER_DRAWS:u32=59u;
 const GI_H_EMITTERS_MAX:u32=60u;
 // Nonzero: the cache's own gathers neither sample the list nor subtract emission at hits
 // (default; RENDERLAB_GI_EMITTERS=1 turns them on). Readers outside the cache are unaffected.
 const GI_H_EMITTERS_OFF:u32=43u;
-// Per triangle: a corner, its two edges and the radiance, each three f32.
-const GI_EMITTER_WORDS:u32=12u;
-// Per emitting draw after the triangles: its stable id, its batch index and its radiance
-// (src/gi_cache.rs EMITTER_DRAW_WORDS).
+// Per emitting draw after the triangles: its stable id, its batch index, its probe radiance (the
+// brightest of three sampled triangles: whether it emits, never an estimate), the index of its
+// first listed triangle, its triangle count and its first placement (src/gi_cache.rs
+// EMITTER_DRAW_WORDS).
 const GI_EMITTER_DRAWS_MAX:u32=64u;
-const GI_EMITTER_DRAW_WORDS:u32=5u;
+const GI_EMITTER_DRAW_WORDS:u32=8u;
 const GI_W_EMITTERS:u32=200u;
 const GI_W_EMITTER_DRAWS:u32=201u;
 const GI_W_EMITTER_RAYS:u32=202u;
@@ -44,7 +43,9 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
 // One thread per (placement, triangle) of the emitting draws, every frame the cache gathers: the
 // list follows moving emitters and draw changes in the frame they happen. Each draw's triangles
 // take the places after the previous emitting draws' (a running base every thread computes the
-// same), so the order does not depend on thread timing.
+// same), so the order does not depend on thread timing. A triangle's radiance is its own mean
+// emission, which cell shading evaluated last frame (gi_emitter_mean_at); a triangle not yet
+// evaluated (a new list place) takes its draw's probe for that frame.
 @compute @workgroup_size(64) fn gi_emitters_build(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let at=gi_word(GI_H_EMITTERS);
     let most=gi_word(GI_H_EMITTERS_MAX);
@@ -64,6 +65,9 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
                 gi_table[w]=d.x;
                 gi_table[w+1u]=b;
                 gi_table[w+2u]=bitcast<u32>(e.x);gi_table[w+3u]=bitcast<u32>(e.y);gi_table[w+4u]=bitcast<u32>(e.z);
+                gi_table[w+5u]=listed;
+                gi_table[w+6u]=batch_triangles(primary_batch_info(b));
+                gi_table[w+7u]=d.y;
             }
         }
         let triangles=batch_triangles(primary_batch_info(b));
@@ -82,7 +86,10 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
             gi_table[r]=bitcast<u32>(a.x);gi_table[r+1u]=bitcast<u32>(a.y);gi_table[r+2u]=bitcast<u32>(a.z);
             gi_table[r+3u]=bitcast<u32>(e1.x);gi_table[r+4u]=bitcast<u32>(e1.y);gi_table[r+5u]=bitcast<u32>(e1.z);
             gi_table[r+6u]=bitcast<u32>(e2.x);gi_table[r+7u]=bitcast<u32>(e2.y);gi_table[r+8u]=bitcast<u32>(e2.z);
-            gi_table[r+9u]=bitcast<u32>(e.x);gi_table[r+10u]=bitcast<u32>(e.y);gi_table[r+11u]=bitcast<u32>(e.z);
+            let mean=gi_outgoing[gi_emitter_mean_at(k)];
+            let radiance=select(e,mean.rgb,mean.w>0.0);
+            gi_table[r+9u]=bitcast<u32>(radiance.x);gi_table[r+10u]=bitcast<u32>(radiance.y);gi_table[r+11u]=bitcast<u32>(radiance.z);
+            gi_table[r+12u]=b;gi_table[r+13u]=p;gi_table[r+14u]=t;
         }
         listed+=total;
     }
@@ -98,6 +105,21 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
     gi_table[GI_H_EMITTER_DRAWS]=min(atomicLoad(&gi_work[GI_W_EMITTER_DRAWS]),GI_EMITTER_DRAWS_MAX);
 }
 
+// The mean emission of triangle `primitive` of placement `placement` of the draw at batch `batch`,
+// when that draw is listed, else zero: what a hit on it should take away when its emitter is
+// sampled. Readers that know the hit's triangle (hardware rays, the final gather's records).
+fn gi_triangle_emission(batch:u32, placement:u32, primitive:u32) -> vec3<f32> {
+    let n=gi_word(GI_H_EMITTER_DRAWS);
+    let base=gi_emitter_draws_at();
+    for(var j=0u;j<n;j+=1u) {
+        let w=base+j*GI_EMITTER_DRAW_WORDS;
+        if gi_word(w+1u)!=batch { continue; }
+        let k=gi_word(w+5u)+(placement-gi_word(w+7u))*gi_word(w+6u)+primitive;
+        if placement<gi_word(w+7u) || k>=gi_word(GI_H_EMITTER_COUNT) { return vec3<f32>(0.0); }
+        return gi_emitter_vec(gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS+9u);
+    }
+    return vec3<f32>(0.0);
+}
 // Listed triangle k's emitted power (W): its radiance's luminance times pi times its area.
 fn gi_emitter_power(k:u32) -> f32 {
     let r=gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS;

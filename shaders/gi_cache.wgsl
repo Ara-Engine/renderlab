@@ -230,6 +230,9 @@ fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 const GI_EXTERNAL_CAPACITY:u32=16384u;
 const GI_W_EXTERNAL:u32=220u;
 const GI_W_EXTERNAL_OVERFLOW:u32=221u;
+// The list's words 2 and 3: two counters a reader may add to (the final gather's rays and its
+// shadow rays), carried into the GI log before the clear.
+const GI_W_EXTERNAL_COUNTERS:u32=222u;
 const GI_RAW_WORDS:u32=22u;
 fn gi_raw_at(slot:u32, word:u32) -> u32 { return slot*GI_RAW_WORDS+word-1u; }
 fn gi_filter_on(term:u32) -> bool { return (gi_word(GI_H_FILTER)&term)!=0u; }
@@ -1967,6 +1970,8 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
     if id.x==0u {
         atomicAdd(&gi_work[GI_W_EXTERNAL],count);
         atomicAdd(&gi_work[GI_W_EXTERNAL_OVERFLOW],atomicLoad(&gi_external[1]));
+        atomicAdd(&gi_work[GI_W_EXTERNAL_COUNTERS],atomicLoad(&gi_external[2]));
+        atomicAdd(&gi_work[GI_W_EXTERNAL_COUNTERS+1u],atomicLoad(&gi_external[3]));
     }
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let at=4u+i*4u;

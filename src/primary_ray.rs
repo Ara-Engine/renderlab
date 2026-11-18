@@ -51,11 +51,19 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
     visibility_limits_with_fog(limits, false)
 }
-fn visibility_limits_with_fog(limits: wgpu::Limits, fog: bool) -> wgpu::Limits {
-    let storage = 13
-        + u32::from(fog)
+/// Storage buffers the visibility path's own shading stages see per stage (the reflection pass's
+/// limit checks add theirs to these).
+pub(crate) fn visibility_storage_buffers(fog: bool) -> u32 {
+    13 + u32::from(fog)
         + u32::from(crate::program::cache_hits_rough().is_some())
-        + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
+        + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true))
+}
+fn visibility_limits_with_fog(limits: wgpu::Limits, fog: bool) -> wgpu::Limits {
+    // The visibility path's own stages, or the sun shadows' heaviest pipeline where it sees more
+    // (its lighting group carries the cache-hits buffer too).
+    let storage = visibility_storage_buffers(fog).max(
+        crate::renderer::SUN_SHADOW_STORAGE_BUFFERS + u32::from(crate::program::cache_hits_rough().is_some()),
+    );
     wgpu::Limits {
         max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(if crate::material_mode::Mode::current() == crate::material_mode::Mode::Off { 5 } else { 6 }),
         max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(storage),
@@ -195,20 +203,22 @@ mod tests {
     #[test]
     fn visibility_and_traced_limits_include_virtual_lighting() {
         let limits = visibility_limits(wgpu::Limits::default());
-        // One more each while RENDERLAB_RL_CACHE_HITS or RENDERLAB_RL_PASS is set.
-        let storage = 13
-            + u32::from(crate::program::cache_hits_rough().is_some())
-            + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
+        // The visibility path's own (one more each while RENDERLAB_RL_CACHE_HITS or
+        // RENDERLAB_RL_PASS is set), or the sun shadows' heaviest pipeline.
+        let cache = u32::from(crate::program::cache_hits_rough().is_some());
+        let storage = super::visibility_storage_buffers(false)
+            .max(crate::renderer::SUN_SHADOW_STORAGE_BUFFERS + cache);
         assert_eq!(limits.max_storage_buffers_per_shader_stage, storage);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 24);
         // Fog writes one additional buffer on the RT producer only. The non-RT
         // visibility request above must retain its original limit.
         assert_eq!(
             traced_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage,
-            storage + u32::from(crate::renderer::fog_cull::enabled())
+            super::visibility_storage_buffers(crate::renderer::fog_cull::enabled())
+                .max(crate::renderer::SUN_SHADOW_STORAGE_BUFFERS + cache)
         );
         let higher = wgpu::Limits {
-            max_storage_buffers_per_shader_stage: 16,
+            max_storage_buffers_per_shader_stage: storage + 4,
             ..limits
         };
         assert_eq!(visibility_limits(higher.clone()), higher);
@@ -235,17 +245,29 @@ mod tests {
 
 #[cfg(test)]
 mod fog_limit_tests {
+    /// The request is the most any pipeline sees per stage: the visibility path's own stages
+    /// (one more buffer with the fog cull) or the sun shadows' heaviest pipeline (one more with
+    /// the cache-hits switch, in its lighting group). The fog cull's buffer raises it only where
+    /// the visibility path is the larger; a device granting exactly the request runs both.
     #[test]
-    fn fog_cull_device_request_rejects_thirteen_and_accepts_fourteen() {
+    fn fog_cull_device_request_covers_the_fog_buffer() {
+        let sun = crate::renderer::SUN_SHADOW_STORAGE_BUFFERS
+            + u32::from(crate::program::cache_hits_rough().is_some());
         let off = super::visibility_limits_with_fog(wgpu::Limits::default(), false);
         let on = super::visibility_limits_with_fog(wgpu::Limits::default(), true);
+        for (fog, limits) in [(false, &off), (true, &on)] {
+            let visibility = super::visibility_storage_buffers(fog);
+            assert_eq!(limits.max_storage_buffers_per_shader_stage, visibility.max(sun));
+        }
         assert_eq!(
-            on.max_storage_buffers_per_shader_stage,
-            off.max_storage_buffers_per_shader_stage + 1
+            super::visibility_storage_buffers(true),
+            super::visibility_storage_buffers(false) + 1,
+            "the fog cull adds one buffer to the visibility path's stages"
         );
-        assert!(!on.check_limits(&off));
+        // Off's request serves the fog cull exactly when the sun shadows already ask for more.
+        assert_eq!(on.check_limits(&off), super::visibility_storage_buffers(true) <= sun);
         let mut sufficient = off;
-        sufficient.max_storage_buffers_per_shader_stage += 1;
+        sufficient.max_storage_buffers_per_shader_stage = on.max_storage_buffers_per_shader_stage;
         assert!(on.check_limits(&sufficient));
     }
 }
