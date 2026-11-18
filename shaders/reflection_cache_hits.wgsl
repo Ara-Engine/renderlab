@@ -20,34 +20,55 @@ fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rou
     if rough<RL_CACHE_ROUGH { return vec4<f32>(0.0); }
     return rl_cache_lookup(record,origin,d,t,cone);
 }
-// rl_cache_hit for any lobe: the final gather's probe rays (gi_receiver_pass.wgsl) read it
-// too, with their own cones.
 fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
     if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
     let base=gi_level(world);
     if cone<gi_edge(base) { return vec4<f32>(0.0); }
+    let hit=primary_decode(record);
+    // A skinned or moved placement's cells lag its surface (they belong to where it was), so
+    // its hits always take the full program.
+    if batch_skinned(primary_batch_info(hit.batch)) || rl_cache_moved(hit.placement) { return vec4<f32>(0.0); }
+    let level=rl_cache_level(world,cone);
+    let bin=rl_cache_bin(record,origin,world);
+    let slot=gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin)))));
+    // Only a settled value (w 1): a cell whose gathers are still pending is marked changing
+    // (0.75, gi_shade_entry.wgsl) and an absent or unshaded one has none.
+    if slot==0xffffffffu { return vec4<f32>(0.0); }
+    let o=rl_cache_outgoing[slot];
+    return select(vec4<f32>(0.0),vec4<f32>(o.rgb,1.0),o.w>=1.0);
+}
+// The final gather's probe-hit read (gi_receiver_pass.wgsl), its only hit path: the outgoing
+// radiance (rgb, unexposed) of the hit's cell at the level the cone covers (at least the hit's
+// own level), or of the first coarser level whose cell holds a value, settled or changing; w 0
+// when none does or the cache is off. Movers read their cells too: those lag the surface by a
+// frame or so, which a probe's hemisphere integral does not show.
+fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
+    if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
+    let world=fma(d,vec3<f32>(t),origin);
+    let bin=rl_cache_bin(record,origin,world);
     let last=gi_word(GI_H_LEVELS)-1u;
-    let level=min(max(base,u32(ceil(log2(cone/gi_header_f32(GI_H_MIN_EDGE))))),last);
+    for(var l=rl_cache_level(world,cone);l<=last;l+=1u) {
+        let slot=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
+        if slot==0xffffffffu { continue; }
+        let o=rl_cache_outgoing[slot];
+        if o.w>0.0 { return vec4<f32>(o.rgb,1.0); }
+    }
+    return vec4<f32>(0.0);
+}
+// The level whose cells a cone `cone` metres wide at `world` covers, at least the point's own.
+fn rl_cache_level(world:vec3<f32>,cone:f32)->u32 {
+    let covered=u32(ceil(log2(max(cone,1e-6)/gi_header_f32(GI_H_MIN_EDGE))));
+    return min(max(gi_level(world),covered),gi_word(GI_H_LEVELS)-1u);
+}
+// The cache bin of a hit `record` at `world`: its geometric normal turned toward `origin`.
+fn rl_cache_bin(record:vec4<u32>,origin:vec3<f32>,world:vec3<f32>)->u32 {
     let hit=primary_decode(record);
     let ta=primary_input(hit.batch,hit.ia,hit.placement);
     let tb=primary_input(hit.batch,hit.ib,hit.placement);
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
     let geometric=primary_geometric(ta.position,tb.position,tc.position,hit.placement);
-    let bin=gi_bin(select(-geometric,geometric,dot(geometric,origin-world)>=0.0));
-    let slot=gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin)))));
-    // Only a settled value (w 1): a cell whose gathers are still pending is marked changing
-    // (0.75, gi_shade_entry.wgsl) and an absent or unshaded one has none.
-    var value=vec4<f32>(0.0);
-    if slot!=0xffffffffu {
-        let o=rl_cache_outgoing[slot];
-        if o.w>=1.0 { value=vec4<f32>(o.rgb,1.0); }
-    }
-    // A skinned or moved placement's cells lag its surface (they belong to where it was), so
-    // its hits always take the full program.
-    let mover=batch_skinned(primary_batch_info(hit.batch)) || rl_cache_moved(hit.placement);
-    if mover { return vec4<f32>(0.0); }
-    return value;
+    return gi_bin(select(-geometric,geometric,dot(geometric,origin-world)>=0.0));
 }
 // The placement's model changed since the previous frame (models holds both frames).
 fn rl_cache_moved(slot:u32)->bool {
