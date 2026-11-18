@@ -761,6 +761,12 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     }
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
+    // The covered fraction: a level's own texel (not a max-mip cell) whose near layer covers k
+    // of its 8 samples blocks k/8 of the directions its column would block (vd_keep).
+    if VD_FRACTION && stride==1 {
+        let k=countOneBits((vd_cover[i>>2u]>>((i&3u)*8u))&255u);
+        if k>0u && k<8u {m&=vd_keep(8u*k,vd_hash(i));}
+    }
     // Straight outlines: only a column that adds samples without covering the disk reads its
     // texel's line (one word), and only an outline texel's is clipped.
     if VD_EDGES && stride==1 && any((m&~vd_mask)!=vec2<u32>(0u)) && any(m!=vec2<u32>(0xffffffffu)) {
@@ -793,6 +799,20 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
 // Off (`RENDERLAB_VD=VD_RING=false`): every band whose max-mip clears its floor reads its whole
 // window (the same answers, more reads).
 override VD_RING:bool=true;
+// ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow.wgsl vsm_cover) ----
+override VD_FRACTION:bool=false;
+@group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
+// `count` of the 64 disk samples, spread over the disk (an odd stride through the samples' x
+// ranks, offset per texel by `h`): a column keeps blocking only these of the directions it blocks,
+// so the share it blocks is its texel's covered share.
+fn vd_keep(count:u32,h:u32)->vec2<u32> {
+    var m=vec2<u32>(0u);
+    for(var j=0u;j<count;j+=1u) {
+        let b=(j*37u+h)&63u;
+        if b<32u {m.x|=1u<<b;} else {m.y|=1u<<(b-32u);}
+    }
+    return m;
+}
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
     vd_pl=VSM_NONE;

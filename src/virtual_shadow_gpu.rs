@@ -555,6 +555,9 @@ struct Resources {
     reach: Owned<wgpu::Buffer>,
     /// The Disk lookup's edge pixel counts (WGSL `vd_edge_count`).
     edges: Owned<wgpu::Buffer>,
+    /// The covered fraction (`fraction_on`): a byte a texel, the top map's index; four bytes
+    /// when off.
+    cover: Owned<wgpu::Buffer>,
     /// The Disk lookup's per-pixel answer history, two halves ping-ponged by frame (WGSL
     /// `vd_history`), and the previous frame's world-to-clip matrix and half.
     history: Owned<wgpu::Buffer>,
@@ -844,6 +847,18 @@ pub(super) fn shader_source() -> String {
             .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl")),
         super::primary_ray_gpu::temporal_reconstruction::zones_source("vsm.zones")
     )
+    .replacen(
+        "override VSM_FRACTION:bool=false;",
+        &format!("override VSM_FRACTION:bool={};", fraction_on()),
+        1,
+    )
+}
+/// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): the page raster samples
+/// each texel at eight positions and marks the near layer's covered samples in a byte plane
+/// (WGSL `vsm_cover`); the Disk lookup lets a top column block that share of its directions.
+fn fraction_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_FRACTION").is_ok_and(|v| v.trim() == "1"))
 }
 
 /// The walk-record build module (N8g): the shared draw-slot count, then
@@ -936,7 +951,13 @@ pub(super) fn disk_source() -> String {
     // Exact hard edges (`RENDERLAB_VD_HARD_EDGES=0` keeps the map's texels there).
     let edges = "override VD_HARD_EDGES:bool=true;";
     assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
-    source.replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
+    source
+        .replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
+        .replacen(
+            "override VD_FRACTION:bool=false;",
+            &format!("override VD_FRACTION:bool={};", fraction_on()),
+            1,
+        )
 }
 /// Merges moved casters' light-space rectangles, and their screen rectangles alike, the pair
 /// whose union adds the least area first, until at most `max` remain: many movers invalidate the
@@ -1273,6 +1294,8 @@ impl VirtualState {
                     storage(33, true, reads),
                     storage(54, true, S::COMPUTE),
                     storage(55, true, writes),
+                    // The covered fraction's sample bits (`fraction_on`).
+                    storage(65, false, writes),
                 ],
             ),
             mip: group(
@@ -1424,6 +1447,8 @@ impl VirtualState {
                     storage(62, false, S::COMPUTE),
                     // Held views: the per-pixel answer history.
                     storage(63, false, S::COMPUTE),
+                    // The covered fraction's sample bits (`fraction_on`).
+                    storage(66, true, S::COMPUTE),
                 ],
             ),
         };
@@ -2001,6 +2026,11 @@ impl VirtualState {
                 B::STORAGE | B::COPY_SRC,
             ),
             edges: buffer("Disk lookup edge pixels", 16, B::STORAGE | B::COPY_SRC),
+            cover: buffer(
+                "Clipmap covered samples",
+                if fraction_on() { (map_bytes / 8).next_multiple_of(4) } else { 4 },
+                B::STORAGE,
+            ),
             history: buffer(
                 "Disk lookup answer history",
                 (u64::from(size[0]) * u64::from(size[1]) * 8).max(8),
@@ -3411,6 +3441,7 @@ impl Renderer {
                         buffer(33, &casters.work),
                         buffer(54, &r.pool),
                         buffer(55, &r.state),
+                        buffer(65, &r.cover),
                     ],
                 ),
                 mip: group(
@@ -3512,6 +3543,7 @@ impl Renderer {
                         buffer(56, &r.outline),
                         buffer(62, &r.edges),
                         buffer(63, &r.history),
+                        buffer(66, &r.cover),
                     ],
                 ),
                 queued: group(
