@@ -112,10 +112,14 @@ const FG_HALF_MIN:f32=4.0;
 // A probe ray's cone: its share of the hemisphere (2 pi / FG_RAYS sr) as an angle, so its
 // width at distance t is FG_CONE * t (the cache answers hits whose cone covers a cell).
 const FG_CONE:f32=0.6266570686577501;
-// The sky a probe ray misses into, prefiltered to the ray's cone (GGX alpha of a lobe half as
-// wide as FG_CONE): a sample of the sky in that direction, not the whole hemisphere's blur,
-// which mixed the horizon into the zenith and greyed sky-lit shadow.
-const FG_SKY_ALPHA:f32=0.09817477042468103;
+// The sky a probe ray misses into: the map's own radiance in that direction (its base level).
+// The probe's rays and history average it over the hemisphere. A lookup prefiltered to the ray's
+// cone (GGX alpha 0.098) blurred the bright haze below the horizon into the directions above it:
+// with every ray forced to miss, probes integrated 10.3% more than the open sky's irradiance
+// (gi_open_irradiance) on Glint's floor, the sky part of the gather's overshoot in sky-lit shadow.
+// At alpha 0 they integrate it within 0.01%. The whole hemisphere's blur, before that, had mixed
+// the horizon into the zenith and greyed sky-lit shadow.
+const FG_SKY_ALPHA:f32=0.0;
 const FG_SEARCH:i32=2;
 // A probe's plane reaches this fraction of its footprint along its normal (the Gaussian width).
 const FG_PLANE:f32=0.5;
