@@ -761,6 +761,12 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     }
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
+    // The covered fraction: a level's own texel (not a max-mip cell) whose near layer covers k
+    // of its 8 samples blocks k/8 of the directions its column would block (vd_keep).
+    if VD_FRACTION && stride==1 {
+        let k=countOneBits((vd_cover[i>>2u]>>((i&3u)*8u))&255u);
+        if k>0u && k<8u {m&=vd_keep(8u*k,vd_hash(i));}
+    }
     // Straight outlines: only a column that adds samples without covering the disk reads its
     // texel's line (one word), and only an outline texel's is clipped.
     if VD_EDGES && stride==1 && any((m&~vd_mask)!=vec2<u32>(0u)) && any(m!=vec2<u32>(0xffffffffu)) {
@@ -793,6 +799,30 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
 // Off (`RENDERLAB_VD=VD_RING=false`): every band whose max-mip clears its floor reads its whole
 // window (the same answers, more reads).
 override VD_RING:bool=true;
+// ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow.wgsl vsm_cover) ----
+override VD_FRACTION:bool=false;
+@group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
+// `count` of the 64 disk samples, spread over the disk (an odd stride through the samples' x
+// ranks, offset per texel by `h`): a column keeps blocking only these of the directions it blocks,
+// so the share it blocks is its texel's covered share.
+fn vd_keep(count:u32,h:u32)->vec2<u32> {
+    // Samples j*37 mod 64 for j < count (count = 8k), as constants, rotated by h.
+    var m=vec2<u32>(0xffffffffu);
+    switch count/8u {
+        case 1u {m=vec2<u32>(0x40100409u,0x02008020u);}
+        case 2u {m=vec2<u32>(0x40902449u,0x12048922u);}
+        case 3u {m=vec2<u32>(0x44992649u,0x9224c932u);}
+        case 4u {m=vec2<u32>(0x64d9364du,0x9b26c9b2u);}
+        case 5u {m=vec2<u32>(0x66d9b66du,0xdb36cdbbu);}
+        case 6u {m=vec2<u32>(0x76ddbf6fu,0xdbb6edfbu);}
+        case 7u {m=vec2<u32>(0xf6fdff7fu,0xdfbfeffbu);}
+        default {}
+    }
+    var r=h&63u;
+    if r>=32u {m=m.yx;r-=32u;}
+    if r>0u {m=vec2<u32>((m.x<<r)|(m.y>>(32u-r)),(m.y<<r)|(m.x>>(32u-r)));}
+    return m;
+}
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
     vd_pl=VSM_NONE;
