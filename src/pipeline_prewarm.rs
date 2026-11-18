@@ -10,10 +10,13 @@ impl Renderer {
         self.device.compiles_after_prepare()
     }
 
-    /// The selected view's own pipelines (its look and render scale applied): post and the
-    /// visibility buffer's. Called by `Engine::prepare_pipelines` for each view before
-    /// `prepare_scene_pipelines`.
-    pub(crate) fn prepare_view_pipelines(&mut self) -> Result<(), Error> {
+    /// The selected view's own pipelines (its look and render scale applied): post, the
+    /// visibility buffer's and, for traced shading, every program in `programs` (the loaded
+    /// opaque programs) as a frame drawing only it and, with several, as a frame drawing all
+    /// of them would build: shading sets, list pipelines and binning, reflection hits and
+    /// lighting-cache cell shading. Called by `Engine::prepare_pipelines` for each view
+    /// before `prepare_scene_pipelines`.
+    pub(crate) fn prepare_view_pipelines(&mut self, programs: &[u64]) -> Result<(), Error> {
         self.check_fault()?;
         if self.view.post_settings.enabled {
             self.post_pipelines()?;
@@ -33,7 +36,17 @@ impl Renderer {
                 } else {
                     primary_ray_gpu::Shading::Hard
                 };
+                if let Some(variant) = paths.variant {
+                    self.ensure_pipelines(programs.iter().map(|&id| (id, variant)).collect())?;
+                }
+                if programs.len() > 1 {
+                    self.ensure_lists(programs, false, shading as usize)?;
+                    self.ensure_bins()?;
+                    self.ensure_reflection_hits_for(programs, true, shading)?;
+                }
                 self.ensure_reflection_trace(shading)?;
+                self.ensure_reflection_hits_for(programs, false, shading)?;
+                self.prepare_gi_shade(programs)?;
             }
         }
         Ok(())

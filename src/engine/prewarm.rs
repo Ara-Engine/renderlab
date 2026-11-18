@@ -61,9 +61,9 @@ mod tests {
     /// entry as prepare covers more passes; the goal is [0, 0]. 18 Nov: 66 and 61 with
     /// transparency only; 31 and 25 with the lighting-cache and atmosphere kernels; 23 and 17
     /// with each view's post pipelines; 9 and 12 with the visibility buffer's and the
-    /// reflection trace's. Left: per-program pipelines (program lists and bins, reflection
-    /// hits, GI cell shading), the GI receiver, TR1's resolve and the interactive trace.
-    const LATE_BOUND: [u64; 2] = [9, 12];
+    /// reflection trace's; 4 and 7 with every program's sets, lists, bins and hits. Left:
+    /// GI cell shading, the GI receiver, TR1's resolve and the interactive trace.
+    const LATE_BOUND: [u64; 2] = [4, 7];
 
     /// Prepare's goal: once a scene is prepared, no frame compiles a pipeline, from any view
     /// of it. Three programs (the standard floor, a second opaque program, glass), then views
@@ -146,12 +146,23 @@ impl Engine {
     /// before the engine's first frame. Explicit calls do not need that environment flag.
     pub fn prepare_pipelines(&mut self) -> Result<PipelinePreparation, Error> {
         use crate::ResourceKind;
+        // The opaque programs a frame can draw: one entry per loaded program, not per material.
+        let mut programs: Vec<u64> = self
+            .state
+            .materials
+            .ids()
+            .map(|id| &self.state.materials.get(id).unwrap().material)
+            .filter(|m| m.transparency.is_none())
+            .map(|m| m.program.id())
+            .collect();
+        programs.sort_unstable();
+        programs.dedup();
         // Each view's own pipelines first, with its look applied as its frames apply it.
         let before = self.renderer.stats().ownership;
         for at in 0..self.views.len() {
             self.renderer.select_view(self.views[at].id)?;
             self.apply_look(at)?;
-            self.renderer.prepare_view_pipelines()?;
+            self.renderer.prepare_view_pipelines(&programs)?;
         }
         let after = self.renderer.stats().ownership;
         let made = |kind| after.get(kind).created - before.get(kind).created;

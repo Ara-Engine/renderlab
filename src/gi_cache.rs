@@ -1062,8 +1062,12 @@ fn lean() -> bool {
 /// One program's cell shading pipeline (G2), keyed by everything its module and layout
 /// depend on: the program and its source, the prelude, the ray path and the material
 /// group's layout (streamed or not).
+/// One program's cell shading pipeline: `key` is (program, its source and the prelude's hash,
+/// software tracing, streamed textures); `mixed` selects the entry that shades only its own
+/// draws' cells (`mixed_cell_entry`, MP1).
 struct ShadePipeline {
     key: (u64, [u8; 32], bool, bool),
+    mixed: bool,
     pipeline: Owned<wgpu::ComputePipeline>,
 }
 /// Group 1: the traced shading ABI's geometry tables, built from the same draws in
@@ -2008,10 +2012,14 @@ pub(super) struct GiState {
     /// (`RENDERLAB_GI_LOG` field `relight_parts`; measurement only).
     key_parts: Option<[[u8; 32]; 5]>,
     pub(crate) relight_parts: u32,
-    shade: Option<ShadePipeline>,
-    /// MP1: mixed-program frames' cell shading, one pipeline per reflecting program of the
-    /// frame (`mixed_cell_entry`), used instead of `shade` while `mixed_active`.
-    mixed: Vec<ShadePipeline>,
+    /// Cell shading (G2) of every program a frame has shaded or prepare has prepared, single
+    /// and mixed entries (MP1), kept while the program is loaded: a program that leaves the
+    /// view and comes back compiles nothing. A newer key for a program (an edit) replaces
+    /// its entry.
+    shading: Vec<ShadePipeline>,
+    /// This frame's entries in `shading`, in dispatch order: one single-program entry, or with
+    /// `mixed_active` the mixed entry of each reflecting program of the frame.
+    frame_shading: Vec<usize>,
     mixed_active: bool,
     /// The CPU history and per-frame plan (shared with the ara-gpu backend).
     planner: Planner,
@@ -2240,8 +2248,8 @@ impl GiState {
             draw_table: vec![],
             key_parts: None,
             relight_parts: 0,
-            shade: None,
-            mixed: vec![],
+            shading: vec![],
+            frame_shading: vec![],
             mixed_active: false,
             watch: None,
             grow: false,
@@ -3280,37 +3288,64 @@ impl Renderer {
             return Ok(false);
         }
         let streamed = state.requests;
-        let id = state.program;
-        let programs = state.programs.clone();
-        self.gi.mixed_active = programs.len() > 1;
-        if programs.len() > 1 {
-            let mut built = vec![];
-            for id in programs {
-                if !self.program_slot(id).traits.reflects {
-                    continue;
-                }
-                let mut existing = std::mem::take(&mut self.gi.mixed);
-                let key = self.gi_shade_key(id, software, streamed);
-                let pipeline = match existing.iter().position(|p| p.key == key) {
-                    Some(i) => Ok(existing.swap_remove(i)),
-                    None => self.gi_shade_pipeline(id, key, true),
-                };
-                self.gi.mixed = existing;
-                built.push(pipeline?);
+        let programs = if state.programs.len() > 1 {
+            state.programs.clone()
+        } else {
+            vec![state.program]
+        };
+        let mixed = programs.len() > 1;
+        self.gi.mixed_active = mixed;
+        let mut frame = vec![];
+        for id in programs {
+            if let Some(entry) = self.gi_shade_entry(id, software, streamed, mixed)? {
+                frame.push(entry);
             }
-            let any = !built.is_empty();
-            self.gi.mixed = built;
-            return Ok(any);
         }
+        let any = !frame.is_empty();
+        self.gi.frame_shading = frame;
+        Ok(any)
+    }
+
+    /// Program `id`'s cell shading entry in `gi.shading` (single or `mixed`), built if missing;
+    /// None when the program reflects no light. Frames and `prepare_gi_shade` call it.
+    fn gi_shade_entry(&mut self, id: u64, software: bool, streamed: bool, mixed: bool) -> Result<Option<usize>, Error> {
         if !self.program_slot(id).traits.reflects {
-            return Ok(false);
+            return Ok(None);
         }
         let key = self.gi_shade_key(id, software, streamed);
-        if self.gi.shade.as_ref().is_some_and(|p| p.key == key) {
-            return Ok(true);
+        if let Some(i) = self.gi.shading.iter().position(|p| p.key == key && p.mixed == mixed) {
+            return Ok(Some(i));
         }
-        self.gi.shade = Some(self.gi_shade_pipeline(id, key, false)?);
-        Ok(true)
+        let pipeline = self.gi_shade_pipeline(id, key, mixed)?;
+        // One entry per program and variant: an edited program's old entry is replaced.
+        if let Some(i) = self.gi.shading.iter().position(|p| {
+            p.mixed == mixed && (p.key.0, p.key.2, p.key.3) == (key.0, key.2, key.3)
+        }) {
+            self.gi.shading[i] = pipeline;
+            return Ok(Some(i));
+        }
+        self.gi.shading.push(pipeline);
+        Ok(Some(self.gi.shading.len() - 1))
+    }
+
+    /// Cell shading for every program in `ids`, as a frame drawing only that program and, when
+    /// there are several, as a frame drawing all of them would select it. Prepare calls it.
+    pub(super) fn prepare_gi_shade(&mut self, ids: &[u64]) -> Result<(), Error> {
+        let Some(state) = self.view.primary.as_ref() else {
+            return Ok(());
+        };
+        if !self.gi.settings.enabled || !self.gi.settings.bounce || state.shading_groups().is_none() {
+            return Ok(());
+        }
+        let streamed = state.requests;
+        let software = self.hardware_shadows.is_none() || self.gi.settings.force_software;
+        for &id in ids {
+            self.gi_shade_entry(id, software, streamed, false)?;
+            if ids.len() > 1 {
+                self.gi_shade_entry(id, software, streamed, true)?;
+            }
+        }
+        Ok(())
     }
 
     fn gi_shade_key(&self, id: u64, software: bool, streamed: bool) -> (u64, [u8; 32], bool, bool) {
@@ -3384,7 +3419,7 @@ impl Renderer {
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(error.to_string()));
         }
-        Ok(ShadePipeline { key, pipeline })
+        Ok(ShadePipeline { key, mixed, pipeline })
     }
 
     fn ensure_gi_layouts(&mut self) {
@@ -4649,11 +4684,7 @@ impl GiState {
                 timestamp_writes: stamps(b + 2),
             });
             // MP1: a mixed frame runs each reflecting program over the queue in turn.
-            let pipelines: Vec<_> = if self.mixed_active {
-                self.mixed.iter().collect()
-            } else {
-                self.shade.iter().collect()
-            };
+            let pipelines: Vec<_> = self.frame_shading.iter().map(|&i| &self.shading[i]).collect();
             if let (true, Some(shade)) = (plan.bounce, shade) {
                 pass.set_bind_group(0, &*g.shade, &[]);
                 pass.set_bind_group(1, shade.arrays, &[]);
