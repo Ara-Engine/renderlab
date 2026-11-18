@@ -1498,6 +1498,18 @@ impl Renderer {
     pub fn set_lod_receiver_lift(&mut self, scale: f32) {
         self.lod_lift = scale;
     }
+    /// The visibility buffer's pipelines for the current prelude, LOD lift and primary array
+    /// layout. Called before each rebuild and by `prepare_view_pipelines`.
+    pub(super) fn ensure_visibility_pipelines(&mut self) -> Result<(), Error> {
+        if self
+            .visibility_pipelines
+            .as_ref()
+            .is_none_or(|p| p.key != VisibilityPipelines::key_of(self))
+        {
+            self.visibility_pipelines = Some(VisibilityPipelines::new(self)?);
+        }
+        Ok(())
+    }
     pub(super) fn prepare_visibility_buffer(
         &mut self,
         draws: &[PreparedDraw<'_>],
@@ -1546,13 +1558,7 @@ impl Renderer {
                 || v.world != **world
         }) {
             let scopes = OperationScopes::new(&self.device);
-            if self
-                .visibility_pipelines
-                .as_ref()
-                .is_none_or(|p| p.key != VisibilityPipelines::key_of(self))
-            {
-                self.visibility_pipelines = Some(VisibilityPipelines::new(self)?);
-            }
+            self.ensure_visibility_pipelines()?;
             let next = VisibilityBuffer::new(self, self.visibility_pipelines.as_ref().unwrap(), draws, size)?;
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));

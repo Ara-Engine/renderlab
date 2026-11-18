@@ -689,6 +689,11 @@ pub struct Renderer {
     /// The visibility buffer's layouts and pipelines (`visibility_buffer::VisibilityPipelines`),
     /// kept across visibility-buffer rebuilds.
     visibility_pipelines: Option<visibility_buffer::VisibilityPipelines>,
+    /// Post's pipelines per key (`post_gpu::PostPipelines`), kept across resizes and views.
+    post_pipelines: Vec<std::sync::Arc<post_gpu::PostPipelines>>,
+    /// The GI receiver's pipelines per key (`gi_receiver_pass::ReceiverPipelines`), kept
+    /// across resizes.
+    gi_receiver_pipelines: Vec<std::sync::Arc<primary_ray_gpu::gi_receiver_pass::ReceiverPipelines>>,
     hardware_digest: Option<[u8; 32]>,
     /// Its hardware-shadow and fresh compositions, where this renderer has those paths.
     hardware_source: Option<String>,
@@ -1237,6 +1242,8 @@ impl Renderer {
             source: wgsl.to_owned(),
             source_digest: Sha256::digest(wgsl.as_bytes()).into(),
             visibility_pipelines: None,
+            post_pipelines: Vec::new(),
+            gi_receiver_pipelines: Vec::new(),
             hardware_digest: hardware_source
                 .as_deref()
                 .map(|s| Sha256::digest(s.as_bytes()).into()),
