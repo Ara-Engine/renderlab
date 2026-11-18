@@ -289,7 +289,7 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     if s.placement!=0u {
         d=fg_direction(s.normal,ray,FG_RAYS,r);
         radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
-        if fg_hit && fg_unanswered && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
+        if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
     }
     gi_sh_basis(d);
     let sky=select(radiance,vec3<f32>(0.0),fg_hit);

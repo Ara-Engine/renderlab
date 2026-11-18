@@ -47,8 +47,9 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
 // floor to the tower's side met only those, and counted as black). Fine cells first carried their
 // cell-to-cell differences into the probes: blotches a probe wide in the tower's shadow. Movers
 // read their cells too: those lag the surface by a frame or so, which a probe's hemisphere
-// integral does not show. With no value it leaves the cone level's cell in rl_cache_missed, as the cache's external
-// request list takes it (level | bin << 8, then the lattice cell).
+// integral does not show. With no value it leaves the cell to request in rl_cache_missed, as
+// the cache's external request list takes it (level | bin << 8, then the lattice cell; x
+// 0xffffffff: none).
 var<private> rl_cache_missed:vec4<u32>;
 fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
     if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
@@ -65,14 +66,28 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
     let start=rl_cache_level(world,cone);
     let last=gi_word(GI_H_LEVELS)-1u;
     // k walks start .. last, then start-1 .. own.
+    var at_start=0xffffffffu;
+    var at_own=0xffffffffu;
     for(var k=0u;k<=last-own;k+=1u) {
         let l=select(start-1u-(k-(last-start+1u)),start+k,k<=last-start);
         let slot=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
+        if l==start { at_start=slot; }
+        if l==own { at_own=slot; }
         if slot==0xffffffffu { continue; }
         let o=rl_cache_outgoing[slot];
         if o.w>0.0 { return vec4<f32>(o.rgb,1.0); }
     }
-    rl_cache_missed=vec4<u32>(start|(bin<<8u),bitcast<vec3<u32>>(vec3<i32>(floor(gi_lattice(world,gi_edge(start),bin)))));
+    // The cell to ask for: the cone level's when it is absent; the hit's own level's when the cone
+    // level's is an orphan (its probe found no surface at that level, as at a thin part's coarse
+    // cells, so it never gets a value) and the own one is absent; none while the cell there only
+    // waits for its first gather.
+    rl_cache_missed=vec4<u32>(0xffffffffu);
+    var ask=0xffffffffu;
+    if at_start==0xffffffffu { ask=start; }
+    else if (gi_word(gi_cold(at_start)+GI_C_STATE)&GI_ORPHAN)!=0u && at_own==0xffffffffu { ask=own; }
+    if ask!=0xffffffffu {
+        rl_cache_missed=vec4<u32>(ask|(bin<<8u),bitcast<vec3<u32>>(vec3<i32>(floor(gi_lattice(world,gi_edge(ask),bin)))));
+    }
     return vec4<f32>(0.0);
 }
 // The level whose cells a cone `cone` metres wide at `world` covers, at least the point's own.
