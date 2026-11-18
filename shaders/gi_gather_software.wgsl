@@ -107,6 +107,16 @@ var<workgroup> gi_drain_base:u32;
                 let h=gi_closest(origin,d,0.0,1e20);
                 let through=gi_hit_transmission;
                 rays+=1u;
+                // A direction blocked only by panes (gi_visible) sees the sky behind them, at
+                // their transmission: absolute sky radiance into the bounce sum.
+                if !h.hit && any(through<vec3<f32>(1.0)) {
+                    hits+=1u;
+                    valued+=1u;
+                    gi_sh_basis(d);
+                    let behind=gi_sky_absolute(gi_sky(d))*through*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
+                    for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=behind*gi_y[i]; }
+                    continue;
+                }
                 // A hit in a local light's near region is the aimed rays' (gi_near_gather).
                 if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }
                 hits+=1u;

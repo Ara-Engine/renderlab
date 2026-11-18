@@ -83,8 +83,16 @@ fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHi
     let n=transpose(mat3x3<f32>(m[0],m[1],m[2]))*cross(v[1]-v[0],v[2]-v[0]);
     return GiHit(true,hit.t,unit_normal(n),hit.instance_custom_data,vec3<u32>(hit.primitive_index,0u,0u),hit.barycentrics);
 }
-// Sky visibility along an unbounded ray: any hit blocks it.
+// Sky visibility along an unbounded ray: any hit blocks it. With see-through placements on
+// (GI_H_SEE_THROUGH), a pane blocks it too: the direction is then gathered (gi_gather), which
+// takes the sky behind the pane at the pane's transmission rather than all of it.
 fn gi_visible(origin:vec3<f32>, direction:vec3<f32>) -> bool {
+    if gi_word(GI_H_SEE_THROUGH)!=0u && gi_see_through[1]!=0u {
+        var query:ray_query<vertex_return>;
+        rayQueryInitialize(&query,gi_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK|SEE_THROUGH_MASK,0.0,1e20,origin,direction));
+        while rayQueryProceed(&query) {}
+        return rayQueryGetCommittedIntersection(&query).kind==0u;
+    }
     return gi_visible_within(origin,direction,1e20);
 }
 // Visibility within tmax (a light's distance): any hit blocks it.

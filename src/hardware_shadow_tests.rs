@@ -633,8 +633,11 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
             let mask = call.split(',').nth(1).unwrap().trim();
             if shadow {
                 shadow_rays += 1;
-                assert_eq!(
-                    mask, "SHADOW_CASTER_MASK",
+                // The cache's sky visibility with see-through placements on also stops at panes
+                // (shaders/gi_rays_hardware.wgsl gi_visible): a placement that casts no shadow
+                // and is not see-through stays invisible to it.
+                assert!(
+                    mask == "SHADOW_CASTER_MASK" || mask == "SHADOW_CASTER_MASK|SEE_THROUGH_MASK",
                     "{file}: a shadow ray must cull with the shadow mask: {call}"
                 );
             } else {
@@ -648,10 +651,11 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
         }
     }
     // fresh_shadows, hardware_shadows, local_light_ray, reflections (and its program template),
-    // gi_rays_hardware, the atmosphere, the reference tracer, the live reference's transmitted
+    // gi_rays_hardware (visibility within a distance, and sky visibility with see-through
+    // placements on), the atmosphere, the reference tracer, the live reference's transmitted
     // shadow ray, and reflections' rl_blocked (the final gather's emitter visibility) with its
     // software seam in program.rs.
-    assert_eq!(shadow_rays, 11);
+    assert_eq!(shadow_rays, 12);
     // Modules without scene.wgsl take the declaration after their directives.
     assert_eq!(
         crate::shadows::with_shadow_caster_mask("enable wgpu_ray_query;\nfn f() {}\n"),

@@ -1008,6 +1008,12 @@ fn gi_origin_offset(q:vec3<f32>, edge:f32) -> f32 {
 // ---- SH of the occluded sky over the fixed directions ----
 // A prepared map's radiance toward d; a constant sky caches unit radiance, and the lookup
 // scales by the current constant, so a constant-sky change needs no re-integration.
+// Sky radiance from gi_sky's cached units in absolute terms, by gi_sky_scale's rule
+// (gi_api.wgsl): the field's intensity, else the environment's.
+fn gi_sky_absolute(e:vec3<f32>) -> vec3<f32> {
+    if (gi_word(GI_H_FLAGS)&GI_F_FIELD)!=0u { return min(e*lighting.map.z,vec3<f32>(3.4028235e38)); }
+    return min(e*lighting.environment,vec3<f32>(3.4028235e38));
+}
 fn gi_sky(d:vec3<f32>) -> vec3<f32> {
     if lighting.map.w!=0.0 { return environment_radiance(environment_direction(d),GI_ENV_ROUGHNESS); }
     return vec3<f32>(1.0);
@@ -2328,6 +2334,16 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
                 let h=gi_closest(origin,d,0.0,1e20);
                 let through=gi_hit_transmission;
                 rays+=1u;
+                // A direction blocked only by panes (gi_visible) sees the sky behind them, at
+                // their transmission: absolute sky radiance into the bounce sum.
+                if !h.hit && any(through<vec3<f32>(1.0)) {
+                    hits+=1u;
+                    valued+=1u;
+                    gi_sh_basis(d);
+                    let behind=gi_sky_absolute(gi_sky(d))*through*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
+                    for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=behind*gi_y[i]; }
+                    continue;
+                }
                 // A hit in a local light's near region is the aimed rays' (gi_near_gather).
                 if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }
                 hits+=1u;
