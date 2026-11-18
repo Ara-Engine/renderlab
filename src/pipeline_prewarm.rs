@@ -47,6 +47,13 @@ impl Renderer {
                 self.ensure_reflection_trace(shading)?;
                 self.ensure_reflection_hits_for(programs, false, shading)?;
                 self.prepare_gi_shade(programs)?;
+                {
+                    use primary_ray_gpu::gi_receiver_pass as receiver;
+                    if receiver::enabled(&self.device) {
+                        let key = self.gi_receiver_key(shading, receiver::reuse());
+                        self.gi_receiver_pipelines(shading, key)?;
+                    }
+                }
                 // Temporal reconstruction, as `render_frame` turns it on for a lit frame.
                 if self.view.reconstruction.enabled
                     && !self.view.outputs.modes.data()

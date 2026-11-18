@@ -57,15 +57,6 @@ mod tests {
         }
     }
 
-    /// Compiles after prepare, per path ([non-RT, RT]), that the test still allows. Lower each
-    /// entry as prepare covers more passes; the goal is [0, 0]. 18 Nov: 66 and 61 with
-    /// transparency only; 31 and 25 with the lighting-cache and atmosphere kernels; 23 and 17
-    /// with each view's post pipelines; 9 and 12 with the visibility buffer's and the
-    /// reflection trace's; 4 and 7 with every program's sets, lists, bins and hits; 1 and 1
-    /// with cell shading and the reconstruction. Left: the GI receiver, whose pipelines live
-    /// in its size-dependent targets.
-    const LATE_BOUND: [u64; 2] = [1, 1];
-
     /// Prepare's goal: once a scene is prepared, no frame compiles a pipeline, from any view
     /// of it. Three programs (the standard floor, a second opaque program, glass), then views
     /// where each is in turn the frame's first program, one with all of them, and a cut back.
@@ -76,7 +67,7 @@ mod tests {
         use crate::engine::{Camera, ExperimentalRayQuery, MeshData, ViewDesc};
         use glam::{Mat4, Vec3};
         let adapter = super::super::test_adapter();
-        for (slot, path) in [RenderPath::NonRt, RenderPath::HardwareRt].into_iter().enumerate() {
+        for path in [RenderPath::NonRt, RenderPath::HardwareRt] {
             let mut engine = Engine::new(
                 &adapter,
                 EngineDescriptor {
@@ -126,8 +117,8 @@ mod tests {
                 }
             }
             let late = engine.renderer().compiles_after_prepare();
-            eprintln!("compiles_after_prepare {path:?}: {late} (bound {})", LATE_BOUND[slot]);
-            assert!(late <= LATE_BOUND[slot], "{path:?}: {late} compiles after prepare");
+            // Each one is logged as `pipeline_compile_after_prepare` with its label.
+            assert_eq!(late, 0, "{path:?}: {late} pipelines compiled after prepare");
         }
     }
 }
