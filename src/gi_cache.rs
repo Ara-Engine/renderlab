@@ -1899,7 +1899,8 @@ impl Planner {
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
-        if view.idle_frames >= idle_after && flags == 0 && !busy {
+        // Measurement: the BVH bench runs in the cache's encode, so a held view keeps a plan.
+        if view.idle_frames >= idle_after && flags == 0 && !busy && bvh_bench() == 0 {
             return Finished { frame, plan: None };
         }
         // The still-view batch: a still view with nothing changing still creates and gathers a
@@ -1911,6 +1912,7 @@ impl Planner {
         // most STILL_BATCH - 1 frames later. Any motion, a relight or a moved caster runs every
         // frame.
         if still_batch_on()
+            && bvh_bench() == 0
             && view.idle_frames >= STILL_BATCH
             && flags == 0
             && !busy
