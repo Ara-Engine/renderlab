@@ -167,6 +167,11 @@ pub struct Material {
     pub(crate) thin: bool,
     /// TP1: transparent materials draw only in the transparent pass.
     pub(crate) transparency: Option<crate::Transparency>,
+    /// The base colour factor (linear RGBA), kept for see-through occlusion.
+    pub(crate) base_color: [f32; 4],
+    /// A see-through material's base texture's mean alpha, once the GPU probe has read it back
+    /// (renderer/mean_alpha.rs); 1 without a base texture.
+    pub(crate) mean_alpha: Arc<std::sync::OnceLock<f32>>,
     /// Raster group 2. Streamed textures bind the renderer's 1x1 defaults here, so this
     /// group never retains their levels; passes that sample build a group of the current
     /// levels instead (`Renderer::sampling_group`).
@@ -183,6 +188,16 @@ pub struct Material {
     pub(crate) program: Program,
     pub(crate) parameters: Arc<MaterialParameters>,
     pub(crate) _allocation: Allocation,
+}
+impl Material {
+    /// The share of light a see-through surface of this material stops, for rays that carry
+    /// diffuse light: opacity times base alpha times the base texture's mean alpha (the material
+    /// factors alone until the probe has read it back); None for an opaque material.
+    pub(crate) fn see_through_coverage(&self) -> Option<f32> {
+        let t = self.transparency?;
+        let mean = self.mean_alpha.get().copied().unwrap_or(1.0);
+        Some((t.opacity * self.base_color[3] * mean).clamp(0.0, 1.0))
+    }
 }
 impl MaterialDescriptor<'_> {
     pub(crate) fn validate(&self, renderer: &Arc<()>) -> Result<(), Error> {
