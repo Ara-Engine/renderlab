@@ -503,14 +503,16 @@ fn vsm_fold(i:u32) {
 }
 // ---- The covered fraction from ids (RENDERLAB_VSM_FRACTION=1) ----
 // Both layers rasterize at texel centres. Then a texel whose 3x3 neighbourhood disagrees (an
-// occupied texel beside an empty one, another placement, or a height step of VSM_SIL_STEP texels:
-// the only texels an outline can cross) takes its samples' coverage from the triangles that
-// neighbourhood's top words and its own peel word name: the union over them of the samples
-// within the peel gap of the texel's top (the near layer), with the sample positions of
-// vsm_sample. A covered part standing above the centre's surface becomes the texel's top.
-// Interior texels keep their centre's answer (fully covered or empty): the cost follows the
-// outlines' length. A caster covering no texel centre names no id and stays unseen.
-const VSM_SIL_STEP:f32=8.0;
+// occupied texel beside an empty one, another placement, or a pair of opposite neighbours off the
+// texel's plane by more than the peel gap: the only texels an outline can cross) takes its
+// samples' coverage from the triangles that neighbourhood's top words and its own peel word name:
+// the union over them of the samples within the peel gap of the texel's top (the near layer),
+// with the sample positions of vsm_sample. A covered part standing above the centre's surface
+// becomes the texel's top. Interior texels keep their centre's answer (fully covered or empty):
+// the cost follows the outlines' length. A caster covering no texel centre names no id and stays
+// unseen (the sliver limit; the multisampled raster sees it).
+// VSM_SIL_SCAN (measurement): the neighbourhood scan alone, no triangles.
+override VSM_SIL_SCAN:bool=false;
 // The top word of window texel t of `level` whatever this frame drew; VSM_NONE outside the window
 // or on a page that is not resident.
 fn vsm_word_at(level:u32,t:vec2<i32>)->u32 {
@@ -539,31 +541,56 @@ fn vsm_id_triangle(id:u32,level:u32)->array<vec3<f32>,3> {
     }
     return out;
 }
-fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32) {
-    let w=atomicLoad(&vsm_top_map[i]);
-    let id=u32(w&0xfffffffflu);
-    let h=bitcast<f32>(u32(w>>32u));
+// A 16x16 block of texels and its one-texel apron, loaded once for the block's neighbourhood
+// scans: ids (VSM_SIL_OUT outside the window or on a page not resident) and height bits.
+const VSM_SIL_OUT:u32=0xffffffffu;
+var<workgroup> vsm_wg_sil_id:array<u32,324>;
+var<workgroup> vsm_wg_sil_h:array<f32,324>;
+var<workgroup> vsm_wg_sil_dirty:u32;
+// Loads the tile of the block whose first texel is window texel `origin` (all threads).
+fn vsm_sil_load(level:u32,origin:vec2<i32>,li:u32) {
+    for(var e=li;e<324u;e+=256u) {
+        let j=vsm_word_at(level,origin+vec2<i32>(i32(e%18u)-1,i32(e/18u)-1));
+        var id=VSM_SIL_OUT;var h=0.0;
+        if j!=VSM_NONE {
+            let o=atomicLoad(&vsm_top_map[j]);
+            id=u32(o&0xfffffffflu);h=bitcast<f32>(u32(o>>32u));
+        }
+        vsm_wg_sil_id[e]=id;vsm_wg_sil_h[e]=h;
+    }
+}
+// Texel t (map index i), at entry ce of the loaded tile.
+fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
+    let id=vsm_wg_sil_id[ce];
+    let h=vsm_wg_sil_h[ce];
     let bits=vsm.misc.x;
-    let step=VSM_SIL_STEP*vsm_texel(level)/vsm.depth.z;
+    let gap=VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z;
     var ids:array<u32,10>;var n=0u;var marked=false;
     for(var k=0u;k<9u;k+=1u) {
         if k==4u {continue;}
-        let j=vsm_word_at(level,vec2<i32>(t)+vec2<i32>(i32(k%3u)-1,i32(k/3u)-1));
-        if j==VSM_NONE {continue;}
-        let o=atomicLoad(&vsm_top_map[j]);
-        let oid=u32(o&0xfffffffflu);
-        if (oid==0u)!=(id==0u) || (oid>>bits)!=(id>>bits) || abs(bitcast<f32>(u32(o>>32u))-h)>step {marked=true;}
+        let oid=vsm_wg_sil_id[ce+k%3u+(k/3u)*18u-19u];
+        if oid==VSM_SIL_OUT {continue;}
+        if (oid==0u)!=(id==0u) || (oid>>bits)!=(id>>bits) {marked=true;}
         var seen=oid==0u;
         for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==oid;}
         if !seen {ids[n]=oid;n+=1u;}
     }
+    // The four pairs of opposite neighbours (k and 8-k): off the texel's plane by over the gap.
+    if id!=0u && !marked {
+        for(var k=0u;k<4u;k+=1u) {
+            let pa=ce+k%3u+(k/3u)*18u-19u;let pb=2u*ce-pa;
+            if vsm_wg_sil_id[pa]==VSM_SIL_OUT || vsm_wg_sil_id[pb]==VSM_SIL_OUT {continue;}
+            if abs(vsm_wg_sil_h[pa]+vsm_wg_sil_h[pb]-2.0*h)>gap {marked=true;}
+        }
+    }
     if !marked {return;}
+    if VSM_SIL_SCAN {atomicOr(&vsm_cover[i>>2u],0u);return;}
     let pid=u32(atomicLoad(&vsm_peel_map[i])&0xfffffffflu);
     for(var e=0u;e<2u;e+=1u) {
-        let c=select(pid,id,e==0u);
-        var seen=c==0u;
-        for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==c;}
-        if !seen && n<10u {ids[n]=c;n+=1u;}
+        let cid=select(pid,id,e==0u);
+        var seen=cid==0u;
+        for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==cid;}
+        if !seen && n<10u {ids[n]=cid;n+=1u;}
     }
     // Per sample, the highest covering height and its triangle's reach across the samples; per
     // triangle, the mean height of what it covers (its covered part's height).
@@ -592,27 +619,37 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32) {
         if count!=0u && sum/f32(count)>best {best=sum/f32(count);bid=ids[m];}
     }
     if bid!=id {atomicStore(&vsm_top_map[i],(u64(bitcast<u32>(best))<<32u)|u64(bid));}
-    let lowest=best-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z;
+    let lowest=best-gap;
     var cover=0u;
     for(var s=0u;s<VSM_SAMPLES;s+=1u) {
         if sz[s]>=0.0 && sz[s]>=lowest-sreach[s] {cover|=1u<<s;}
     }
     if cover!=0u {atomicOr(&vsm_cover[i>>2u],cover<<((i&3u)*8u));}
 }
-// The pass over each drawn page's texels: dense, one workgroup per page slot (its dirty rectangle).
+// The pass over each drawn page's texels, a 16x16 block at a time: dense, one workgroup per page
+// slot (its dirty rectangle).
 @compute @workgroup_size(256) fn vsm_silhouette_dense(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let slot=group.x;
-    let w=vsm_render[slot];
+    if li==0u {vsm_wg_sil_dirty=vsm_render[slot];}
+    let w=workgroupUniformLoad(&vsm_wg_sil_dirty);
     if w==0u {return;}
     let pages=vsm.counts.y;let per=pages*pages;
     let level=slot/per;let local=slot%per;
     let side=pages*VSM_PAGE;
     let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
-    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
-        let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
-        if !vsm_dirty_has(w,q) {continue;}
-        let t=corner+q;
-        vsm_silhouette(level,t,(level*side+t.y)*side+t.x);
+    let lo=vsm_dirty_lo(w)/16u;let hi=vsm_dirty_hi(w)/16u;
+    for(var by=lo.y;by<=hi.y;by+=1u) {
+        for(var bx=lo.x;bx<=hi.x;bx+=1u) {
+            let q0=vec2<u32>(bx,by)*16u;
+            vsm_sil_load(level,vec2<i32>(corner+q0),li);
+            workgroupBarrier();
+            let q=q0+vec2<u32>(li%16u,li/16u);
+            if vsm_dirty_has(w,q) {
+                let t=corner+q;
+                vsm_silhouette(level,t,(level*side+t.y)*side+t.x,(li/16u+1u)*18u+li%16u+1u);
+            }
+            workgroupBarrier();
+        }
     }
 }
 // Sparse: one workgroup per page drawn this frame.
@@ -621,9 +658,13 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32) {
     let n=vsm.counts.y;let level=v/(n*n);
     let slot=vsm_pages[vsm_section(2u)+v];
     let corner=vsm_entry_page(level,v)*VSM_PAGE;
-    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
-        let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
-        vsm_silhouette(level,corner+q,slot*VSM_PAGE*VSM_PAGE+k);
+    for(var b=0u;b<(VSM_PAGE/16u)*(VSM_PAGE/16u);b+=1u) {
+        let q0=vec2<u32>(b%(VSM_PAGE/16u),b/(VSM_PAGE/16u))*16u;
+        vsm_sil_load(level,vec2<i32>(corner+q0),li);
+        workgroupBarrier();
+        let q=q0+vec2<u32>(li%16u,li/16u);
+        vsm_silhouette(level,corner+q,slot*VSM_PAGE*VSM_PAGE+q.y*VSM_PAGE+q.x,(li/16u+1u)*18u+li%16u+1u);
+        workgroupBarrier();
     }
 }
 // The covered side's angles (virtual_shadow_disk.wgsl VD_SIDE_ANGLES).
