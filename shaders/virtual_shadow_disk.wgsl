@@ -801,7 +801,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
                 // grey a texel, stairs). Below half a texel the texel is binary as without the
                 // fraction (covered where its centre is; the exact hard edges decide outlines),
                 // blended to the rank shares by one texel.
-                var wide=smoothstep(0.5,1.0,2.0*vd_px.radius*chi/size);
+                var wide=smoothstep(VD_FR_NARROW,VD_FR_WIDE_AT,2.0*vd_px.radius*chi/size);
                 if VD_FR_WIDE>=0.0 {wide=VD_FR_WIDE;}
                 m=vd_side(m,i,k,wide);
             }
@@ -845,6 +845,9 @@ override VD_FRACTION:bool=false;
 // (vd_near); VD_FR_WIDE in 0..1 forces the regime blend (vd_side), negative computes it.
 override VD_FR_NEAR:bool=true;
 override VD_FR_WIDE:f32=-1.0;
+// The regime blend's ends, the sun cone's width at the column's top in texels (vd_side).
+override VD_FR_NARROW:f32=0.5;
+override VD_FR_WIDE_AT:f32=1.0;
 // The covered side (VD_FRACTION): a texel whose near layer covers k of its samples (vd_cover, the
 // page raster's sample bits) has its covered part on the side of those samples' centroid, n
 // (its angle replaces the bits, vsm_cover_side): the same every frame, and nested between
