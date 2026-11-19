@@ -628,7 +628,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     }
     // Per sample, the highest covering height and its triangle's reach across the samples; per
     // triangle, the mean height of what it covers (its covered part's height) and its samples.
-    for(var s=0u;s<8u;s+=1u) {vsm_sil_z[s]=-1.0;vsm_sil_reach[s]=0.0;}
+    for(var s=0u;s<8u;s+=1u) {vsm_sil_z[s]=-1.0;vsm_sil_reach[s]=0.0;vsm_sil_pl[s]=0u;}
     vsm_sil_best=select(-1.0,h,id!=0u);vsm_sil_bid=id;
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
     var inside:array<u32,VSM_SIL_IDS>;
@@ -658,10 +658,15 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
             n+=1u;
         }
     }
+    // Covered: a sample whose highest surface is in the near layer, or of the top's own mesh
+    // whatever its height (a wall's face under its top edge, a step: the caster itself, which the
+    // gap must not open; the gap parts a caster from another object under it).
     let lowest=vsm_sil_best-gap;
+    let own=vsm_sil_bid>>bits;
     var cover=0u;
     for(var s=0u;s<VSM_SAMPLES;s+=1u) {
-        if vsm_sil_z[s]>=0.0 && vsm_sil_z[s]>=lowest-vsm_sil_reach[s] {cover|=1u<<s;}
+        let near=vsm_sil_z[s]>=0.0 && vsm_sil_z[s]>=lowest-vsm_sil_reach[s];
+        if near || (own!=0u && vsm_sil_pl[s]==own) {cover|=1u<<s;}
     }
     // The silhouette map: the outline crossing this texel as a line. Of the edges of the near
     // layer's triangles (a plane reaching the near layer at the texel) that cross the texel's
@@ -746,8 +751,8 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
         atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(bid));
     }
     // The texel's binary answer (vd_side, vd_near): its centre's own surface is in the near
-    // layer of the final top (a promotion to a higher triangle of the same caster keeps it).
-    if partial {vsm_cover_line(i,ln,ls,id!=0u && h>=best-gap);}
+    // layer of the final top or of its mesh (a promotion within one caster keeps it).
+    if partial {vsm_cover_line(i,ln,ls,id!=0u && (h>=best-gap || (id>>bits)==(bid>>bits)));}
 }
 // The share of the unit square past offset s along unit n (vsm_area_offset's inverse).
 fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
@@ -781,6 +786,8 @@ const VSM_SIL_IDS:u32=32u;
 // its triangle's reach, and the highest covered part's mean height and triangle.
 var<private> vsm_sil_z:array<f32,8>;
 var<private> vsm_sil_reach:array<f32,8>;
+// The placement + 1 of each sample's highest covering triangle (0: none).
+var<private> vsm_sil_pl:array<u32,8>;
 var<private> vsm_sil_best:f32;
 var<private> vsm_sil_bid:u32;
 // Triangle `tid` against the texel's samples: updates the per-sample state; its inside mask.
@@ -799,7 +806,7 @@ fn vsm_sil_triangle(tid:u32,level:u32,centre:vec2<f32>)->u32 {
         let wb=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p))/area;
         if any(wb<vec3<f32>(0.0)) {continue;}
         let zs=dot(wb,z);
-        if zs>vsm_sil_z[s] {vsm_sil_z[s]=zs;vsm_sil_reach[s]=reach;}
+        if zs>vsm_sil_z[s] {vsm_sil_z[s]=zs;vsm_sil_reach[s]=reach;vsm_sil_pl[s]=tid>>vsm.misc.x;}
         sum+=zs;mask|=1u<<s;
     }
     let count=countOneBits(mask);
