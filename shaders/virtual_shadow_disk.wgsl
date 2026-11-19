@@ -779,8 +779,8 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
     // The covered fraction: a level's own texel (not a max-mip cell) whose near layer covers k
-    // eighths of its samples (the top word's low bits, vsm_fold) blocks the k/8 of the directions
-    // its column would block that cross its covered side (vd_side).
+    // eighths of its samples (the top word's low bits, vsm_fold) blocks only the directions through
+    // the k/8 of its square on its covered side (vd_half).
     if VD_FRACTION && stride==1 {
         let k=top.y&7u;
         // Measurement (VD_COUNTS, the edge log's words 5-7): columns of a level's own texel read,
@@ -789,7 +789,9 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
             atomicAdd(&vd_edge_count[5],1u);
             if k!=0u {atomicAdd(&vd_edge_count[6],1u);if any(m!=vec2<u32>(0u)) {atomicAdd(&vd_edge_count[7],1u);}}
         }
-        if k!=0u {m=vd_side(m,i,k);}
+        if k!=0u {
+            if VD_SIDE_RANK {m=vd_side(m,i,k);} else {m=vd_half(m,i,k,c-p.xy,size,clo,chi);}
+        }
     }
     // Straight outlines: only a column that adds samples without covering the disk reads its
     // texel's line (one word), and only an outline texel's is clipped.
@@ -826,11 +828,9 @@ override VD_RING:bool=true;
 // ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow.wgsl vsm_cover) ----
 override VD_FRACTION:bool=false;
 // The covered side (VD_FRACTION): a texel whose near layer covers k of its samples (vd_cover, the
-// page raster's sample bits) has its covered part on the side of those samples' centroid, n. A
-// ray through the texel crosses it further along n the larger n . s of its disk sample s is (the
-// offsets from the receiver and the texel centre are the same for every direction), so the
-// column blocks, of the directions it would block, the k/8 furthest along n: the same every frame,
-// and nested between neighbouring texels of one edge (no texture of per-texel subsets).
+// page raster's sample bits) has its covered part on the side of those samples' centroid, n
+// (its angle replaces the bits, vsm_cover_side): the same every frame, and nested between
+// neighbouring texels of one edge (no texture of per-texel subsets).
 @group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
 // Per angle a of n (VD_SIDE_ANGLES of them) and rank r in 0..=64: the mask of the r sample
 // directions furthest along n (two u32s each; virtual_shadow_gpu.rs `side_table`).
@@ -841,8 +841,32 @@ fn vd_side_mask(a:u32,r:u32)->vec2<u32> {
     let v=vd_sides[i>>1u];
     return select(v.xy,v.zw,(i&1u)==1u);
 }
+// The covered part as a half-plane of the texel's square (the default): beyond a line across it,
+// normal to its covered side n, placed so that k/8 of the square lies past it. The column's
+// directions m (a texel of side `size` centred `c` from the receiver, from height `lo` to `hi`)
+// keep those through that part at some height. A narrow cone (a contact shadow) then sees the
+// line where it crosses the texel, not k/8 of every direction: rank shares (vd_side,
+// `RENDERLAB_VD=VD_SIDE_RANK=true`) give each texel one grey, a staircase at hard edges.
+override VD_SIDE_RANK:bool=false;
+fn vd_half(m:vec2<u32>,i:u32,k:u32,c:vec2<f32>,size:f32,lo:f32,hi:f32)->vec2<u32> {
+    let a=f32(((vd_cover[i>>2u]>>((i&3u)*8u))&255u)%VD_SIDE_ANGLES)*(6.28318531/f32(VD_SIDE_ANGLES));
+    let n=vec2<f32>(cos(a),sin(a));
+    // The offset s (texels from the centre along n) past which the unit square holds area f: its
+    // projection on n is a trapezoid, a plateau 1/u high between corner ramps of area v/2u.
+    let f=f32(k)/8.0;
+    let u=max(abs(n.x),abs(n.y));let v=min(abs(n.x),abs(n.y));
+    let ramp=v/(2.0*u);
+    var s=u*(0.5-f);
+    if f<ramp {s=0.5*(u+v)-sqrt(2.0*u*v*f);}
+    else if f>1.0-ramp {s=sqrt(2.0*u*v*(1.0-f))-0.5*(u+v);}
+    // The part is n . x >= q (metres, from the receiver); a direction d meets it at some height
+    // in lo..hi where n . d >= q / hi (q > 0) or q / lo (q <= 0).
+    let q=dot(c,n)+s*size;
+    let reach=q/select(lo,hi,q>0.0);
+    return m&vd_plane(vec3<f32>(n,-reach),1.0);
+}
 // Of the directions in m (a column of texel i whose near layer covers k eighths), the k/8 through
-// its covered side.
+// its covered side (VD_SIDE_RANK).
 fn vd_side(m:vec2<u32>,i:u32,k:u32)->vec2<u32> {
     let c=countOneBits(m.x)+countOneBits(m.y);
     let t=(k*c+4u)/8u;
