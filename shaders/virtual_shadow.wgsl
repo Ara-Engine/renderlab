@@ -571,15 +571,10 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     let h=vsm_wg_sil_h[ce];
     let bits=vsm.misc.x;
     let gap=VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z;
-    var ids:array<u32,10>;var n=0u;var marked=false;
+    var marked=false;
     for(var k=0u;k<9u;k+=1u) {
-        if k==4u {continue;}
         let oid=vsm_wg_sil_id[ce+k%3u+(k/3u)*18u-19u];
-        if oid==VSM_SIL_OUT {continue;}
-        if (oid==0u)!=(id==0u) || (oid>>bits)!=(id>>bits) {marked=true;}
-        var seen=oid==0u;
-        for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==oid;}
-        if !seen {ids[n]=oid;n+=1u;}
+        if oid!=VSM_SIL_OUT && ((oid==0u)!=(id==0u) || (oid>>bits)!=(id>>bits)) {marked=true;}
     }
     // The four pairs of opposite neighbours (k and 8-k): off the texel's plane by over the gap.
     if id!=0u && !marked {
@@ -591,6 +586,15 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     }
     if !marked {return;}
     if VSM_SIL_SCAN {atomicOr(&vsm_cover[i>>2u],0u);return;}
+    // The candidates (marked texels only): the neighbours' tops, then the texel's own two words.
+    var ids:array<u32,10>;var n=0u;
+    for(var k=0u;k<9u;k+=1u) {
+        if k==4u {continue;}
+        let oid=vsm_wg_sil_id[ce+k%3u+(k/3u)*18u-19u];
+        var seen=oid==0u || oid==VSM_SIL_OUT;
+        for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==oid;}
+        if !seen {ids[n]=oid;n+=1u;}
+    }
     let pid=u32(atomicLoad(&vsm_peel_map[i])&0xfffffffflu);
     for(var e=0u;e<2u;e+=1u) {
         let cid=select(pid,id,e==0u);
