@@ -4352,8 +4352,8 @@ impl Renderer {
             label: Some("N8c clipmap max-mips"),
             timestamp_writes: None,
         });
-        // The covered fraction: the silhouette texels' samples from ids (unless multisampled), then
-        // the count into the drawn texels' top words (before the mips read them).
+        // The covered fraction, before the mips read the top words: the silhouette texels' samples
+        // from ids, folded as they are found; or, multisampled, the count of the raster's samples.
         if fraction_mode() == 1 {
             pass.set_bind_group(0, &*g.raster, &[]);
             pass.set_bind_group(1, arrays, &[]);
@@ -4367,7 +4367,7 @@ impl Renderer {
                 pass.dispatch_workgroups(slots as u32, 1, 1);
             }
         }
-        if fraction_on() {
+        if fraction_mode() == 2 {
             pass.set_bind_group(0, &*g.raster, &[]);
             if r.sparse {
                 pass.set_pipeline(&p.fold[1]);

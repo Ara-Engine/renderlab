@@ -467,29 +467,34 @@ fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k]
     for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
         atomicStore(&vsm_top_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
         atomicStore(&vsm_peel_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
-        if VSM_FRACTION {vsm_cover_clear(slot*VSM_PAGE*VSM_PAGE+k);}
+        if VSM_MSAA {vsm_cover_clear(slot*VSM_PAGE*VSM_PAGE+k);}
     }
 }
-// Zeroes texel i's covered-sample byte (four texels share a word).
+// Zeroes texel i's covered-sample byte (four texels share a word): multisampled only, as the ids'
+// pass writes the byte of each texel it finds partly covered and the lookup reads no other.
 fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>2u],~(255u<<((i&3u)*8u)));}
-// After both raster layers: texel i's near-layer sample count goes into its top word's low three
-// height bits (1-7; 0 where it covers none or all eight), so the Disk lookup reads it with the
-// height it loads anyway. The height moves by at most seven of its last bits (under 2^-21 of the
-// depth range), which every other reader of the word ignores.
+// After both raster layers (multisampled; the ids' pass folds in vsm_silhouette): texel i's
+// near-layer sample count goes into its top word's low three height bits (1-7; 0 where it covers
+// none or all eight), so the Disk lookup reads it with the height it loads anyway. The height
+// moves by at most seven of its last bits (under 2^-21 of the depth range), which every other
+// reader of the word ignores.
 fn vsm_fold(i:u32) {
     let w=atomicLoad(&vsm_top_map[i]);
     if (w&0xfffffffflu)==0lu {return;}
-    let shift=(i&3u)*8u;
-    var bits=(atomicLoad(&vsm_cover[i>>2u])>>shift)&255u;
+    let bits=(atomicLoad(&vsm_cover[i>>2u])>>((i&3u)*8u))&255u;
     // Eighths of the texel, whatever the sample count.
     let k=countOneBits(bits)*(8u/VSM_SAMPLES);
     let partial=k>0u && k<8u;
     let h=(u32(w>>32u)&~7u)|select(0u,k,partial);
     if h!=u32(w>>32u) {atomicStore(&vsm_top_map[i],(u64(h)<<32u)|(w&0xfffffffflu));}
     // Only a partly covered texel needs its side (the lookup reads the byte where k is 1-7).
-    if !partial {return;}
-    // The covered side for the Disk lookup (virtual_shadow_disk.wgsl vd_side): the angle of the
-    // covered samples' centroid from the texel centre, one of VSM_SIDE_ANGLES, replaces the bits.
+    if partial {vsm_cover_side(i,bits);}
+}
+// The covered side for the Disk lookup (virtual_shadow_disk.wgsl vd_side): the angle of the
+// covered samples' centroid from texel i's centre, one of VSM_SIDE_ANGLES, becomes its byte.
+fn vsm_cover_side(i:u32,covered:u32) {
+    let shift=(i&3u)*8u;
+    var bits=covered;
     var g=vec2<f32>(0.0);
     while bits!=0u {
         g+=vsm_sample(firstTrailingBit(bits));
@@ -618,13 +623,19 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
         }
         if count!=0u && sum/f32(count)>best {best=sum/f32(count);bid=ids[m];}
     }
-    if bid!=id {atomicStore(&vsm_top_map[i],(u64(bitcast<u32>(best))<<32u)|u64(bid));}
     let lowest=best-gap;
     var cover=0u;
     for(var s=0u;s<VSM_SAMPLES;s+=1u) {
         if sz[s]>=0.0 && sz[s]>=lowest-sreach[s] {cover|=1u<<s;}
     }
-    if cover!=0u {atomicOr(&vsm_cover[i>>2u],cover<<((i&3u)*8u));}
+    // The fold (vsm_fold) here, as no other pass writes this texel's samples: the count in the
+    // top word's low height bits (the raster cleared them) with any promotion, and the side.
+    let k=countOneBits(cover);
+    let partial=k>0u && k<8u;
+    if bid!=id || partial {
+        atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(bid));
+    }
+    if partial {vsm_cover_side(i,cover);}
 }
 // The pass over each drawn page's texels, a 16x16 block at a time: dense, one workgroup per page
 // slot (its dirty rectangle).
@@ -706,7 +717,7 @@ const VSM_SIDE_ANGLES:u32=32u;
         let i=(level*side+t.y)*side+t.x;
         atomicStore(&vsm_top_map[i],0lu);
         atomicStore(&vsm_peel_map[i],0lu);
-        if VSM_FRACTION {vsm_cover_clear(i);}
+        if VSM_MSAA {vsm_cover_clear(i);}
     }
 }
 // The map word of one caster fragment at texel t of `level` (normalized height in [0,1]).
@@ -721,7 +732,9 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     if vsm_sparse() {
         i=vsm_pages[vsm_section(2u)+v]*VSM_PAGE*VSM_PAGE+(t.y%VSM_PAGE)*VSM_PAGE+t.x%VSM_PAGE;
     }
-    let value=(u64(bitcast<u32>(clamp(height,0.0,1.0)))<<32u)|u64(id);
+    // Under VSM_FRACTION the low three height bits are the covered count's (vsm_fold), zero here.
+    let hb=bitcast<u32>(clamp(height,0.0,1.0));
+    let value=(u64(select(hb,hb&~7u,VSM_FRACTION))<<32u)|u64(id);
     if VSM_PEEL_PASS {
         // Only one triangle of a watertight surface covers a texel centre, so this is the
         // next surface down.
