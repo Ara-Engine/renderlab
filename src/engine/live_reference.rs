@@ -3,7 +3,9 @@
 //! it. Armed like the scene dump: once `<dir>/arm` exists (a label line), the next view rendered
 //! is traced into `<dir>/<label>/`; `RENDERLAB_LIVE_REFERENCE=<dir>;<frame>,...` also traces the
 //! listed renderer frames as `frame-<id>`, for frame-locked hosts such as a replay.
-//! `RENDERLAB_LIVE_REFERENCE_SAMPLES` sets the samples per pixel (default 16384).
+//! `RENDERLAB_LIVE_REFERENCE_SAMPLES` sets the samples per pixel (default 16384), and
+//! `RENDERLAB_LIVE_REFERENCE_DEPTH` the path segments (default 1024; 2 is the direct light at the
+//! visible surface, src/reference_live.rs `max_depth`), to split a source's light by bounce.
 //! Each traced view writes `reference.pfm` (the linear mean, cd/m^2, rows bottom to top),
 //! `reference-half0.pfm` and `-half1.pfm` (independent halves), `reference.png` (the mean through
 //! AcesFit and sRGB at the frame's exposure) and `reference.json` (main-thread/ref/README.md's
@@ -17,6 +19,7 @@ pub(super) struct LiveReference {
     dir: PathBuf,
     frames: Vec<u64>,
     samples: u32,
+    depth: u32,
     environments: HashMap<EnvironmentId, Arc<PreparedEnvironment>>,
 }
 
@@ -28,7 +31,8 @@ impl LiveReference {
             None => (value.as_str(), vec![]),
         };
         let samples = std::env::var("RENDERLAB_LIVE_REFERENCE_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(16384);
-        Some(Self { dir: dir.into(), frames, samples, environments: HashMap::new() })
+        let depth = std::env::var("RENDERLAB_LIVE_REFERENCE_DEPTH").ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+        Some(Self { dir: dir.into(), frames, samples, depth, environments: HashMap::new() })
     }
     pub(super) fn environment(&mut self, id: EnvironmentId, data: &PreparedEnvironment) {
         self.environments.insert(id, Arc::new(data.clone()));
@@ -179,12 +183,13 @@ impl Engine {
             lights,
             light_radii,
             samples: live.samples,
-            max_depth: 1024,
+            max_depth: live.depth,
             seed: 0x4d37_5530,
             progress: true,
             fog: crate::reference_live::Fog::of(&atmosphere),
         };
         let samples = inputs.samples;
+        let depth = inputs.max_depth;
         // The traced medium, recorded with the picture (null: none).
         let fog = inputs.fog.map_or("null".to_string(), |f| format!("{{\"density\":{},\"falloff\":{},\"base_height\":{},\"extra_density\":{},\"extra_radius\":{},\"albedo\":[{},{},{}],\"anisotropy\":{}}}", f.density, f.falloff, f.base_height, f.extra_density, f.extra_radius, f.albedo[0], f.albedo[1], f.albedo[2], f.anisotropy));
         let started = std::time::Instant::now();
@@ -197,7 +202,7 @@ impl Engine {
         ppm(&out.join("reference.ppm"), size, &image.mean, stops)?;
         let list = not_traced.iter().map(|g| format!("{g:?}")).collect::<Vec<_>>().join(",");
         let json = format!(
-            "{{\"samples\":{samples},\"seconds\":{seconds},\"invalid_pixels\":{},\"size\":[{},{}],\"exposure_stops\":{stops},\"display_transform\":\"AcesFit+sRGB at the engine view's exposure\",\"method\":\"renderlab::reference_live: the engine's own scene and material programs, unidirectional path tracing, NEE + MIS, Russian roulette; fog as a physical medium on every ray; no reuse or denoising\",\"fog\":{fog},\"not_traced\":[{list}],\"sky_check\":null,\"masked_fraction\":0,\"camera\":{{\"eye\":[{},{},{}],\"forward\":[{},{},{}],\"fov_y\":{}}},\"path\":\"{:?}\"}}\n",
+            "{{\"samples\":{samples},\"max_depth\":{depth},\"seconds\":{seconds},\"invalid_pixels\":{},\"size\":[{},{}],\"exposure_stops\":{stops},\"display_transform\":\"AcesFit+sRGB at the engine view's exposure\",\"method\":\"renderlab::reference_live: the engine's own scene and material programs, unidirectional path tracing, NEE + MIS, Russian roulette; fog as a physical medium on every ray; no reuse or denoising\",\"fog\":{fog},\"not_traced\":[{list}],\"sky_check\":null,\"masked_fraction\":0,\"camera\":{{\"eye\":[{},{},{}],\"forward\":[{},{},{}],\"fov_y\":{}}},\"path\":\"{:?}\"}}\n",
             image.invalid_pixels, size[0], size[1], eye.x, eye.y, eye.z, forward.x, forward.y, forward.z, camera.fov_y(), self.path
         );
         std::fs::write(out.join("reference.json"), json).map_err(|_| Error::InvalidInput("live reference write failed"))?;
