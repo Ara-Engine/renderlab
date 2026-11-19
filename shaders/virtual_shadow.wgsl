@@ -767,8 +767,13 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     }
     // The fold (vsm_fold) here, as no other pass writes this texel's samples: the count in the
     // top word's low height bits (the raster cleared them) with any promotion, and the line.
+    // A promotion within the centre's own mesh raises the height only: the word keeps the triangle
+    // under the centre, which the Disk lookup's exact hard edges name (vd_edge_triangles; with a
+    // neighbouring triangle of the caster named instead, pixels whose cone that triangle misses
+    // came out fully lit inside Showcase's shadows).
+    let word_id=select(bid,id,id!=0u && (bid>>bits)==(id>>bits));
     if bid!=id || partial {
-        atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(bid));
+        atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(word_id));
     }
     // The texel's binary answer (vd_side, vd_near): its centre's own surface is in the near
     // layer of the final top or of its mesh (a promotion within one caster keeps it).
