@@ -928,6 +928,10 @@ pub struct IndirectCounters {
     pub emitter_draws: u32,
     pub emitter_rays: u32,
     pub emitters_dropped: u32,
+    /// Listed triangles without an evaluated mean (their draw's probe stands in), and listed
+    /// triangles of emitting draws whose radiance is zero.
+    pub emitters_unevaluated: u32,
+    pub emitters_zero: u32,
     pub gather_unshaded: u32,
     pub gather_orphans: u32,
     /// Gather rays a coarser level answered because the hit level's cell is an orphan, and
@@ -3172,6 +3176,8 @@ impl Renderer {
             emitter_draws: w[201],
             emitter_rays: w[202],
             emitters_dropped: w[203],
+            emitters_unevaluated: w[208],
+            emitters_zero: w[209],
             gather_unshaded: w[40],
             gather_orphans: w[41],
             gather_coarse_orphan: w[204],
