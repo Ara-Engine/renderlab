@@ -86,4 +86,12 @@ impl Renderer {
         }
         self.view.virtual_shadows.as_ref()?.atmosphere_buffers()
     }
+    /// Whether this view's frames will read the sun map in reflection hits: as
+    /// `hit_sun_buffers`, but before the virtual shadows' resources exist (a frame allocates
+    /// them before it builds its hit pipelines). Prepare builds the hit pipelines for it.
+    pub(in crate::renderer) fn hit_sun_planned(&self) -> bool {
+        on() && !self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            && self.device.limits().max_bind_groups > GROUP
+            && self.view.virtual_shadows.is_some()
+    }
 }
