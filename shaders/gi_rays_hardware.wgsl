@@ -12,7 +12,7 @@
 struct GiHit { hit:bool, t:f32, normal:vec3<f32>, inst:u32, tri:vec3<u32>, bary:vec2<f32> };
 // ---- see-through placements (docs/design-see-through-occlusion.md) ----
 // The TLAS's see-through placements (SEE_THROUGH_MASK) are built on non-opaque copies of their
-// meshes: with the switch on, a closest-hit ray adds their bit to its mask and the traversal hands
+// meshes: with the switch on (the default; RENDERLAB_GI_SEE_THROUGH=0 turns it off), a closest-hit ray adds their bit to its mask and the traversal hands
 // their triangles over as candidates, while opaque geometry still commits in hardware. Each
 // candidate's share is kept with its distance (the first GI_SEE_THROUGH_KEPT; past them, their
 // product at the farthest), and only those nearer than the committed hit are applied: one
