@@ -46,6 +46,10 @@ struct Compilation {
     /// lazy first-use compile in a frame, counted in `late` and logged loudly.
     prepared: std::sync::atomic::AtomicBool,
     late: AtomicU64,
+    /// Every pipeline created and the nanoseconds spent creating them, for the pass log's
+    /// per-frame compile columns (`compile_totals`).
+    compiled_count: AtomicU64,
+    compiled_nanos: AtomicU64,
 }
 
 /// Internal device facade: all render paths share one driver cache, including
@@ -117,6 +121,8 @@ impl PipelineDevice {
                 log: crate::pipeline_log::PipelineLog::from_env(),
                 prepared: std::sync::atomic::AtomicBool::new(false),
                 late: AtomicU64::new(0),
+                compiled_count: AtomicU64::new(0),
+                compiled_nanos: AtomicU64::new(0),
             }),
         }
     }
@@ -130,6 +136,15 @@ impl PipelineDevice {
     /// Pipelines created since the last `mark_prepared`; 0 when the engine was never prepared.
     pub fn compiles_after_prepare(&self) -> u64 {
         self.compilation.late.load(Ordering::Relaxed)
+    }
+    /// Pipelines created by this device so far, and the nanoseconds their creation took
+    /// (waits for a compile slot excluded). The pass log books the difference between two
+    /// frames to the later one.
+    pub fn compile_totals(&self) -> (u64, u64) {
+        (
+            self.compilation.compiled_count.load(Ordering::Relaxed),
+            self.compilation.compiled_nanos.load(Ordering::Relaxed),
+        )
     }
     /// Custom preludes can feed any engine shading stage. Latch checks on for this
     /// device and its reload workers before compiling one; existing trusted modules
@@ -198,6 +213,10 @@ impl PipelineDevice {
         let result = compile();
         let duration = start.elapsed();
         drop(slot);
+        self.compilation.compiled_count.fetch_add(1, Ordering::Relaxed);
+        self.compilation
+            .compiled_nanos
+            .fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
         if self.compilation.prepared.load(Ordering::Relaxed) {
             // Loud by design: prepare should have created it, and a frame waited for it.
             let late = self.compilation.late.fetch_add(1, Ordering::Relaxed) + 1;
@@ -293,10 +312,18 @@ impl PipelineDevice {
 /// once passed 8 GB and unbounded cold starts reached 18 GB private. The default of one
 /// keeps a cold start near one kernel's peak (docs/p-pipe.md) at the cost of compiling
 /// serially. `RENDERLAB_PIPELINE_COMPILES` raises it (at least 1).
+///
+/// 19 Nov (NVIDIA, current driver): a cold start compiling 52 pipelines, the program shading
+/// kernels included, never moved the player's private bytes more than about 150 MB within
+/// half a second, so a compile now holds far less. Prepare (`with_compile_slots`) holds four
+/// slots while it runs (`RENDERLAB_PREPARE_COMPILES`), so a loading screen compiles four at a
+/// time; frames keep the base limit.
 struct CompileSlot;
 static SLOTS: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+/// Slots added to the base limit while a prepare runs (`with_compile_slots`).
+static EXTRA_SLOTS: AtomicU64 = AtomicU64::new(0);
 impl CompileSlot {
-    fn limit() -> usize {
+    fn base() -> usize {
         static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         *LIMIT.get_or_init(|| {
             std::env::var("RENDERLAB_PIPELINE_COMPILES")
@@ -305,6 +332,9 @@ impl CompileSlot {
                 .unwrap_or(1usize)
                 .max(1)
         })
+    }
+    fn limit() -> usize {
+        Self::base() + EXTRA_SLOTS.load(Ordering::Relaxed) as usize
     }
     fn acquire() -> Self {
         let (busy, freed) = &SLOTS;
@@ -323,6 +353,33 @@ impl Drop for CompileSlot {
     }
 }
 
+/// Runs `f` with at least `slots` compile slots (`CompileSlot`): prepare's fan-out
+/// (`program_gpu::in_parallel`) then compiles that many pipelines at once. Nested and
+/// concurrent calls add up their extra slots; each returns its own when `f` ends.
+pub(crate) fn with_compile_slots<R>(slots: usize, f: impl FnOnce() -> R) -> R {
+    let extra = slots.saturating_sub(CompileSlot::base()) as u64;
+    EXTRA_SLOTS.fetch_add(extra, Ordering::Relaxed);
+    SLOTS.1.notify_all();
+    struct Restore(u64);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EXTRA_SLOTS.fetch_sub(self.0, Ordering::Relaxed);
+        }
+    }
+    let _restore = Restore(extra);
+    f()
+}
+/// Compile slots prepare holds (`RENDERLAB_PREPARE_COMPILES`, default 4, at least 1).
+pub(crate) fn prepare_compile_slots() -> usize {
+    static SLOTS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *SLOTS.get_or_init(|| {
+        std::env::var("RENDERLAB_PREPARE_COMPILES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4usize)
+            .max(1)
+    })
+}
 /// Resolves once when the device facade is created, so reloads use the same policy.
 pub(crate) fn engine_shader_checks(default: bool) -> bool {
     match std::env::var("RENDERLAB_ENGINE_SHADER_CHECKS").as_deref() {
