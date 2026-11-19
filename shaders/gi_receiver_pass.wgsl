@@ -431,15 +431,30 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
         fg_nee_sh[lane][k*3u+2u]+=light.z*gi_y[k];
     }
 }
-// Folds the FG_RAYS lanes from `first` of fg_lane_sh into probe `index`, now at s: history
-// while the new point stays on the old probe's plane.
+// Sums each probe's FG_RAYS lanes into its first lane's row, each lane summing its own coefficients
+// (in the lanes' order, so the sums are a serial loop's), for fg_accumulate. One lane summing all 16
+// rows of 52 alone, its probe's other lanes idle, cost 0.45 ms on Glint without ray hardware.
+fn fg_reduce(lane:u32) {
+    let first=(lane/FG_RAYS)*FG_RAYS;
+    for(var i=lane%FG_RAYS;i<52u;i+=FG_RAYS) {
+        var sum=0.0;
+        if i<40u {
+            for(var l=0u;l<FG_RAYS;l+=1u) {sum+=fg_lane_sh[first+l][i];}
+            fg_lane_sh[first][i]=sum;
+        } else {
+            for(var l=0u;l<FG_RAYS;l+=1u) {sum+=fg_nee_sh[first+l][i-40u];}
+            fg_nee_sh[first][i-40u]=sum;
+        }
+    }
+}
+// Folds the lanes from `first` (summed into that row by fg_reduce) into probe `index`, now at s:
+// history while the new point stays on the old probe's plane.
 fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
     var sh:array<f32,40>;
     var nee:array<f32,12>;
-    for(var l=0u;l<FG_RAYS;l+=1u) {
-        for(var i=0u;i<40u;i+=1u) {sh[i]+=fg_lane_sh[first+l][i];}
-        for(var i=0u;i<12u;i+=1u) {nee[i]+=fg_nee_sh[first+l][i];}
-    }
+    // fg_reduce left each sum in the probe's first row.
+    for(var i=0u;i<40u;i+=1u) {sh[i]=fg_lane_sh[first][i];}
+    for(var i=0u;i<12u;i+=1u) {nee[i]=fg_nee_sh[first][i];}
     // Uniform hemisphere: pdf 1/(2 pi), over the rays with an answer (the others stand for their
     // average). The emitter samples were divided by the full ray count's scale (fg_nee).
     let scale=6.283185307179586/max(sh[FG_ANSWERED],1.0);
@@ -505,6 +520,8 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     var traced=s;
     if keep {traced.placement=0u;}
     fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
+    workgroupBarrier();
+    fg_reduce(lane);
     workgroupBarrier();
     fg_count_rays(lane);
     if lane%FG_RAYS!=0u || any(group.xy>=tiles) || keep {return;}
@@ -630,6 +647,8 @@ var<workgroup> fg_pair:array<u32,2>;
     var traced=s;
     if keep {traced.placement=0u;}
     fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
+    workgroupBarrier();
+    fg_reduce(lane);
     workgroupBarrier();
     fg_count_rays(lane);
     if lane%FG_RAYS!=0u || pick==FG_NONE || s.placement==0u || keep {return;}
