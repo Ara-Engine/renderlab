@@ -467,7 +467,7 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
                 let c = r.indirect_counters().unwrap().unwrap_or_default();
                 per_frame.push(json!([frame, c.created, c.created_secondary, c.orphans, c.splits,
                     c.gathers, c.gather_misses, c.gather_unshaded, c.gather_orphans,
-                    c.external_requests, c.fg_rays, c.evicted, r.indirect_stats().idle_frames]));
+                    c.external_requests, c.fg_rays, c.evicted, r.indirect_stats().idle_frames, c.gather_deferred, c.bounce_queued, c.gather_rays]));
             }
             if SAMPLES.contains(&frame) || frame == frames {
                 last = capture_radiance(&mut r, 0.0);
@@ -486,7 +486,7 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
         if !per_frame.is_empty() {
             rows[view.name]["per_frame"] = json!({"columns": ["frame", "created", "created_secondary",
                 "orphans", "splits", "gathers", "gather_misses", "gather_unshaded", "gather_orphans",
-                "external_requests", "fg_rays", "evicted", "idle_frames"], "rows": per_frame});
+                "external_requests", "fg_rays", "evicted", "idle_frames", "gather_deferred", "bounce_queued", "gather_rays"], "rows": per_frame});
         }
         // The cache's counters for the view's last frame (cells created by band, orphans,
         // splits, gather misses by cause, external requests), with RENDERLAB_FURNACE_COUNTERS.
