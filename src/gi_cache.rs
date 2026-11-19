@@ -166,6 +166,16 @@ fn stale_periods() -> [u32; 2] {
 const STALE_READ: u32 = 1;
 const STALE_SWEEP: u32 = 16;
 /// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
+/// Convergence gathers a frame, about (shaders/gi_cache.wgsl GI_UNCONVERGED; RENDERLAB_GI_CONVERGE_BUDGET).
+fn converge_budget() -> u32 {
+    static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("RENDERLAB_GI_CONVERGE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(CONVERGE_BUDGET).max(1)
+    })
+}
+const CONVERGE_BUDGET: u32 = 1024;
+/// Longest convergence turn, in frames.
+const CONVERGE_TURN_MAX: u32 = 64;
 fn stale_budget() -> u32 {
     static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *B.get_or_init(|| {
@@ -1373,6 +1383,9 @@ pub(crate) struct Planner {
     bounce_busy: u32,
     /// Last collected frame's stale cells (shaders/gi_cache.wgsl GI_W_STALE_CELLS).
     pub(crate) stale_cells: u32,
+    /// Last collected frame's unconverged cells (GI_W_UNCONVERGED + GI_W_UNCONVERGED_NEW): while
+    /// any remain the scan runs their rotation and the cache does not idle.
+    pub(crate) unconverged: u32,
     /// Requests readers outside the cache appended on a recent frame (the external list's
     /// count, read back without waiting): while any is unanswered the cache does not idle.
     pub(crate) external_pending: u32,
@@ -1402,6 +1415,7 @@ impl Default for Planner {
             bounce_last: None,
             bounce_busy: 0,
             stale_cells: 0,
+            unconverged: 0,
             external_pending: 0,
             parity: false,
             tick_queues: [0; 2],
@@ -1548,6 +1562,7 @@ impl Planner {
         let [read, sweep] = self.stale_turns();
         header[62] = read;
         header[63] = sweep;
+        header[44] = self.unconverged.div_ceil(converge_budget()).max(1).next_power_of_two().min(CONVERGE_TURN_MAX);
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -1722,6 +1737,10 @@ impl Planner {
         if !boxes.is_empty() && s.invalidate_casters {
             flags |= 1;
         }
+        // Unconverged cells: the scan gathers this frame's turn of them again.
+        if s.bounce && self.unconverged > 0 {
+            flags |= 128;
+        }
         // Partially traced cells re-queue: form 2 always; a clear's phases on the frames after
         // its first, and one frame past its window, where a cell still partial (made late in
         // the window) traces every remaining direction. The cut refill makes no partial cells.
@@ -1802,7 +1821,7 @@ impl Planner {
         // otherwise idle.
         // A reader outside the cache with unanswered requests (the final gather's probes) keeps
         // the cache running: idle means nobody waits on a cell.
-        let busy = (bounce && self.bounce_busy > 0) || self.external_pending > 0;
+        let busy = (bounce && (self.bounce_busy > 0 || self.unconverged > 0)) || self.external_pending > 0;
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
                 s.gathers + 2
@@ -2052,6 +2071,8 @@ pub(super) struct GiState {
     probe_log: Option<ProbeWatch>,
     /// The still-view batch: misses plus queued gathers of recent cache frames.
     stale_watch: Option<FullWatch>,
+    /// Unconverged cells of recent cache frames (`Planner::unconverged`).
+    converge_watch: Option<FullWatch>,
     /// The external list's count (word 0) at the start of each encode, idle or not: what
     /// readers appended on the frame before (`Planner::external_pending`).
     external_watch: Option<FullWatch>,
@@ -2281,6 +2302,7 @@ impl GiState {
             probe_log: None,
             stale_watch: None,
             external_watch: None,
+            converge_watch: None,
         }
     }
     /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
@@ -2289,6 +2311,9 @@ impl GiState {
             watch.submitted();
         }
         if let Some(watch) = &mut self.stale_watch {
+            watch.submitted();
+        }
+        if let Some(watch) = &mut self.converge_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.external_watch {
@@ -4075,6 +4100,13 @@ impl Renderer {
                 self.gi.planner.external_pending = pending;
             }
         }
+        {
+            let device = &self.device;
+            let watch = self.gi.converge_watch.get_or_insert_with(|| FullWatch::of_words(device, &[206, 207]));
+            if let Some(unconverged) = watch.collect() {
+                self.gi.planner.unconverged = unconverged;
+            }
+        }
         if stale_budget() != 0 {
             let device = &self.device;
             let watch = self.gi.stale_watch.get_or_insert_with(|| FullWatch::of_words(device, &[247]));
@@ -4799,6 +4831,9 @@ impl GiState {
             watch.record(encoder, &r.work);
         }
         if let (Some(watch), Some(r)) = (self.stale_watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
+        }
+        if let (Some(watch), Some(r)) = (self.converge_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
     }

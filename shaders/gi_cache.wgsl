@@ -100,6 +100,17 @@ const GI_SCAN_ENVIRONMENT:u32=4u;
 const GI_SCAN_PARTIAL:u32=8u;
 // Lighting, environment or program changed (G2): cells relight (bounce.z says which).
 const GI_SCAN_RELIGHT:u32=16u;
+// Unconverged cells (GI_UNCONVERGED) exist: the scan gathers those of this frame's turn
+// (GI_H_CONVERGE_TURN) again, and counts them all (GI_W_UNCONVERGED).
+const GI_SCAN_CONVERGE:u32=128u;
+// The convergence rotation's turn: a cell gathers again when (slot + frame) % turn == 0, the
+// power of two that spreads the unconverged cells to about the budget a frame (src/gi_cache.rs
+// converge_budget).
+const GI_H_CONVERGE_TURN:u32=44u;
+// Unconverged cells the scan met, and cells gathers newly marked unconverged (the CPU reads
+// their sum back without waiting to size the turn and keep the cache from idling).
+const GI_W_UNCONVERGED:u32=206u;
+const GI_W_UNCONVERGED_NEW:u32=207u;
 const GI_RELIGHT_ALL:u32=0x80000000u;
 const GI_RELIGHT_REQUESTS:u32=0x20000000u;
 // Work counters: misses, traces, integrations, then statistics.
@@ -1880,6 +1891,13 @@ fn gi_count_read(at:u32, cold:u32) {
                 gi_schedule(slot,select(1u,gi_word(GI_H_GATHERS),all));
             }
         }
+        if (flags&GI_SCAN_CONVERGE)!=0u && (state&GI_UNCONVERGED)!=0u {
+            atomicAdd(&gi_work[GI_W_UNCONVERGED],1u);
+            if (slot+gi_word(GI_H_FRAME))%max(gi_word(GI_H_CONVERGE_TURN),1u)==0u && (state&GI_BQUEUED)==0u {
+                gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_UNCONVERGED;
+                gi_schedule(slot,1u);
+            }
+        }
         if (flags&GI_SCAN_CASTER)!=0u && gi_light_reached(slot) {
             atomicAdd(&gi_work[GI_W_RESHADED],1u);
             gi_count_read(GI_W_RESHADED_READ,cold);
@@ -2263,19 +2281,24 @@ fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
     // The bounce series to convergence (white-furnace fixture, src/gi_furnace_tests.rs): each
     // gather is one Jacobi step of the radiosity fixed point, so a fixed G truncated it (a
     // closed box of albedo 0.5 read 0.88 of Le / (1 - rho), and 0.28 at albedo 0.9). While its
-    // hits still change, a cell gathers again until its own value moves by at most
-    // GI_CONVERGED of its size between gathers; the changes shrink by the loop's gain each step,
-    // so the schedule ends. Hits that are all final would give this value again (GC1 above).
+    // hits still change, a cell whose own value moved by more than GI_CONVERGED of its size is
+    // unconverged, and gathers again on the scan's convergence rotation: a fixed budget of cells
+    // a frame, as Lumen's radiosity updates a fixed share of its cards (gathering every such cell
+    // every frame cost 7-8 ms on a non-RT walk, where new cells keep their neighbours changing).
+    // The changes shrink by the loop's gain each step, so the rotation empties. Hits that are all
+    // final would give this value again (GC1 above).
     let after=vec3<f32>(gi_wg_bounce[0],gi_wg_bounce[GI_GATHER_LANES],gi_wg_bounce[2u*GI_GATHER_LANES]);
     let moved=max(abs(after-before).x,max(abs(after-before).y,abs(after-before).z));
-    if atomicLoad(&gi_wg_changing)!=0u && moved>GI_CONVERGED*max(after.x,max(after.y,after.z)) { left=max(left,1u); }
+    let unconverged=atomicLoad(&gi_wg_changing)!=0u && moved>GI_CONVERGED*max(after.x,max(after.y,after.z));
+    if unconverged && (state&GI_UNCONVERGED)==0u { atomicAdd(&gi_work[GI_W_UNCONVERGED_NEW],1u); }
     var retry=state&GI_RETRY;
     if missing!=0u {
         if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
     } else {
         retry=0u;
     }
-    gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
+    let kept=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
+    gi_table[cold+GI_C_STATE]=(kept&~GI_UNCONVERGED)|select(0u,GI_UNCONVERGED,unconverged);
     gi_queue_shade(slot);
     gi_schedule(slot,left);
 }

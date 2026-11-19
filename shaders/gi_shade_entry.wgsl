@@ -254,6 +254,6 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
         // it repeat (gi_gather). It depends only on the cell's state, so a mixed frame's
         // dispatches agree whichever stored the value.
         let gs_out=gi_shade_out[slot];
-        if gs_out.w>0.0 && (gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED))!=0u { gi_shade_out[slot]=vec4<f32>(gs_out.xyz,0.75); }
+        if gs_out.w>0.0 && (gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED|GI_UNCONVERGED))!=0u { gi_shade_out[slot]=vec4<f32>(gs_out.xyz,0.75); }
     }
 }
