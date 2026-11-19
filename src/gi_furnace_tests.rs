@@ -12,6 +12,11 @@
 //!   `slab-dark`). The top face sees only the sky: L = rho * sky = 0.5 in both. Light from
 //!   the emitter on the top face (`slab-lit` above `slab-dark`) is leakage. `slab-lit` also
 //!   reads the underside, where the emitter's light belongs.
+//! - `slab-roof`: the lit slab under a black sky with a grey roof (albedo 0.5, 3 x 3 m) 0.5 m
+//!   above it. No path from the emitter reaches the roof or the slab's top face (light passing
+//!   the slab's edges climbs past the roof's), so both must read exactly 0. Gathers here do hit
+//!   the top face and the roof, so a hit that reads a cell coarser than its footprint (whose
+//!   volume reaches the emitter's side) shows as light.
 //!
 //! The estimator is whatever the process's switches select (RENDERLAB_GI_ACCUMULATE,
 //! RENDERLAB_FINAL_GATHER, ...); the test records them. Each case is its own renderer, so no
@@ -20,7 +25,7 @@
 //! Run (one GPU lease, every case on one path):
 //!   RENDERLAB_FURNACE_PATH=rt|nort (default nort; rt needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK)
 //!   RENDERLAB_FURNACE_OUT=<dir>   furnace.json and one PFM per case (optional)
-//!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark (default all)
+//!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark,slab-roof (default all)
 //!   RENDERLAB_FURNACE_FRAMES=300  frames per view; the report also samples frames 1, 4, 16, 64
 //!   cargo test --lib gi_furnace -- --ignored --nocapture
 use super::*;
@@ -147,6 +152,29 @@ fn cases() -> Vec<Case> {
             },
         ],
     };
+    let mut roofed = slab(20.0);
+    roofed.sky = 0.0;
+    roofed.parts.push(Part {
+        faces: vec![quad(Vec3::new(0.0, 0.5, 0.0), -Vec3::Y, Vec3::X * 1.5, 1.5)],
+        albedo: [0.5; 3],
+        glow: [0.0; 3],
+    });
+    roofed.views = vec![
+        FurnaceView {
+            name: "top",
+            eye: Vec3::new(0.0, 0.3, 0.0),
+            target: Vec3::ZERO,
+            up: Vec3::Z,
+            expected: Some([0.0; 3]),
+        },
+        FurnaceView {
+            name: "roof",
+            eye: Vec3::new(0.0, 0.2, 0.0),
+            target: Vec3::new(0.0, 0.5, 0.0),
+            up: Vec3::Z,
+            expected: Some([0.0; 3]),
+        },
+    ];
     let mut out = vec![
         Case {
             name: "grey",
@@ -163,6 +191,10 @@ fn cases() -> Vec<Case> {
         Case {
             name: "slab-dark",
             ..slab(0.0)
+        },
+        Case {
+            name: "slab-roof",
+            ..roofed
         },
     ];
     if let Ok(only) = std::env::var("RENDERLAB_FURNACE_CASES") {
@@ -340,15 +372,20 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
 }
 
 /// Mean radiance per channel; with an answer, also the mean ratio per channel, the 1st and
-/// 99th percentiles of the luminance ratio, and the share of pixels more than 5% off.
+/// 99th percentiles of the luminance ratio, and the share of pixels more than 5% off. A black
+/// answer reports the brightest pixel's luminance instead.
 fn score(pixels: &[[f32; 3]], expected: Option<[f32; 3]>) -> Json {
     let n = pixels.len() as f64;
     let mean: [f64; 3] =
         std::array::from_fn(|c| pixels.iter().map(|p| f64::from(p[c])).sum::<f64>() / n);
     let round = |v: f64| (v * 1e4).round() / 1e4;
     let mut row = json!({"mean": mean.map(round)});
-    if let Some(e) = expected {
-        let lum = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+    let lum = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+    if expected == Some([0.0; 3]) {
+        row["max_lum"] = json!(round(f64::from(
+            pixels.iter().map(|&p| lum(p)).fold(0.0, f32::max)
+        )));
+    } else if let Some(e) = expected {
         let mut ratios: Vec<f32> = pixels.iter().map(|&p| lum(p) / lum(e)).collect();
         ratios.sort_by(f32::total_cmp);
         let at = |q: f64| f64::from(ratios[((ratios.len() - 1) as f64 * q) as usize]);
