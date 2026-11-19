@@ -820,8 +820,14 @@ override VSM_SIL_FILL:bool=true;
 override VSM_SIL_UNDER:bool=true;
 // The least triangle area (texels) whose outline the ids resolve (vsm_silhouette).
 override VSM_SIL_MIN_AREA:f32=1.0;
-// Measurement: the coarsest level (index) the silhouette pass serves.
-override VSM_SIL_MAX_LEVEL:u32=99u;
+// The coarsest level (index) the silhouette pass serves: the fraction's premise, one caster
+// outline crossing a texel, holds where texels are small against the geometry they hold. From
+// level 4 (3 cm texels and up) a texel holds much of a caster's detail, and on Glint's goal view a
+// tower under an overhead structure 90 m up read 5 of 8 samples covered where the structure
+// covers all of them (rank shares then opened 3/8 of its directions inside a deep shadow).
+// Coarser levels keep the map's own answer, as without the fraction. Measurement:
+// `RENDERLAB_VSM=VSM_SIL_MAX_LEVEL=<n>u`.
+override VSM_SIL_MAX_LEVEL:u32=3u;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=32u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
