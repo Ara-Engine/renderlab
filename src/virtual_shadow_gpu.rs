@@ -1117,6 +1117,22 @@ pub(super) fn disk_source() -> String {
         "override VD_EDGES:bool=false;",
         &format!("override VD_EDGES:bool={};", edges_on()),
     );
+    // Exact hard edges (`RENDERLAB_VD_HARD_EDGES=0` keeps the map's texels there).
+    let edges = "override VD_HARD_EDGES:bool=true;";
+    assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
+    source = source
+        .replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
+        .replacen(
+            "override VD_FRACTION:bool=false;",
+            &format!("override VD_FRACTION:bool={};", fraction_on()),
+            1,
+        )
+        .replacen(
+            "override VD_SIDE_LINE:bool=false;",
+            &format!("override VD_SIDE_LINE:bool={};", fraction_mode() == 3),
+            1,
+        );
+    // Last, so a measurement can set the switches above as well.
     for (name, value) in std::env::var("RENDERLAB_VD")
         .iter()
         .flat_map(|list| list.split(','))
@@ -1130,21 +1146,7 @@ pub(super) fn disk_source() -> String {
         let end = equals + source[equals..].find(';').unwrap();
         source.replace_range(equals..end, value);
     }
-    // Exact hard edges (`RENDERLAB_VD_HARD_EDGES=0` keeps the map's texels there).
-    let edges = "override VD_HARD_EDGES:bool=true;";
-    assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
     source
-        .replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
-        .replacen(
-            "override VD_FRACTION:bool=false;",
-            &format!("override VD_FRACTION:bool={};", fraction_on()),
-            1,
-        )
-        .replacen(
-            "override VD_SIDE_LINE:bool=false;",
-            &format!("override VD_SIDE_LINE:bool={};", fraction_mode() == 3),
-            1,
-        )
 }
 /// Merges moved casters' light-space rectangles, and their screen rectangles alike, the pair
 /// whose union adds the least area first, until at most `max` remain: many movers invalidate the
