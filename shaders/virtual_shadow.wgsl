@@ -745,8 +745,9 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     if bid!=id || partial {
         atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(bid));
     }
-    // The centre's own surface is still the top: the texel's binary answer (vd_side).
-    if partial {vsm_cover_line(i,ln,ls,id!=0u && bid==id);}
+    // The texel's binary answer (vd_side, vd_near): its centre's own surface is in the near
+    // layer of the final top (a promotion to a higher triangle of the same caster keeps it).
+    if partial {vsm_cover_line(i,ln,ls,id!=0u && h>=best-gap);}
 }
 // The share of the unit square past offset s along unit n (vsm_area_offset's inverse).
 fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
