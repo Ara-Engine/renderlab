@@ -790,7 +790,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
             if k!=0u {atomicAdd(&vd_edge_count[6],1u);if any(m!=vec2<u32>(0u)) {atomicAdd(&vd_edge_count[7],1u);}}
         }
         if k!=0u {
-            if VD_SIDE_RANK {m=vd_side(m,i,k);} else {m=vd_half(m,i,k,c-p.xy,size,clo,chi);}
+            if VD_SIDE_RANK {m=vd_side(m,i,k);} else {m=vd_half(m,i,c-p.xy,size,clo,chi);}
         }
     }
     // Straight outlines: only a column that adds samples without covering the disk reads its
@@ -832,6 +832,9 @@ override VD_FRACTION:bool=false;
 // (its angle replaces the bits, vsm_cover_side): the same every frame, and nested between
 // neighbouring texels of one edge (no texture of per-texel subsets).
 @group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
+// Texel i's line (virtual_shadow.wgsl vsm_cover_line): the angle of n into the covered part in
+// 256 steps (low byte), its offset s from the centre over -0.75..0.75 texels in 255 (high byte).
+fn vd_cover_word(i:u32)->u32 {return (vd_cover[i>>1u]>>((i&1u)*16u))&0xffffu;}
 // Per angle a of n (VD_SIDE_ANGLES of them) and rank r in 0..=64: the mask of the r sample
 // directions furthest along n (two u32s each; virtual_shadow_gpu.rs `side_table`).
 const VD_SIDE_ANGLES:u32=32u;
@@ -841,24 +844,19 @@ fn vd_side_mask(a:u32,r:u32)->vec2<u32> {
     let v=vd_sides[i>>1u];
     return select(v.xy,v.zw,(i&1u)==1u);
 }
-// The covered part as a half-plane of the texel's square (the default): beyond a line across it,
-// normal to its covered side n, placed so that k/8 of the square lies past it. The column's
-// directions m (a texel of side `size` centred `c` from the receiver, from height `lo` to `hi`)
-// keep those through that part at some height. A narrow cone (a contact shadow) then sees the
+// The covered part as a half-plane of the texel's square (the default): beyond the line the
+// page pass stored (vsm_cover_line: the covering triangle's outline edge where one crosses the
+// texel, else the covered samples' side placed by their count). The column's directions m (a
+// texel of side `size` centred `c` from the receiver, from height `lo` to `hi`) keep those
+// through that part at some height. A narrow cone (a contact shadow) then sees the
 // line where it crosses the texel, not k/8 of every direction: rank shares (vd_side,
 // `RENDERLAB_VD=VD_SIDE_RANK=true`) give each texel one grey, a staircase at hard edges.
 override VD_SIDE_RANK:bool=false;
-fn vd_half(m:vec2<u32>,i:u32,k:u32,c:vec2<f32>,size:f32,lo:f32,hi:f32)->vec2<u32> {
-    let a=f32(((vd_cover[i>>2u]>>((i&3u)*8u))&255u)%VD_SIDE_ANGLES)*(6.28318531/f32(VD_SIDE_ANGLES));
+fn vd_half(m:vec2<u32>,i:u32,c:vec2<f32>,size:f32,lo:f32,hi:f32)->vec2<u32> {
+    let w=vd_cover_word(i);
+    let a=f32(w&255u)*(6.28318531/256.0);
     let n=vec2<f32>(cos(a),sin(a));
-    // The offset s (texels from the centre along n) past which the unit square holds area f: its
-    // projection on n is a trapezoid, a plateau 1/u high between corner ramps of area v/2u.
-    let f=f32(k)/8.0;
-    let u=max(abs(n.x),abs(n.y));let v=min(abs(n.x),abs(n.y));
-    let ramp=v/(2.0*u);
-    var s=u*(0.5-f);
-    if f<ramp {s=0.5*(u+v)-sqrt(2.0*u*v*f);}
-    else if f>1.0-ramp {s=sqrt(2.0*u*v*(1.0-f))-0.5*(u+v);}
+    let s=f32(w>>8u)*(1.5/255.0)-0.75;
     // The part is n . x >= q (metres, from the receiver); a direction d meets it at some height
     // in lo..hi where n . d >= q / hi (q > 0) or q / lo (q <= 0).
     let q=dot(c,n)+s*size;
@@ -873,7 +871,7 @@ fn vd_side(m:vec2<u32>,i:u32,k:u32)->vec2<u32> {
     if t==0u {return vec2<u32>(0u);}
     if t>=c {return m;}
     // The side's angle, found once from the covered samples at the page raster (vsm_fold).
-    let a=((vd_cover[i>>2u]>>((i&3u)*8u))&255u)%VD_SIDE_ANGLES;
+    let a=(((vd_cover_word(i)&255u)+4u)/8u)%VD_SIDE_ANGLES;
     // The smallest rank whose directions in m number t (the masks are nested).
     var lo=0u;var hi=64u;
     while lo<hi {

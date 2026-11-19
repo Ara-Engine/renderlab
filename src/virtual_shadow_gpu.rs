@@ -649,9 +649,9 @@ struct Resources {
     reach: Owned<wgpu::Buffer>,
     /// The Disk lookup's edge pixel counts (WGSL `vd_edge_count`).
     edges: Owned<wgpu::Buffer>,
-    /// The covered fraction's raster scratch (`fraction_on`): the near layer's sample bits, a
-    /// byte a texel at the top map's index, which vsm_fold counts into the top words; four bytes
-    /// when off.
+    /// The covered fraction's lines (`fraction_on`), 16 bits a texel at the top map's index: a
+    /// partly covered texel's covered part as a line (WGSL `vsm_cover_line`), and while the
+    /// multisampled raster runs its sample bits; four bytes when off.
     cover: Owned<wgpu::Buffer>,
     /// The covered fraction's side table (`side_table`, WGSL `vd_sides`), written once.
     sides: Owned<wgpu::Buffer>,
@@ -998,11 +998,11 @@ pub(super) fn shader_source() -> String {
     }
     source
 }
-/// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): the near layer's covered
-/// samples of each silhouette texel go into a byte plane (WGSL `vsm_cover`), and the Disk lookup
-/// lets a partly covered column block that share of its directions, from its covered side. `=1`
-/// takes them from the map's ids after a raster at texel centres (WGSL `vsm_silhouette`); `=msaa`
-/// from a multisampled raster, the comparison.
+/// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): each silhouette texel's
+/// near-layer coverage becomes a count and a line (the covering triangle's outline edge, WGSL
+/// `vsm_cover`), and the Disk lookup lets a partly covered column block only the directions
+/// through its part beyond that line. `=1` takes them from the map's ids after a raster at texel
+/// centres (WGSL `vsm_silhouette`); `=msaa` from a multisampled raster, the comparison.
 fn fraction_on() -> bool {
     fraction_mode() != 0
 }
@@ -1401,7 +1401,7 @@ impl Renderer {
             dump_texture(&self.device, encoder, &fresh.world.texture, dir.join(format!("world-{frame}-{w}x{h}.bin")), frame);
             dump_texture(&self.device, encoder, &fresh.normal.texture, dir.join(format!("normal-{frame}-{w}x{h}.bin")), frame);
             // The clipmap's top layer (dense: levels x side x side words of (id, height bits)),
-            // and with the covered fraction its sample bytes (a byte a texel, the same index).
+            // and with the covered fraction its lines (16 bits a texel, the same index).
             let resources = self.view.virtual_shadows.as_ref().and_then(|s| s.resources.as_ref());
             let planes = resources.into_iter().flat_map(|r| {
                 [Some((&r.top, "top")), fraction_on().then_some((&r.cover, "cover"))].into_iter().flatten()
@@ -2296,7 +2296,7 @@ impl VirtualState {
             edges: buffer("Disk lookup edge pixels", 32, B::STORAGE | B::COPY_SRC),
             cover: buffer(
                 "Clipmap covered samples",
-                if fraction_on() { (map_bytes / 8).next_multiple_of(4) } else { 4 },
+                if fraction_on() { (map_bytes / 4).next_multiple_of(4) } else { 4 },
                 B::STORAGE | B::COPY_SRC,
             ),
             sides: {
