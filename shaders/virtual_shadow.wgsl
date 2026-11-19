@@ -759,6 +759,9 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
         // A promotion keeps the map's own answer reachable: with no near sample it is undone,
         // and over all eight the texel counts as partial (7) so its centre's flag is stored.
         if bid!=id && k==0u {best=h;bid=id;}
+        // Measurement (VSM_SIL_CROSS=false): a texel whose centre holds another mesh keeps it,
+        // with the map's own answer.
+        if !VSM_SIL_CROSS && id!=0u && (bid>>bits)!=(id>>bits) {best=h;bid=id;k=0u;partial=false;}
         if bid!=id && k==8u {k=7u;partial=true;}
         if partial {
             ln=vsm_centroid_side(cover);
@@ -817,6 +820,7 @@ override VSM_LINE_EDGE_TOP:bool=false;
 // texel an outline edge crosses. Off (the covered fraction): lines only where the samples split,
 // their centroid side placed by their count, for the rank shares (vd_side).
 override VSM_SIL_GEOM:bool=false;
+override VSM_SIL_CROSS:bool=true;
 // Measurement (`RENDERLAB_VSM=VSM_SIL_RING=true`): the adjacency ring at every marked texel.
 override VSM_SIL_RING:bool=false;
 // Samples no candidate covers take the texel toward them (vsm_silhouette); off: measurement.
