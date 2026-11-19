@@ -943,11 +943,9 @@ pub struct IndirectCounters {
     pub emitters_dropped: u32,
     pub gather_unshaded: u32,
     pub gather_orphans: u32,
-    /// Gather rays a finer level answered (gi_hit_radiance, which never reads coarser than a
-    /// hit's footprint): finally, the hit level's cell being an orphan or split; and standing
-    /// in while it is absent or not yet shaded.
-    pub gather_finer_final: u32,
-    pub gather_finer_standin: u32,
+    /// Gather rays the hit's own level answered because the hit level's cell is an orphan or
+    /// split (gi_hit_radiance, which never reads coarser than a hit's footprint).
+    pub gather_finer: u32,
     /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
     pub gather_deferred: u32,
     /// Listed misses a capped claim left for a later frame (`IndirectSettings::claim_cells`).
@@ -3203,8 +3201,7 @@ impl Renderer {
             emitters_dropped: w[203],
             gather_unshaded: w[40],
             gather_orphans: w[41],
-            gather_finer_final: w[204],
-            gather_finer_standin: w[205],
+            gather_finer: w[204],
             gather_deferred: w[42],
             claim_deferred: w[43],
             external_requests: w[220],
