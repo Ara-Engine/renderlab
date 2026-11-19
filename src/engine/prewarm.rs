@@ -99,6 +99,9 @@ mod tests {
                 transparency: Some(crate::Transparency::default()),
                 ..Default::default()
             });
+            // A soft sun as Ara's scenes have: without ray hardware its shadows are the virtual
+            // clipmap's, and reflection hits read its map.
+            engine.set_sun(Some(crate::engine::Sun::default())).unwrap();
             let view = engine.create_view(&ViewDesc::new(160, 96)).unwrap();
             engine.prepare_pipelines().unwrap();
             // A game spawns its emitters once play starts, after the scene is prepared.
@@ -149,7 +152,16 @@ impl Engine {
     /// and logged as `pipeline_compile_after_prepare`; the goal is none. Not a guarantee against
     /// driver first-use work or arbitrary future settings. The default-off `RENDERLAB_PREWARM_PIPELINES=1` calls it automatically
     /// before the engine's first frame. Explicit calls do not need that environment flag.
+    /// It compiles up to four pipelines at once (`RENDERLAB_PREPARE_COMPILES`); frames keep
+    /// the process's base limit.
     pub fn prepare_pipelines(&mut self) -> Result<PipelinePreparation, Error> {
+        crate::pipeline_compilation::with_compile_slots(
+            crate::pipeline_compilation::prepare_compile_slots(),
+            || self.prepare_pipelines_now(),
+        )
+    }
+
+    fn prepare_pipelines_now(&mut self) -> Result<PipelinePreparation, Error> {
         use crate::ResourceKind;
         // The opaque programs a frame can draw: one entry per loaded program, not per material.
         let mut programs: Vec<u64> = self

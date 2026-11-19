@@ -11,9 +11,10 @@ impl Renderer {
     }
 
     /// The selected view's own pipelines (its look and render scale applied): post, the
-    /// visibility buffer's and, for traced shading, every program in `programs` (the loaded
-    /// opaque programs) as a frame drawing only it and, with several, as a frame drawing all
-    /// of them would build: shading sets, list pipelines and binning, reflection hits and
+    /// visibility buffer's, the virtual sun shadows' (without ray hardware) and, for traced
+    /// shading, every program in `programs` (the loaded opaque programs) as a frame drawing only
+    /// it and, with several, as a frame drawing all of them would build: shading sets, list
+    /// pipelines and binning, reflection hits (reading the sun map when the frames will) and
     /// lighting-cache cell shading. Called by `Engine::prepare_pipelines` for each view
     /// before `prepare_scene_pipelines`.
     pub(crate) fn prepare_view_pipelines(&mut self, programs: &[u64]) -> Result<(), Error> {
@@ -39,13 +40,19 @@ impl Renderer {
                 if let Some(variant) = paths.variant {
                     self.ensure_pipelines(programs.iter().map(|&id| (id, variant)).collect())?;
                 }
+                // Virtual sun shadows without ray hardware: their state and pipelines, before the
+                // hits that read their sun map.
+                if paths.soft && self.view.soft_mode == crate::SoftShadows::Virtual {
+                    self.prepare_virtual_pipelines();
+                }
+                let map = self.hit_sun_planned();
                 if programs.len() > 1 {
                     self.ensure_lists(programs, false, shading as usize)?;
                     self.ensure_bins()?;
-                    self.ensure_reflection_hits_for(programs, true, shading)?;
+                    self.ensure_reflection_hits_for(programs, true, shading, map)?;
                 }
                 self.ensure_reflection_trace(shading)?;
-                self.ensure_reflection_hits_for(programs, false, shading)?;
+                self.ensure_reflection_hits_for(programs, false, shading, map)?;
                 self.prepare_gi_shade(programs)?;
                 {
                     use primary_ray_gpu::gi_receiver_pass as receiver;
