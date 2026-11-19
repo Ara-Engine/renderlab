@@ -159,7 +159,10 @@ fn strip(case: &str, rt: bool, dir: &Path) -> Json {
                 .sum::<f64>()
                 / pixels.len() as f64;
             write_pfm(&dir.join(format!("frame-{t:+03}.pfm")), &pixels);
-            frames.push(json!({"t": t, "mean": (lum * 1e4).round() / 1e4, "full_rate": r.gi.recently_changed()}));
+            // The external list's spare words (fg_rays, fg_shadow_rays): what a counting shader edit put there.
+            let c = r.indirect_counters().unwrap().unwrap_or_default();
+            frames.push(json!({"t": t, "mean": (lum * 1e4).round() / 1e4, "full_rate": r.gi.recently_changed(),
+                "words": [c.fg_rays, c.fg_shadow_rays]}));
         }
     }
     json!(frames)

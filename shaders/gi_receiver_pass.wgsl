@@ -335,13 +335,20 @@ fn fg_touch(slot:u32) {
 // tiles around it: fg_filter reaches one tile for probes past FG_FILTER_SHORT frames of history,
 // as stable ones are) sees a change, and every probe does on a cut, a camera jump or a lighting edit (word 0, set
 // from the cache's planner: src/gi_receiver_pass.rs). Per probe (tile probes, then one per
-// block, as fg_at numbers them) two words from 1: its traced updates in a row without a change
+// block, as fg_at numbers them) two words from 2: its traced updates in a row without a change
 // (bits 0-7, saturating) with the frame of its last change (bits 8-31), and the f32 bits of its
-// usual change (fg_note_change).
+// usual change (fg_note_change). Word 1 is the gather's frame count (fg_frame).
 const FG_STABLE:u32=4u;
 const FG_STABLE_RATE:u32=4u;
 @group(2) @binding(31) var<storage,read_write> fg_state:array<u32>;
-fn fg_state_at(index:u32)->u32 { return 1u+2u*index; }
+fn fg_state_at(index:u32)->u32 { return 2u+2u*index; }
+// The gather's own frame count, written by the CPU every frame (word 1 of fg_state): its tile
+// picks, ray directions and half-rate checkerboard turn with it. They turned with
+// primary_frame.sided.y, which is TR1's direction rotation (8 * (frame % 32), 0 with TR1 off):
+// its multiples of 8 never changed the checkerboard's parity, so the same half of the tile
+// probes was kept on every frame and stopped updating once it had history on its plane, and
+// with TR1 off every frame traced the same directions.
+fn fg_frame()->u32 { return fg_state[1]; }
 // Whether a probe's last change was this frame or the one before (24-bit frame stamps).
 fn fg_changed_recently(word:u32,frame:u32)->bool { return ((frame-(word>>8u))&0xffffffu)<=1u; }
 var<workgroup> fg_moved:atomic<u32>;
@@ -497,7 +504,7 @@ fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:ve
     let e_old=fg_irradiance(old.sh,n);
     let r=abs(e_new-e_old)/max(max(e_new,e_old),1e-30);
     if old.point.w>=FG_HALF_MIN && r>max(FG_CHANGE*usual,FG_CHANGE_MIN) {
-        fg_state[at]=(primary_frame.sided.y&0xffffffu)<<8u;
+        fg_state[at]=(fg_frame()&0xffffffu)<<8u;
         return;
     }
     usual=mix(usual,r,0.125);
@@ -540,7 +547,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let size=textureDimensions(primary_hit);
     let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
     let tile=group.y*tiles.x+group.x;
-    let frame=primary_frame.sided.y;
+    let frame=fg_frame();
     let slot=lane/FG_RAYS;
     if lane<2u {atomicStore(&fg_asked[lane],0u);atomicStore(&fg_rays[lane],0u);}
     if lane==0u {atomicStore(&fg_moved,0u);}
@@ -676,7 +683,7 @@ fn fg_pick_at(index:u32,size:vec2<u32>)->u32 { return gi_prepared[fg_at(index,si
 // A block without one leaves its probe invalid.
 @compute @workgroup_size(8,8) fn fg_classify(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
-    let frame=primary_frame.sided.y;
+    let frame=fg_frame();
     if lane==0u {atomicStore(&fg_orphan,FG_NONE);}
     workgroupBarrier();
     let q=group.xy*FG_BLOCK+local.xy;
@@ -701,7 +708,7 @@ var<workgroup> fg_pair:array<u32,2>;
 @compute @workgroup_size(32) fn fg_adapt(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
     let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
-    let frame=primary_frame.sided.y;
+    let frame=fg_frame();
     let b=lane/FG_RAYS;
     let block=vec2<u32>(group.x*2u+b,group.y);
     let inside=all(block<blocks);

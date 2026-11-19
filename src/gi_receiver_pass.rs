@@ -332,10 +332,11 @@ pub(super) struct Targets {
     /// Binding 30's stand-in while the cache has no resources (its own stand-in is bound
     /// read-only in the lighting group): four words, no room for an entry.
     requests_stand_in: Option<Buffer>,
-    /// The gather's own probe state (binding 31, gi_receiver_pass.wgsl fg_state): word 0 set each
-    /// frame while every probe traces at its full rate (`GiState::recently_changed`), then two
-    /// words a probe, zero at creation.
+    /// The gather's own probe state (binding 31, gi_receiver_pass.wgsl fg_state), written each
+    /// frame: word 0 set while every probe traces at its full rate (`GiState::recently_changed`),
+    /// word 1 the gather's frame count (`gather_frame`); then two words a probe, zero at creation.
     probe_state: Option<Buffer>,
+    gather_frame: u32,
     tiles: [u32; 2],
     blocks: [u32; 2],
 }
@@ -405,10 +406,11 @@ impl Renderer {
                 Buffer::new(
                     self,
                     "final gather probe state",
-                    4 + probes * 8,
+                    8 + probes * 8,
                     wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 )
             }),
+            gather_frame: 0,
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
             blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
         }
@@ -457,11 +459,13 @@ impl Renderer {
             self.gi.request_external();
             self.gi.request_emitters();
             if let Some(state) = &target.probe_state {
-                self.queue.write_buffer(&state.value, 0, &u32::from(self.gi.recently_changed()).to_ne_bytes());
+                let words = [u32::from(self.gi.recently_changed()), target.gather_frame];
+                self.queue.write_buffer(&state.value, 0, &words.iter().flat_map(|w| w.to_ne_bytes()).collect::<Vec<_>>());
             }
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
+        target.gather_frame = target.gather_frame.wrapping_add(1);
         target.table = table;
         target.clear_keys = moved && target.keys.is_some();
         target.region = region;
@@ -579,7 +583,7 @@ impl Renderer {
             let group = self.ledger.own(
                 self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("final gather, group 2"),
-                    entries: &[storage(30, 16), storage(31, 4)],
+                    entries: &[storage(30, 16), storage(31, 8)],
                 }),
                 ResourceKind::BindGroupLayout,
             );
