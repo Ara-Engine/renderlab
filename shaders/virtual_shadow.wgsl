@@ -711,7 +711,9 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
                 let other=vsm_id_triangle((placement<<bits)|nb,level);
                 if sign(vsm_cross(other[0].xy,other[1].xy,other[2].xy))==side {continue;}
             }
-            near=abs(off);ln=nn;ls=off;lid=ids[m];lz=zp;
+            // The edge's own height where it passes nearest the centre (VSM_LINE_EDGE_TOP).
+            let ze=mix(tri[e].z,tri[(e+1u)%3u].z,clamp(pc/len,0.0,1.0));
+            near=abs(off);ln=nn;ls=off;lid=ids[m];lz=select(zp,ze,VSM_LINE_EDGE_TOP);
         }
     }
     var k=countOneBits(cover);
@@ -719,7 +721,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     if near<2.0 {
         // The line's part is the covered one: its triangle becomes the top where it stands above
         // the texel's own (or the texel had none), and the count is its area's.
-        if lid!=bid && lz>best {best=lz;bid=lid;}
+        if VSM_LINE_EDGE_TOP {best=lz;bid=lid;} else if lid!=bid && lz>best {best=lz;bid=lid;}
         k=clamp(u32(round(vsm_area_beyond(ln,ls)*8.0)),1u,7u);
         partial=true;
     } else if partial {
@@ -744,6 +746,12 @@ fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
     if s< -r {return 1.0-(h+s)*(h+s)/(2.0*u*v);}
     return 0.5-s/u;
 }
+// A line texel's column top: its outline edge's height where the edge passes nearest the centre.
+// Along a straight outline that height is steady; the surface's own height at the texel (its
+// samples' or centre's) moves with where the outline crosses each texel, a texel-periodic
+// sawtooth in the shadow's edge wherever the occluder slopes (a rail's tube). The texel's inner
+// side, higher on such an occluder, lies in its full neighbour. Off: the covered part's height.
+override VSM_LINE_EDGE_TOP:bool=true;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=20u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
