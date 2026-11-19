@@ -328,6 +328,22 @@ fn fg_touch(slot:u32) {
     let w=FG_SEEN+(slot>>5u);
     if w<arrayLength(&fg_requests) { atomicOr(&fg_requests[w],1u<<(slot&31u)); }
 }
+// Stable probes. A tile probe whose last FG_STABLE traced updates saw no change traces one frame
+// in FG_STABLE_RATE instead of every other frame (half rate). Each update gets the same rays, so
+// a stable probe's noise is unchanged; only a change it has not traced yet waits longer. It
+// returns to the half rate as soon as it or a tile probe within the filter's reach (two tiles)
+// sees a change, and every probe does on a cut, a camera jump or a lighting edit (word 0, set
+// from the cache's planner: src/gi_receiver_pass.rs). Per probe (tile probes, then one per
+// block, as fg_at numbers them) two words from 1: its traced updates in a row without a change
+// (bits 0-7, saturating) with the frame of its last change (bits 8-31), and the f32 bits of its
+// usual change (fg_note_change).
+const FG_STABLE:u32=4u;
+const FG_STABLE_RATE:u32=4u;
+@group(2) @binding(31) var<storage,read_write> fg_state:array<u32>;
+fn fg_state_at(index:u32)->u32 { return 1u+2u*index; }
+// Whether a probe's last change was this frame or the one before (24-bit frame stamps).
+fn fg_changed_recently(word:u32,frame:u32)->bool { return ((frame-(word>>8u))&0xffffffu)<=1u; }
+var<workgroup> fg_moved:atomic<u32>;
 var<workgroup> fg_asked:array<atomic<u32>,2>;
 // The workgroup's probe rays and emitter shadow rays, added to the external list's spare words 2
 // and 3, which the GI log prints as fg_rays and fg_shadow_rays.
@@ -447,6 +463,44 @@ fn fg_reduce(lane:u32) {
         }
     }
 }
+// The luminance of a probe's irradiance at n (its sky L2 and bounce L1 through the clamped cosine).
+fn fg_irradiance(sh:array<vec4<f32>,10>,n:vec3<f32>)->f32 {
+    gi_sh_basis(n);
+    var e=vec3<f32>(0.0);
+    for(var i=0u;i<9u;i+=1u) {
+        let a=i*3u;
+        e+=gi_band_weight(i)*gi_y[i]*vec3<f32>(sh[a/4u][a%4u],sh[(a+1u)/4u][(a+1u)%4u],sh[(a+2u)/4u][(a+2u)%4u]);
+    }
+    for(var i=0u;i<4u;i+=1u) {
+        let b=FG_BOUNCE+i*3u;
+        e+=gi_band_weight(i)*gi_y[i]*vec3<f32>(sh[b/4u][b%4u],sh[(b+1u)/4u][(b+1u)%4u],sh[(b+2u)/4u][(b+2u)%4u]);
+    }
+    return dot(max(e,vec3<f32>(0.0)),vec3<f32>(0.2126,0.7152,0.0722));
+}
+// A traced update's change against the probe's history (fg_state): the relative difference of
+// their irradiance at the probe's normal. A change is one above FG_CHANGE times the probe's usual
+// change (a running mean of the updates that were not changes: a fresh update of FG_HEMI rays
+// differs from the history by its noise, which varies from probe to probe) and above
+// FG_CHANGE_MIN. Probes without FG_HALF_MIN frames of history only learn their usual change.
+const FG_CHANGE:f32=2.5;
+const FG_CHANGE_MIN:f32=0.1;
+fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:vec3<f32>) {
+    let at=fg_state_at(index);
+    if at+1u>=arrayLength(&fg_state) {return;}
+    let word=fg_state[at];
+    var usual=bitcast<f32>(fg_state[at+1u]);
+    if count<=1.0 {fg_state[at]=word&0xffffff00u;fg_state[at+1u]=bitcast<u32>(0.25);return;}
+    let e_new=fg_irradiance(fresh,n);
+    let e_old=fg_irradiance(old.sh,n);
+    let r=abs(e_new-e_old)/max(max(e_new,e_old),1e-30);
+    if old.point.w>=FG_HALF_MIN && r>max(FG_CHANGE*usual,FG_CHANGE_MIN) {
+        fg_state[at]=(primary_frame.sided.y&0xffffffu)<<8u;
+        return;
+    }
+    usual=mix(usual,r,0.125);
+    fg_state[at]=(word&0xffffff00u)|min((word&0xffu)+1u,255u);
+    fg_state[at+1u]=bitcast<u32>(usual);
+}
 // Folds the lanes from `first` (summed into that row by fg_reduce) into probe `index`, now at s:
 // history while the new point stays on the old probe's plane.
 fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
@@ -469,10 +523,12 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     }
     let blend=1.0/count;
     var out:FgProbe;
+    var fresh:array<vec4<f32>,10>;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {
-        let fresh=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);
-        out.sh[v]=select(fresh,mix(old.sh[v],fresh,blend),count>1.0);
+        fresh[v]=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);
+        out.sh[v]=select(fresh[v],mix(old.sh[v],fresh[v],blend),count>1.0);
     }
+    fg_note_change(index,fresh,old,count,s.normal);
     out.point=vec4<f32>(s.world,count);
     out.normal=vec4<f32>(s.normal,footprint);
     fg_store(index,size,out);
@@ -484,6 +540,20 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let frame=primary_frame.sided.y;
     let slot=lane/FG_RAYS;
     if lane<2u {atomicStore(&fg_asked[lane],0u);atomicStore(&fg_rays[lane],0u);}
+    if lane==0u {atomicStore(&fg_moved,0u);}
+    workgroupBarrier();
+    // A change at a tile probe within the filter's reach (5 x 5 tiles, both slots) this frame or
+    // the last keeps this tile's probes at the half rate: the filter would carry it here.
+    if lane<25u {
+        let t=vec2<i32>(group.xy)+vec2<i32>(i32(lane%5u)-2,i32(lane/5u)-2);
+        if all(t>=vec2<i32>(0)) && all(t<vec2<i32>(tiles)) {
+            let near=u32(t.y)*tiles.x+u32(t.x);
+            for(var k=0u;k<FG_SLOTS;k+=1u) {
+                let at=fg_state_at(near*FG_SLOTS+k);
+                if at<arrayLength(&fg_state) && fg_changed_recently(fg_state[at],frame) {atomicOr(&fg_moved,1u);}
+            }
+        }
+    }
     workgroupBarrier();
     // Slot 0: the first covered pixel of four the frame picks in the tile. Slot 1: the first of
     // eight more off slot 0's plane (every lane of a slot computes the same).
@@ -513,9 +583,13 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     }
     let index=tile*FG_SLOTS+slot;
     // Half rate: on alternate frames, a checkerboard of tiles keeps a probe that has history and
-    // still lies on the plane under its tile (fg_accumulate's test), instead of tracing it.
+    // still lies on the plane under its tile (fg_accumulate's test), instead of tracing it. A
+    // stable probe (fg_state) traces one frame in FG_STABLE_RATE.
     let old=fg_plane(index,size);
-    let keep=FG_HALF_RATE && ((group.x+group.y+frame)&1u)==1u && s.placement!=0u && old.point.w>=FG_HALF_MIN
+    let at=fg_state_at(index);
+    let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0xffu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
+    let turn=select((group.x+group.y+frame)&1u,(group.x+2u*group.y+frame)%FG_STABLE_RATE,stable);
+    let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old.point.w>=FG_HALF_MIN
         && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*old.normal.w;
     var traced=s;
     if keep {traced.placement=0u;}

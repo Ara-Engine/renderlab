@@ -325,13 +325,17 @@ pub(super) struct Targets {
     /// The final gather (`program::final_gather`; its kernels are in `ReceiverPipelines`): its
     /// probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK block and the tile probes' filtered
     /// copies, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe). Its
-    /// group 2 binds the cache's external request list (binding 30) instead of the materials
-    /// group: its probes read cache cells and sample no material, and hits without a cell
-    /// value ask for their cells there. Not in the shared lighting group: one more writable
+    /// group 2 binds the cache's external request list (binding 30) and its own probe state
+    /// (binding 31) instead of the materials group: its probes read cache cells and sample no
+    /// material, and hits without a cell value ask for their cells there. Not in the shared lighting group: one more writable
     /// buffer there put the reflection hits' pipeline over the per-stage storage limit.
     /// Binding 30's stand-in while the cache has no resources (its own stand-in is bound
     /// read-only in the lighting group): four words, no room for an entry.
     requests_stand_in: Option<Buffer>,
+    /// The gather's own probe state (binding 31, gi_receiver_pass.wgsl fg_state): word 0 set each
+    /// frame while every probe traces at its full rate (`GiState::recently_changed`), then two
+    /// words a probe, zero at creation.
+    probe_state: Option<Buffer>,
     tiles: [u32; 2],
     blocks: [u32; 2],
 }
@@ -395,6 +399,16 @@ impl Renderer {
             clear_keys: false,
             requests_stand_in: program::final_gather()
                 .then(|| Buffer::new(self, "final gather requests stand-in", 16, wgpu::BufferUsages::STORAGE)),
+            probe_state: program::final_gather().then(|| {
+                let probes = u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS
+                    + u64::from(size.width.div_ceil(FG_BLOCK)) * u64::from(size.height.div_ceil(FG_BLOCK));
+                Buffer::new(
+                    self,
+                    "final gather probe state",
+                    4 + probes * 8,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                )
+            }),
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
             blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
         }
@@ -442,6 +456,9 @@ impl Renderer {
         if gathers {
             self.gi.request_external();
             self.gi.request_emitters();
+            if let Some(state) = &target.probe_state {
+                self.queue.write_buffer(&state.value, 0, &u32::from(self.gi.recently_changed()).to_ne_bytes());
+            }
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
@@ -562,7 +579,7 @@ impl Renderer {
             let group = self.ledger.own(
                 self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("final gather, group 2"),
-                    entries: &[storage(30, 16)],
+                    entries: &[storage(30, 16), storage(31, 4)],
                 }),
                 ResourceKind::BindGroupLayout,
             );
@@ -640,10 +657,11 @@ impl Renderer {
         let bindings = state.bindings.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let shade = &**bindings.shade[shading as usize].as_ref().unwrap();
-        if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in)) = (
+        if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in), Some(probe_state)) = (
             pipelines.gather.as_ref(),
             pipelines.gather_group.as_ref(),
             target.requests_stand_in.as_ref(),
+            target.probe_state.as_ref(),
         ) {
             // The cache's list is replaced when its table grows, so the group follows it each frame.
             let requests = self.gi.external_requests();
@@ -651,7 +669,10 @@ impl Renderer {
             let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("final gather, group 2"),
                 layout,
-                entries: &[wgpu::BindGroupEntry { binding: 30, resource: requests.as_entire_binding() }],
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 30, resource: requests.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 31, resource: probe_state.value.as_entire_binding() },
+                ],
             });
             // Grids: probe tiles, the filter's 8x4 tiles a group, blocks, two blocks a group,
             // and the resolve's indirect pixel grid (None).
