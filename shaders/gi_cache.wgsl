@@ -2130,16 +2130,16 @@ fn gi_hit_value(slot:u32, h:GiHit) -> vec4<f32> {
 // orphan). Where that cell can never answer (an orphan: its probe found no surface at that level,
 // as at a thin part's coarse cells; or split: its probe lines met two surface layers facing its bin,
 // and its value mixes them), the hit's own level's cell answers, and is requested when absent. The
-// final gather reads the same way (reflection_cache_hits.wgsl rl_cache_cell). A cell that is
-// absent or not yet shaded gives no value for now (the ray is left out of the average, and the
-// gather repeats once); a tertiary gather requests nothing, so what it would request gives nothing.
+// final gather reads the same way (reflection_cache_hits.wgsl rl_cache_cell). A hit level's cell
+// that is absent or not yet shaded gives no value for now (the ray is left out of the average, and
+// the gather repeats once); an own level's cell without a value yet gives none (left out, no
+// repeat: below); a tertiary gather requests nothing, so what it would request gives nothing.
 fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
     let bin=gi_bin(r.vertex);
     let own=gi_hit_own_level(world);
     let base=gi_hit_level(world,h.t);
-    var level=base;
     var slot=gi_hit_find(world,bin,base);
     if slot!=0xffffffffu {
         let split=base>own && (gi_table[gi_hot(slot)+15u]&GI_SPLIT_HOT)!=0u;
@@ -2154,23 +2154,22 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             atomicAdd(&gi_work[GI_W_GATHER_ORPHANS],1u);
             return vec4<f32>(0.0,0.0,0.0,GI_HIT_NONE);
         }
-        level=own;
+        // The own level's cell answers, or is requested when absent. Until it has a value the ray
+        // is left out of the average as one that can give none (GI_HIT_NONE), not as missing:
+        // a missing value keeps the gather's schedule open (GC1 ends it only when no hit is
+        // missing), and around thin parts that kept every gather there running its whole count
+        // while walking (Outpost's non-RT walk: gathers 10.3 -> 31.7 ms).
         slot=gi_hit_find(world,bin,own);
-        if slot!=0xffffffffu {
-            if gi_outgoing[slot].w>0.0 {
-                atomicAdd(&gi_work[GI_W_GATHER_FINER],1u);
-                return gi_hit_value(slot,h);
-            }
-            if (gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u {
-                atomicAdd(&gi_work[GI_W_GATHER_ORPHANS],1u);
-                return vec4<f32>(0.0,0.0,0.0,GI_HIT_NONE);
-            }
-            atomicAdd(&gi_work[GI_W_GATHER_UNSHADED],1u);
-            return vec4<f32>(0.0);
+        if slot!=0xffffffffu && gi_outgoing[slot].w>0.0 {
+            atomicAdd(&gi_work[GI_W_GATHER_FINER],1u);
+            return gi_hit_value(slot,h);
         }
+        if slot==0xffffffffu && band!=0u { gi_request_one(own,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(own),bin))),band); }
+        atomicAdd(&gi_work[GI_W_GATHER_ORPHANS],1u);
+        return vec4<f32>(0.0,0.0,0.0,GI_HIT_NONE);
     }
-    // The cell at `level` is absent: requested, except by a tertiary gather.
-    if band!=0u { gi_request_one(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin))),band); }
+    // The hit level's cell is absent: requested, except by a tertiary gather.
+    if band!=0u { gi_request_one(base,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(base),bin))),band); }
     atomicAdd(&gi_work[select(GI_W_GATHER_ABSENT,GI_W_GATHER_ORPHANS,tertiary)],1u);
     return vec4<f32>(0.0,0.0,0.0,select(0.0,GI_HIT_NONE,tertiary));
 }
