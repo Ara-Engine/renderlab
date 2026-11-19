@@ -640,7 +640,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     // the named triangles, once. The edge line (VSM_SIL_GEOM) takes them at every marked texel:
     // an outline's outermost face (a tube's, steep) is often such a sliver.
     let named=n;
-    let ring=VSM_SIL_GEOM || (open!=0u && open!=0xffu);
+    let ring=VSM_SIL_GEOM || VSM_SIL_RING || (open!=0u && open!=0xffu);
     for(var m=0u;m<select(0u,named,ring);m+=1u) {
         let placement=ids[m]>>bits;
         let batch=primary_placements[placement-1u]&0x1fffffffu;
@@ -763,6 +763,8 @@ override VSM_LINE_EDGE_TOP:bool=false;
 // texel an outline edge crosses. Off (the covered fraction): lines only where the samples split,
 // their centroid side placed by their count, for the rank shares (vd_side).
 override VSM_SIL_GEOM:bool=false;
+// Measurement (`RENDERLAB_VSM=VSM_SIL_RING=true`): the adjacency ring at every marked texel.
+override VSM_SIL_RING:bool=false;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=32u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
