@@ -795,6 +795,12 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
             atomicStore(&vsm_peel_map[i],(u64(bitcast<u32>(low))<<32u)|u64(lid));
         }
     }
+    // Promoted over another mesh's centre: that surface is the next one down at the centre, and
+    // the exact hard edges read the texel by it (vd_near), as the map holds it without the
+    // fraction (an object under a caster's outline is still an occluder for what lies below).
+    if partial && id!=0u && (bid>>bits)!=(id>>bits) {
+        atomicStore(&vsm_peel_map[i],(u64(bitcast<u32>(h)&~7u)<<32u)|u64(id));
+    }
 }
 // The share of the unit square past offset s along unit n (vsm_area_offset's inverse).
 fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
