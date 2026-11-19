@@ -730,9 +730,15 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
         if VSM_LINE_EDGE_TOP {best=lz;bid=lid;} else if lid!=bid && lz>best {best=lz;bid=lid;}
         k=clamp(u32(round(vsm_area_beyond(ln,ls)*8.0)),1u,7u);
         partial=true;
-    } else if partial {
-        ln=vsm_centroid_side(cover);
-        ls=vsm_area_offset(ln,f32(k)/8.0);
+    } else {
+        // A promotion keeps the map's own answer reachable: with no near sample it is undone,
+        // and over all eight the texel counts as partial (7) so its centre's flag is stored.
+        if bid!=id && k==0u {best=h;bid=id;}
+        if bid!=id && k==8u {k=7u;partial=true;}
+        if partial {
+            ln=vsm_centroid_side(cover);
+            ls=vsm_area_offset(ln,f32(k)/8.0);
+        }
     }
     // The fold (vsm_fold) here, as no other pass writes this texel's samples: the count in the
     // top word's low height bits (the raster cleared them) with any promotion, and the line.

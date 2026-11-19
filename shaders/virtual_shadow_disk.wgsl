@@ -608,6 +608,10 @@ struct VdNear {state:u32,id:u32,t:f32};
 fn vd_near(i:u32,c:vec2<f32>,margin:f32,cut:f32)->VdNear {
     let top=vsm_top_words[i];
     if top.x==0u {return VdNear(0u,0u,0.0);}
+    // The covered fraction: a partly covered texel reads as the map holds it without the
+    // fraction, by its centre (an outline's outer row, promoted to the caster, would otherwise
+    // close every 2x2 across the outline and lose its pixels' exact edges).
+    if VD_FRACTION && !VD_SIDE_LINE && (top.y&7u)!=0u && (vd_cover_word(i)&0x8000u)==0u {return VdNear(0u,0u,0.0);}
     let height=vsm_height(top);
     let t=height-vd_px.p.z;
     // The walk's own rule (vd_texel): above the receiver's tangent plane and its bias.
