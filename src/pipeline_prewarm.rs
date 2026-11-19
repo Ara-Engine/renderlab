@@ -116,6 +116,8 @@ impl Renderer {
         }
         let after = self.stats();
         self.device.mark_prepared();
+        // The loading screen is up: put what prepare compiled on disk now.
+        self.device.save_cache();
         Ok(crate::engine::PipelinePreparation {
             cpu: start.elapsed(),
             render_pipelines: after.ownership.get(ResourceKind::RenderPipeline).created
