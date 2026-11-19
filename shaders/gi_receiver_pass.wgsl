@@ -331,8 +331,9 @@ fn fg_touch(slot:u32) {
 // Stable probes. A tile probe whose last FG_STABLE traced updates saw no change traces one frame
 // in FG_STABLE_RATE instead of every other frame (half rate). Each update gets the same rays, so
 // a stable probe's noise is unchanged; only a change it has not traced yet waits longer. It
-// returns to the half rate as soon as it or a tile probe within the filter's reach (two tiles)
-// sees a change, and every probe does on a cut, a camera jump or a lighting edit (word 0, set
+// returns to the half rate as soon as it or a tile probe the filter blends into it (the 3 x 3
+// tiles around it: fg_filter reaches one tile for probes past FG_FILTER_SHORT frames of history,
+// as stable ones are) sees a change, and every probe does on a cut, a camera jump or a lighting edit (word 0, set
 // from the cache's planner: src/gi_receiver_pass.rs). Per probe (tile probes, then one per
 // block, as fg_at numbers them) two words from 1: its traced updates in a row without a change
 // (bits 0-7, saturating) with the frame of its last change (bits 8-31), and the f32 bits of its
@@ -482,8 +483,10 @@ fn fg_irradiance(sh:array<vec4<f32>,10>,n:vec3<f32>)->f32 {
 // change (a running mean of the updates that were not changes: a fresh update of FG_HEMI rays
 // differs from the history by its noise, which varies from probe to probe) and above
 // FG_CHANGE_MIN. Probes without FG_HALF_MIN frames of history only learn their usual change.
-const FG_CHANGE:f32=2.5;
-const FG_CHANGE_MIN:f32=0.1;
+// On Glint's settled views 2.5 times the usual change flagged 4-6% of updates, nearly all noise,
+// which kept three probes in four at the half rate through their neighbours; 4 times flags 1%.
+const FG_CHANGE:f32=4.0;
+const FG_CHANGE_MIN:f32=0.15;
 fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:vec3<f32>) {
     let at=fg_state_at(index);
     if at+1u>=arrayLength(&fg_state) {return;}
@@ -542,10 +545,10 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     if lane<2u {atomicStore(&fg_asked[lane],0u);atomicStore(&fg_rays[lane],0u);}
     if lane==0u {atomicStore(&fg_moved,0u);}
     workgroupBarrier();
-    // A change at a tile probe within the filter's reach (5 x 5 tiles, both slots) this frame or
-    // the last keeps this tile's probes at the half rate: the filter would carry it here.
-    if lane<25u {
-        let t=vec2<i32>(group.xy)+vec2<i32>(i32(lane%5u)-2,i32(lane/5u)-2);
+    // A change at a tile probe the filter blends in (3 x 3 tiles, both slots) this frame or the
+    // last keeps this tile's probes at the half rate: the filter would carry it here.
+    if lane<9u {
+        let t=vec2<i32>(group.xy)+vec2<i32>(i32(lane%3u)-1,i32(lane/3u)-1);
         if all(t>=vec2<i32>(0)) && all(t<vec2<i32>(tiles)) {
             let near=u32(t.y)*tiles.x+u32(t.x);
             for(var k=0u;k<FG_SLOTS;k+=1u) {
