@@ -666,7 +666,19 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     var cover=0u;
     for(var s=0u;s<VSM_SAMPLES;s+=1u) {
         let near=vsm_sil_z[s]>=0.0 && vsm_sil_z[s]>=lowest-vsm_sil_reach[s];
-        if near || (own!=0u && vsm_sil_pl[s]==own) {cover|=1u<<s;}
+        var covered=near || (own!=0u && vsm_sil_pl[s]==own);
+        // A sample no candidate covers lies on a triangle none names (a sliver between named
+        // centres) or on nothing: the texel toward it decides, covered where its centre holds
+        // the top's mesh or a surface in the near layer. A sample over another object's named
+        // surface below, or toward an empty texel, stays open (a thin caster's sides).
+        if VSM_SIL_FILL && vsm_sil_z[s]<0.0 && own!=0u {
+            let o=vsm_sample(s);
+            let d=vec2<i32>(select(0,select(-1,1,o.x>0.0),abs(o.x)>0.25),select(0,select(-1,1,o.y>0.0),abs(o.y)>0.25));
+            let j=u32(i32(ce)+d.x+d.y*18);
+            let nid=vsm_wg_sil_id[j];
+            if nid!=VSM_SIL_OUT && nid!=0u && ((nid>>bits)==own || vsm_wg_sil_h[j]>=lowest) {covered=true;}
+        }
+        if covered {cover|=1u<<s;}
     }
     // The silhouette map: the outline crossing this texel as a line. Of the edges of the near
     // layer's triangles (a plane reaching the near layer at the texel) that cross the texel's
@@ -780,6 +792,8 @@ override VSM_LINE_EDGE_TOP:bool=false;
 override VSM_SIL_GEOM:bool=false;
 // Measurement (`RENDERLAB_VSM=VSM_SIL_RING=true`): the adjacency ring at every marked texel.
 override VSM_SIL_RING:bool=false;
+// Samples no candidate covers take the texel toward them (vsm_silhouette); off: measurement.
+override VSM_SIL_FILL:bool=true;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=32u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
