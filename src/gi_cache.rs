@@ -3698,7 +3698,19 @@ impl Renderer {
             };
             let models = buffer("indirect cache placement transforms", count * 64);
             let normals = buffer("indirect cache placement normals", count * 64);
-            let table = buffer("indirect cache placement draws", count * 4);
+            // The placement words, then each draw's batch word counted back from the end, as the
+            // primary pass lays them out: `primary_batch_info` reads a draw's triangle count from
+            // there (the emitter list, cell shading's emission probe). Without the tail it read a
+            // placement word, and the list took 0 or another draw's count of triangles.
+            let batches: Vec<u32> = draws
+                .iter()
+                .map(|d| {
+                    let skinned = d.mesh.skin.as_ref().is_some_and(|s| s.previous.size() > d.mesh.vertex.size());
+                    crate::primary_ray::batch_word(d.mesh.index.size() / 4, skinned)
+                })
+                .collect();
+            let placements = crate::primary_ray::placement_words(&placements, &batches);
+            let table = buffer("indirect cache placement draws", placements.len() as u64 * 4);
             let absent = buffer("indirect cache absent storage", 48);
             let words: Vec<u8> = placements.iter().flat_map(|v| v.to_ne_bytes()).collect();
             if !words.is_empty() {
