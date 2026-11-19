@@ -790,7 +790,15 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
             if k!=0u {atomicAdd(&vd_edge_count[6],1u);if any(m!=vec2<u32>(0u)) {atomicAdd(&vd_edge_count[7],1u);}}
         }
         if k!=0u {
-            if VD_SIDE_RANK {m=vd_side(m,i,k);} else {m=vd_half(m,i,c-p.xy,size,clo,chi);}
+            if VD_SIDE_LINE {m=vd_half(m,i,c-p.xy,size,clo,chi);} else {
+                // The fraction is coverage filtered over the texel: right where the sun's cone
+                // at the column's top is a texel wide or more, wrong under that (a contact: one
+                // grey a texel, stairs). Below half a texel the texel is binary as without the
+                // fraction (covered where most of it is; the exact hard edges decide outlines),
+                // blended to the rank shares by one texel.
+                let wide=smoothstep(0.5,1.0,2.0*vd_px.radius*chi/size);
+                m=vd_side(m,i,k,wide);
+            }
         }
     }
     // Straight outlines: only a column that adds samples without covering the disk reads its
@@ -849,9 +857,10 @@ fn vd_side_mask(a:u32,r:u32)->vec2<u32> {
 // texel, else the covered samples' side placed by their count). The column's directions m (a
 // texel of side `size` centred `c` from the receiver, from height `lo` to `hi`) keep those
 // through that part at some height. A narrow cone (a contact shadow) then sees the
-// line where it crosses the texel, not k/8 of every direction: rank shares (vd_side,
-// `RENDERLAB_VD=VD_SIDE_RANK=true`) give each texel one grey, a staircase at hard edges.
-override VD_SIDE_RANK:bool=false;
+// line where it crosses the texel, not k/8 of every direction. Parked behind
+// `RENDERLAB_VSM_FRACTION=line` (virtual_shadow_gpu.rs `fraction_mode`); the rank shares
+// (vd_side) are the covered fraction.
+override VD_SIDE_LINE:bool=false;
 fn vd_half(m:vec2<u32>,i:u32,c:vec2<f32>,size:f32,lo:f32,hi:f32)->vec2<u32> {
     let w=vd_cover_word(i);
     let a=f32(w&255u)*(6.28318531/256.0);
@@ -892,10 +901,11 @@ fn vd_half_word(word:u32,base:u32,c:vec2<f32>,half:f32,lo:f32,hi:f32,n:vec2<f32>
     return out;
 }
 // Of the directions in m (a column of texel i whose near layer covers k eighths), the k/8 through
-// its covered side (VD_SIDE_RANK).
-fn vd_side(m:vec2<u32>,i:u32,k:u32)->vec2<u32> {
+// its covered side, blended by `wide` (0..1) from the binary texel: all of m where k >= 4, none
+// under.
+fn vd_side(m:vec2<u32>,i:u32,k:u32,wide:f32)->vec2<u32> {
     let c=countOneBits(m.x)+countOneBits(m.y);
-    let t=(k*c+4u)/8u;
+    let t=u32(round(mix(f32(select(0u,c,k>=4u)),f32(k*c)/8.0,wide)));
     if t==0u {return vec2<u32>(0u);}
     if t>=c {return m;}
     // The side's angle, found once from the covered samples at the page raster (vsm_fold).

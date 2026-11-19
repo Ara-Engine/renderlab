@@ -980,6 +980,11 @@ pub(super) fn shader_source() -> String {
         "override VSM_MSAA:bool=false;",
         &format!("override VSM_MSAA:bool={};", fraction_mode() == 2),
         1,
+    )
+    .replacen(
+        "override VSM_SIL_GEOM:bool=false;",
+        &format!("override VSM_SIL_GEOM:bool={};", fraction_mode() == 3),
+        1,
     );
     // Measurement: `RENDERLAB_VSM=NAME=value,...` sets the page module's overrides.
     let mut source: String = source;
@@ -999,19 +1004,23 @@ pub(super) fn shader_source() -> String {
     source
 }
 /// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): each silhouette texel's
-/// near-layer coverage becomes a count and a line (the covering triangle's outline edge, WGSL
-/// `vsm_cover`), and the Disk lookup lets a partly covered column block only the directions
-/// through its part beyond that line. `=1` takes them from the map's ids after a raster at texel
-/// centres (WGSL `vsm_silhouette`); `=msaa` from a multisampled raster, the comparison.
+/// near-layer coverage becomes a count of eighths and its covered side (WGSL `vsm_cover`), and
+/// the Disk lookup lets a partly covered column block that share of its directions from that
+/// side where the sun's cone there is a texel wide or more, the texel binary where it is
+/// narrower (WGSL `vd_side`). `=1` takes them from the map's ids after a raster at texel centres
+/// (WGSL `vsm_silhouette`); `=msaa` from a multisampled raster, the comparison; `=line` the
+/// parked edge-line form.
 fn fraction_on() -> bool {
     fraction_mode() != 0
 }
-/// 0 off, 1 from ids, 2 multisampled (`fraction_on`).
+/// 0 off, 1 from ids, 2 multisampled, 3 from ids as edge lines (`=line`, parked: WGSL
+/// `VSM_SIL_GEOM`, `VD_SIDE_LINE`) (`fraction_on`).
 fn fraction_mode() -> u8 {
     static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("RENDERLAB_VSM_FRACTION").as_deref().map(str::trim) {
         Ok("1") => 1,
         Ok("msaa") => 2,
+        Ok("line") => 3,
         _ => 0,
     })
 }
@@ -1129,6 +1138,11 @@ pub(super) fn disk_source() -> String {
         .replacen(
             "override VD_FRACTION:bool=false;",
             &format!("override VD_FRACTION:bool={};", fraction_on()),
+            1,
+        )
+        .replacen(
+            "override VD_SIDE_LINE:bool=false;",
+            &format!("override VD_SIDE_LINE:bool={};", fraction_mode() == 3),
             1,
         )
 }
@@ -4354,7 +4368,7 @@ impl Renderer {
         });
         // The covered fraction, before the mips read the top words: the silhouette texels' samples
         // from ids, folded as they are found; or, multisampled, the count of the raster's samples.
-        if fraction_mode() == 1 {
+        if matches!(fraction_mode(), 1 | 3) {
             pass.set_bind_group(0, &*g.raster, &[]);
             pass.set_bind_group(1, arrays, &[]);
             pass.set_bind_group(2, &*casters.data, &[]);

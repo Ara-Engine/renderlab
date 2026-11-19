@@ -630,14 +630,18 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     vsm_sil_best=select(-1.0,h,id!=0u);vsm_sil_bid=id;
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
     var inside:array<u32,VSM_SIL_IDS>;
+    var open=0xffu;
     for(var m=0u;m<n;m+=1u) {
         inside[m]=vsm_sil_triangle(ids[m],level,centre);
+        open&=~inside[m];
     }
     // A fan or strip meeting inside the texel can hold triangles whose corners no texel centre
-    // sees, and an outline's outermost face (a tube's, steep) is often such a sliver: the edge
-    // neighbours (the index buffer's adjacency) of the named triangles, once.
+    // sees: where samples are left open, the edge neighbours (the index buffer's adjacency) of
+    // the named triangles, once. The edge line (VSM_SIL_GEOM) takes them at every marked texel:
+    // an outline's outermost face (a tube's, steep) is often such a sliver.
     let named=n;
-    for(var m=0u;m<named;m+=1u) {
+    let ring=VSM_SIL_GEOM || (open!=0u && open!=0xffu);
+    for(var m=0u;m<select(0u,named,ring);m+=1u) {
         let placement=ids[m]>>bits;
         let batch=primary_placements[placement-1u]&0x1fffffffu;
         for(var e=0u;e<3u;e+=1u) {
@@ -754,9 +758,11 @@ fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
 // above it: off by default (the texel's own top, raised to the edge's part where that stands
 // higher). Measurement: `RENDERLAB_VSM=VSM_LINE_EDGE_TOP=true`.
 override VSM_LINE_EDGE_TOP:bool=false;
-// Measurement (`RENDERLAB_VSM=VSM_SIL_GEOM=false`): lines only where the samples split, placed by
-// their centroid and count (the mark test against the multisampled raster counts samples).
-override VSM_SIL_GEOM:bool=true;
+// The edge line (`RENDERLAB_VSM_FRACTION=line`, virtual_shadow_gpu.rs `fraction_mode`; parked: it
+// failed Glint's rail with a one-texel sawtooth, leaked at contacts and cost 3 ms): lines at every
+// texel an outline edge crosses. Off (the covered fraction): lines only where the samples split,
+// their centroid side placed by their count, for the rank shares (vd_side).
+override VSM_SIL_GEOM:bool=false;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=32u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
