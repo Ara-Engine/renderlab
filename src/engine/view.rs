@@ -217,24 +217,26 @@ impl Engine {
             bytes.extend(image.rgba8.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
             std::fs::write(dir.join(format!("{name}.ppm")), bytes)
         });
+        // The frame's exposure beside it: an embedder's automatic exposure moves it between
+        // runs, so a path-traced reference is displayed at each frame's own stops.
+        let super::Exposure::Manual { stops } = self.views[self.view_index(view)?].desc.look.exposure;
+        let written = result.as_ref().is_ok_and(|r| r.is_ok());
+        let record = |extra: &str| format!("{{\"frame\":{frame},\"exposure_stops\":{stops}{extra}}}\n");
+        if written {
+            let _ = std::fs::write(dir.join(format!("{name}.json")), record(""));
+        }
         // With RENDERLAB_READBACK_HDR=1, the same frame's linear image before the tone curve
-        // too: `<name>.pfm`, the view's HDR target over its pre-exposure (absolute radiance, as
-        // the live reference's reference.pfm), so engine-over-reference ratios are taken in
-        // linear and bright regions do not saturate. About 25 MB at 1080p.
+        // too, after the PPM and its record (a failed HDR capture never costs the frame the
+        // gates read): `<name>.pfm`, the view's HDR target over its pre-exposure (absolute
+        // radiance, as the live reference's reference.pfm), so engine-over-reference ratios are
+        // taken in linear and bright regions do not saturate. About 25 MB at 1080p.
         let hdr = (std::env::var("RENDERLAB_READBACK_HDR").as_deref() == Ok("1"))
             .then(|| self.capture_view_hdr(view).and_then(|(w, h, rgb, exposure)| {
                 super::live_reference::pfm(&dir.join(format!("{name}.pfm")), [w, h], &rgb)?;
                 Ok(exposure)
             }));
-        // The frame's exposure beside it: an embedder's automatic exposure moves it between
-        // runs, so a path-traced reference is displayed at each frame's own stops.
-        let super::Exposure::Manual { stops } = self.views[self.view_index(view)?].desc.look.exposure;
-        if result.as_ref().is_ok_and(|r| r.is_ok()) {
-            let pre = match &hdr {
-                Some(Ok(exposure)) => format!(",\"pre_exposure\":{exposure}"),
-                _ => String::new(),
-            };
-            let _ = std::fs::write(dir.join(format!("{name}.json")), format!("{{\"frame\":{frame},\"exposure_stops\":{stops}{pre}}}\n"));
+        if let (true, Some(Ok(exposure))) = (written, &hdr) {
+            let _ = std::fs::write(dir.join(format!("{name}.json")), record(&format!(",\"pre_exposure\":{exposure}")));
         }
         use std::io::Write;
         if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("readback.log")) {
