@@ -18,9 +18,11 @@
 //!   the top face and the roof, so a hit that reads a cell coarser than its footprint (whose
 //!   volume reaches the emitter's side) shows as light. With the final gather on, the test
 //!   also fails if the gather still asks the cache for cells on the settled view's last frame.
-//! - `slab-tall`: the same with the roof 4 m up, so gathers between roof and slab reach both at
-//!   footprint levels whose cells span the slab (cells 2 m on an edge and more, which hold the
-//!   emitter's light below it unless split detection keeps them out).
+//! - `slab-tall`: the same with the roof 4 m up, so gathers between roof and slab read both at
+//!   coarse footprint levels (cells 2 m on an edge and more). The slab's top-face cells are not
+//!   orphans and the cell lattice is aligned at y = 0, between the emitter and the top face, so
+//!   neither case reproduces the coarse fallback that leaked around Glint's thin spinner parts
+//!   (gi_hit_radiance); they guard that every level a reader reaches here stays black.
 //!
 //!   In both roofed cases every reader fails the test unless the top face and the roof stay black
 //!   (no pixel above 1e-3 cd/m^2) on every sampled frame.
