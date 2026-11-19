@@ -220,14 +220,55 @@ impl Engine {
         // The frame's exposure beside it: an embedder's automatic exposure moves it between
         // runs, so a path-traced reference is displayed at each frame's own stops.
         let super::Exposure::Manual { stops } = self.views[self.view_index(view)?].desc.look.exposure;
-        if result.as_ref().is_ok_and(|r| r.is_ok()) {
-            let _ = std::fs::write(dir.join(format!("{name}.json")), format!("{{\"frame\":{frame},\"exposure_stops\":{stops}}}\n"));
+        let written = result.as_ref().is_ok_and(|r| r.is_ok());
+        let record = |extra: &str| format!("{{\"frame\":{frame},\"exposure_stops\":{stops}{extra}}}\n");
+        if written {
+            let _ = std::fs::write(dir.join(format!("{name}.json")), record(""));
+        }
+        // With RENDERLAB_READBACK_HDR=1, the same frame's linear image before the tone curve
+        // too, after the PPM and its record (a failed HDR capture never costs the frame the
+        // gates read): `<name>.pfm`, the view's HDR target over its pre-exposure (absolute
+        // radiance, as the live reference's reference.pfm), so engine-over-reference ratios are
+        // taken in linear and bright regions do not saturate. About 25 MB at 1080p.
+        let hdr = (std::env::var("RENDERLAB_READBACK_HDR").as_deref() == Ok("1"))
+            .then(|| self.capture_view_hdr(view).and_then(|(w, h, rgb, exposure)| {
+                super::live_reference::pfm(&dir.join(format!("{name}.pfm")), [w, h], &rgb)?;
+                Ok(exposure)
+            }));
+        if let (true, Some(Ok(exposure))) = (written, &hdr) {
+            let _ = std::fs::write(dir.join(format!("{name}.json")), record(&format!(",\"pre_exposure\":{exposure}")));
         }
         use std::io::Write;
         if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("readback.log")) {
-            let _ = writeln!(log, "{frame} {name} stops={stops} {result:?}");
+            let _ = writeln!(log, "{frame} {name} stops={stops} {result:?}{}", hdr.map(|h| format!(" hdr {:?}", h.map(|_| ()))).unwrap_or_default());
         }
         Ok(())
+    }
+    /// Measurement: the view's HDR target after its last frame (blocking), as linear RGB over its
+    /// pre-exposure, row by row from the top: width, height, pixels and the pre-exposure.
+    fn capture_view_hdr(&mut self, view: ViewId) -> Result<(u32, u32, Vec<[f32; 3]>, f32), Error> {
+        self.renderer.select_view(view)?;
+        let mut capture = self.admit("HDR capture admission timed out", |r| r.try_capture_hdr())?;
+        let info = capture.info();
+        let exposure = info.pre_exposure.unwrap_or(1.0);
+        let deadline = Instant::now() + super::ADMISSION;
+        loop {
+            super::stash(&mut self.events, self.renderer.poll()?);
+            if let Some(bytes) = capture.try_read()? {
+                if info.format != wgpu::TextureFormat::Rgba16Float {
+                    return Err(Error::InvalidInput("HDR readback expects an Rgba16Float target"));
+                }
+                let rgb = bytes
+                    .chunks_exact(8)
+                    .map(|p| std::array::from_fn(|k| crate::decode_f16(u16::from_le_bytes([p[2 * k], p[2 * k + 1]])) / exposure))
+                    .collect();
+                return Ok((info.width, info.height, rgb, exposure));
+            }
+            if Instant::now() > deadline {
+                return Err(Error::InvalidInput("HDR capture readback timed out"));
+            }
+            std::thread::yield_now();
+        }
     }
     /// Renders `view` from `camera` into `color`: a single-sample 2D render attachment in
     /// the engine's output format, such as a surface texture (then call `present`). The

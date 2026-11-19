@@ -12,6 +12,10 @@ use crate::reference;
 use glam::Vec2;
 use serde_json::{Value as Json, json};
 use std::path::{Path, PathBuf};
+
+/// The white-furnace fixture (analytic scenes for every indirect-light estimator).
+#[path = "gi_furnace_tests.rs"]
+mod furnace;
 // DC1 reuses the existing headless devices, quarry loader and image/timing helpers.
 #[path = "decal_gpu_tests.rs"]
 mod decal_tests;

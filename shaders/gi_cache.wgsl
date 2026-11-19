@@ -156,6 +156,10 @@ const GI_W_BQUEUE:u32=38u;
 const GI_W_GATHER_ABSENT:u32=39u;
 const GI_W_GATHER_UNSHADED:u32=40u;
 const GI_W_GATHER_ORPHANS:u32=41u;
+// Gather rays a coarser level answered: the hit level's cell an orphan (taken as final), or
+// absent (taken while it is requested; the gather repeats once).
+const GI_W_GATHER_COARSE_ORPHAN:u32=204u;
+const GI_W_GATHER_COARSE_ABSENT:u32=205u;
 // Queued cells a capped gather frame left for next frame (gi_gather).
 const GI_W_GATHER_DEFERRED:u32=42u;
 // Listed misses a capped claim left for a later frame (gi_claim, GI_H_CLAIM_CELLS).
@@ -228,6 +232,14 @@ fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 // the CPU then clears the count.
 @group(0) @binding(38) var<storage,read_write> gi_external:array<atomic<u32>>;
 const GI_EXTERNAL_CAPACITY:u32=16384u;
+// After the entries, one bit per slot (up to 2^21): cells an outside reader read this frame, or
+// found existing without a value. gi_external_requests stamps them seen (a reader outside the
+// cache keeps its cells alive, as the probe and the gathers keep theirs, so a full bucket does not
+// give them up while the reader still uses them: Glint's settled spinner view created and evicted
+// about 400 of the final gather's cells a frame, and 19% of its hits found no value at their cone
+// level), schedules a gather of those with no value yet, and clears the bits.
+const GI_EXTERNAL_SEEN:u32=4u+4u*GI_EXTERNAL_CAPACITY;
+const GI_EXTERNAL_SEEN_WORDS:u32=65536u;
 const GI_W_EXTERNAL:u32=220u;
 const GI_W_EXTERNAL_OVERFLOW:u32=221u;
 // The list's words 2 and 3: two counters a reader may add to (the final gather's rays and its
@@ -1989,6 +2001,24 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
         if gi_find_pair(gi_key(level,bin,cell))!=0xffffffffu { continue; }
         gi_request_one(level,bin,cell,GI_BAND_SECONDARY);
     }
+    // The reader's cells: one thread a word, so each slot once.
+    for(var w=id.x;w<GI_EXTERNAL_SEEN_WORDS;w+=groups.x*64u) {
+        var bits=atomicExchange(&gi_external[GI_EXTERNAL_SEEN+w],0u);
+        while bits!=0u {
+            let slot=w*32u+firstTrailingBit(bits);
+            bits&=bits-1u;
+            if slot>=gi_frame.offsets.x || gi_table[gi_hot(slot)]==0u { continue; }
+            let cold=gi_cold(slot);
+            gi_table[cold+GI_C_SEEN]=gi_word(GI_H_FRAME);
+            // A traced cell the reader found without a value, and no gather on its way: one now,
+            // whoever asked (orphans never get a value; the reader asks finer there).
+            let state=gi_table[cold+GI_C_STATE];
+            if gi_bounce_on() && gi_outgoing[slot].w<=0.0 && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED
+                && (state&(GI_BQUEUED|GI_QUEUED))==0u {
+                gi_schedule(slot,1u);
+            }
+        }
+    }
 }
 fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
     let key=gi_key(level,bin,cell);
@@ -2097,6 +2127,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             // A hit on an emitting draw sends its reflected light only: its emission is the
             // emitter list's (gi_emitters.wgsl), sampled as a light by every gather.
             let reflected=max(o.rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
+            if l>base { atomicAdd(&gi_work[select(GI_W_GATHER_COARSE_ABSENT,GI_W_GATHER_COARSE_ORPHAN,orphan)],1u); }
             return vec4<f32>(reflected,select(GI_HIT_MISSING,settled,l==base || orphan));
         }
         if l==base {

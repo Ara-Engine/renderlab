@@ -42,18 +42,29 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
 // radiance (rgb, unexposed) of the hit's cell, settled or changing, w 0 when no cell there has a
 // value or the cache is off. The cell is the one a pixel at the hit, seen from the ray's origin,
 // reads: its bin from the interpolated vertex normal on the side the ray sees (gi_bin_source, as
-// gi_prepare picks it). Levels in order: the one the cone covers, then the coarser ones, then the
-// finer ones down to the hit's own, last (where pixels on screen made cells: a probe ray from the
-// floor to the tower's side met only those, and counted as black). Fine cells first carried their
-// cell-to-cell differences into the probes: blotches a probe wide in the tower's shadow. Movers
-// read their cells too: those lag the surface by a frame or so, which a probe's hemisphere
-// integral does not show. With no value it leaves the cell to request in rl_cache_missed, as
+// gi_prepare picks it). Levels in order: the one the cone covers, then the finer ones down to the
+// hit's own (where pixels on screen made cells: a probe ray from the floor to the tower's side met
+// only those). Never coarser than the cone: a coarser cell spans whatever lies within its edge on
+// the same side, and around thin geometry that includes light from the other side. Glint's course
+// underglow lit the top of the spinner's pad through the +Y cells that held both the thin pad
+// and the surfaces beneath it (79/130/204 there with the underglow alone, against the reference's
+// 0.8/1.2/1.6). Split cells above the own level are passed over for the same reason (gicut's
+// slab-roof furnace: the roof's -Y cells at the cone level also held the lit underside 0.5 m
+// below, and the slab's dark top read 0.35). A hit no level answers is left out of the probe's average (gi_receiver_pass.wgsl
+// fg_lane). Movers read their cells too: those lag the surface by a frame or so, which a probe's
+// hemisphere integral does not show. With no value it leaves the cell to request in rl_cache_missed, as
 // the cache's external request list takes it (level | bin << 8, then the lattice cell; x
 // 0xffffffff: none).
 var<private> rl_cache_missed:vec4<u32>;
 // The hit's geometric normal (unnormalized), for the reader's own use of the same triangle.
 var<private> rl_cache_geometric:vec3<f32>;
+// The slots the last rl_cache_cell used (0xffffffff: none): x the cell whose value it returned,
+// y the cone level's cell when it exists. A reader that can report them (the final gather, through
+// the cache's external list) keeps them alive: its reads count as the cache's own (gi_cache.wgsl
+// GI_EXTERNAL_SEEN).
+var<private> rl_cache_slots:vec2<u32>;
 fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
+    rl_cache_slots=vec2<u32>(0xffffffffu);
     if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
     let hit=primary_decode(record);
@@ -67,27 +78,31 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
     let bin=gi_bin(gi_bin_source(select(-geometric,geometric,dot(geometric,origin-world)>=0.0),vertex));
     let own=gi_level(world);
     let start=rl_cache_level(world,cone);
-    let last=gi_word(GI_H_LEVELS)-1u;
-    // k walks start .. last, then start-1 .. own.
     var at_start=0xffffffffu;
     var at_own=0xffffffffu;
-    for(var k=0u;k<=last-own;k+=1u) {
-        let l=select(start-1u-(k-(last-start+1u)),start+k,k<=last-start);
+    for(var k=0u;k<=start-own;k+=1u) {
+        let l=start-k;
         let slot=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
         if l==start { at_start=slot; }
         if l==own { at_own=slot; }
         if slot==0xffffffffu { continue; }
+        // A split cell above the hit's own level is not read: its probe lines met two surface
+        // layers facing its bin (a slab's underside and a roof's above it), and its value mixes
+        // them. The cache's own lookup reads finer there too (gi_sample_refined).
+        if l>own && (gi_word(gi_hot(slot)+15u)&GI_SPLIT_HOT)!=0u { continue; }
         let o=rl_cache_outgoing[slot];
-        if o.w>0.0 { return vec4<f32>(o.rgb,1.0); }
+        if o.w>0.0 { rl_cache_slots=vec2<u32>(slot,at_start); return vec4<f32>(o.rgb,1.0); }
     }
+    rl_cache_slots.y=at_start;
     // The cell to ask for: the cone level's when it is absent; the hit's own level's when the cone
     // level's is an orphan (its probe found no surface at that level, as at a thin part's coarse
-    // cells, so it never gets a value) and the own one is absent; none while the cell there only
-    // waits for its first gather.
+    // cells, so it never gets a value) or split, and the own one is absent; none while the cell
+    // there only waits for its first gather.
     rl_cache_missed=vec4<u32>(0xffffffffu);
     var ask=0xffffffffu;
     if at_start==0xffffffffu { ask=start; }
     else if (gi_word(gi_cold(at_start)+GI_C_STATE)&GI_ORPHAN)!=0u && at_own==0xffffffffu { ask=own; }
+    else if (gi_word(gi_hot(at_start)+15u)&GI_SPLIT_HOT)!=0u && at_own==0xffffffffu { ask=own; }
     if ask!=0xffffffffu {
         rl_cache_missed=vec4<u32>(ask|(bin<<8u),bitcast<vec3<u32>>(vec3<i32>(floor(gi_lattice(world,gi_edge(ask),bin)))));
     }

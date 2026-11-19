@@ -2544,6 +2544,38 @@ impl Renderer {
 
     /// Plans this frame's levels, windows and cache invalidation, uploads them, and builds
     /// bind groups over the receiver targets. Call after the primaries are prepared.
+    /// The view's virtual shadow state (its pipelines, lookups included), created on its first
+    /// virtual-shadow frame or by `prepare_virtual_pipelines`.
+    fn ensure_virtual_state(&mut self) {
+        if self.view.virtual_shadows.is_some() {
+            return;
+        }
+        let primary = self.view.primary.as_ref().unwrap();
+        let mut state = VirtualState::new(
+            &self.device,
+            &self.ledger,
+            primary.array_layout(),
+            &self.lighting.bindings,
+        );
+        state.settings = self.view.virtual_settings;
+        self.pipelines.created += 10;
+        self.view.virtual_shadows = Some(state);
+    }
+
+    /// Prepare (`prepare_view_pipelines`): the virtual shadow state and the lookup's order
+    /// pipelines a frame of this view would build, without a frame. The lookups VirtualState::new
+    /// builds are the frames' own: their constants are empty outside tests.
+    pub(super) fn prepare_virtual_pipelines(&mut self) {
+        if !self.device.features().contains(VIRTUAL_FEATURES) || self.view.primary.is_none() {
+            return;
+        }
+        self.ensure_virtual_state();
+        let state = self.view.virtual_shadows.as_mut().unwrap();
+        if state.persistent_groups().1 && state.pipelines.order.is_none() {
+            state.pipelines.order = Some(order_pipelines(&self.device, &self.ledger, state));
+        }
+    }
+
     pub(super) fn prepare_virtual(
         &mut self,
         draws: &[PreparedDraw<'_>],
@@ -2573,18 +2605,7 @@ impl Renderer {
             }
             _ => None,
         };
-        let primary = self.view.primary.as_ref().unwrap();
-        if self.view.virtual_shadows.is_none() {
-            let mut state = VirtualState::new(
-                &self.device,
-                &self.ledger,
-                primary.array_layout(),
-                &self.lighting.bindings,
-            );
-            state.settings = self.view.virtual_settings;
-            self.pipelines.created += 10;
-            self.view.virtual_shadows = Some(state);
-        }
+        self.ensure_virtual_state();
         self.ensure_virtual_casters(draws)?;
         let rotation = self.virtual_rotation(self.view.virtual_settings);
         // N-VSM1: the disk lookup's receiver jitter follows TR1's frames (`VdFrame::size.z`).
@@ -3430,21 +3451,7 @@ impl Renderer {
             state.pipelines.debug = debug;
         }
         if state.persistent_groups().1 && state.pipelines.order.is_none() {
-            let order = |entry| {
-                self.ledger.own(
-                    self.device
-                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                            label: Some(entry),
-                            layout: Some(&state.lookup_layout),
-                            module: &state.module,
-                            entry_point: Some(entry),
-                            compilation_options: Default::default(),
-                            cache: None,
-                        }),
-                    ResourceKind::ComputePipeline,
-                )
-            };
-            state.pipelines.order = Some([order("vsm_order_count"), order("vsm_order_place")]);
+            state.pipelines.order = Some(order_pipelines(&self.device, &self.ledger, state));
         }
         // N8k hybrid: the exact lookup over the queue, with the exact lookup's constants.
         if state.settings.lookup == VirtualLookup::Hybrid && state.pipelines.queued.is_none() {
@@ -4435,6 +4442,23 @@ impl Renderer {
             }
         }
     }
+}
+
+/// The persistent lookup's order pair (count, then place) for `state`'s module and layout.
+fn order_pipelines(device: &PipelineDevice, ledger: &Ledger, state: &VirtualState) -> [Owned<wgpu::ComputePipeline>; 2] {
+    ["vsm_order_count", "vsm_order_place"].map(|entry| {
+        ledger.own(
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: Some(&state.lookup_layout),
+                module: &state.module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            }),
+            ResourceKind::ComputePipeline,
+        )
+    })
 }
 
 #[cfg(test)]

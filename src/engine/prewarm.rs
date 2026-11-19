@@ -58,8 +58,9 @@ mod tests {
     }
 
     /// Prepare's goal: once a scene is prepared, no frame compiles a pipeline, from any view
-    /// of it. Three programs (the standard floor, a second opaque program, glass), then views
-    /// where each is in turn the frame's first program, one with all of them, and a cut back.
+    /// of it. Three programs (the standard floor, a second opaque program, glass) and an emitter
+    /// created after prepare (as a game spawns one in play), then views where each program is
+    /// in turn the frame's first, one with all of them, and a cut back.
     #[test]
     #[ignore = "GPU: compiles after prepare, both paths"]
     fn a_prepared_scene_compiles_nothing_in_its_frames() {
@@ -98,8 +99,23 @@ mod tests {
                 transparency: Some(crate::Transparency::default()),
                 ..Default::default()
             });
+            // A soft sun as Ara's scenes have: without ray hardware its shadows are the virtual
+            // clipmap's, and reflection hits read its map.
+            engine.set_sun(Some(crate::engine::Sun::default())).unwrap();
             let view = engine.create_view(&ViewDesc::new(160, 96)).unwrap();
             engine.prepare_pipelines().unwrap();
+            // A game spawns its emitters once play starts, after the scene is prepared.
+            engine
+                .create_emitter(
+                    &crate::EmitterDescriptor {
+                        position: Vec3::new(0.0, 1.0, 0.0),
+                        burst: 64,
+                        size: [0.3, 0.3],
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .unwrap();
             let look = |eye: [f32; 3], at: [f32; 3]| {
                 Camera::look_at(Vec3::from(eye), Vec3::from(at), Vec3::Y, 0.9, 0.05, 200.0).unwrap()
             };
@@ -136,7 +152,16 @@ impl Engine {
     /// and logged as `pipeline_compile_after_prepare`; the goal is none. Not a guarantee against
     /// driver first-use work or arbitrary future settings. The default-off `RENDERLAB_PREWARM_PIPELINES=1` calls it automatically
     /// before the engine's first frame. Explicit calls do not need that environment flag.
+    /// It compiles up to four pipelines at once (`RENDERLAB_PREPARE_COMPILES`); frames keep
+    /// the process's base limit.
     pub fn prepare_pipelines(&mut self) -> Result<PipelinePreparation, Error> {
+        crate::pipeline_compilation::with_compile_slots(
+            crate::pipeline_compilation::prepare_compile_slots(),
+            || self.prepare_pipelines_now(),
+        )
+    }
+
+    fn prepare_pipelines_now(&mut self) -> Result<PipelinePreparation, Error> {
         use crate::ResourceKind;
         // The opaque programs a frame can draw: one entry per loaded program, not per material.
         let mut programs: Vec<u64> = self
