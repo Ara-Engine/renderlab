@@ -2125,6 +2125,87 @@ const GI_GATHER_PERIOD_MAX:u32=64u;
 var<workgroup> gi_wg_bounce:array<f32,24u*GI_GATHER_LANES>;
 var<workgroup> gi_wg_missing:atomic<u32>;
 var<workgroup> gi_wg_changing:atomic<u32>;
+// Relative change of a cell's bounce (its L0 term's largest channel) below which its gathers
+// have converged: under the half-float storage's own step, well under a display step.
+const GI_CONVERGED:f32=1.0/256.0;
+// The L0 term per channel of slot's stored bounce: the hot words, or with the bounce filter on
+// the unfiltered value the last gather wrote (gi_raw).
+fn gi_bounce_dc(slot:u32, hot:u32) -> vec3<f32> {
+    var w=vec3<u32>(gi_table[hot+GI_HOT_BOUNCE],gi_table[hot+GI_HOT_BOUNCE+1u],gi_table[hot+GI_HOT_BOUNCE+2u]);
+    if gi_filter_on(GI_FILTER_BOUNCE) {
+        w=vec3<u32>(gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE)],gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE+1u)],gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE+2u)]);
+    }
+    if w.x==GI_BOUNCE_NONE { return vec3<f32>(0.0); }
+    let a=unpack2x16float(w.y);
+    return vec3<f32>(a.x,a.y,unpack2x16float(w.z).x)*bitcast<f32>(w.x);
+}
+// A gather's end, lane 0 of both gather kernels (hardware here, software in
+// gi_gather_software.wgsl), after the lanes' sums are reduced into gi_wg_bounce: the bounce
+// value written, then the cell's schedule.
+fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
+    let missing=atomicLoad(&gi_wg_missing);
+    if missing!=0u { atomicAdd(&gi_work[GI_W_GATHER_MISSES],missing); }
+    // A fixed-direction ray whose hit had no value yet at any level is left out of the
+    // average (the rejection estimator): counting it as zero light at full weight biased
+    // every such cell's bounce low (Glint's goal view: 4.5% of settled gather rays).
+    // Aimed rays and emitters are their own estimates and are added as they are.
+    let hits=atomicLoad(&gi_wg_hits);
+    let valued=atomicLoad(&gi_wg_valued);
+    let scale=select(1.0,f32(hits)/f32(valued),valued>0u && hits>valued);
+    for(var j=0u;j<12u;j+=1u) {
+        gi_wg_bounce[j*GI_GATHER_LANES]=gi_wg_bounce[j*GI_GATHER_LANES]*scale+gi_wg_bounce[(12u+j)*GI_GATHER_LANES];
+    }
+    var m=0.0;
+    for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[j*GI_GATHER_LANES])); }
+    let hot=gi_hot(slot);
+    let before=gi_bounce_dc(slot,hot);
+    if valued==0u && hits>0u {
+        // Every hit was without a value: nothing to average, so the cell keeps its last
+        // bounce (its retry gathers again).
+    } else if m<=0.0 {
+        gi_table[hot+GI_HOT_BOUNCE]=GI_BOUNCE_NONE;
+    } else {
+        for(var w=0u;w<6u;w+=1u) {
+            let a=gi_wg_bounce[(2u*w)*GI_GATHER_LANES];
+            let b=gi_wg_bounce[(2u*w+1u)*GI_GATHER_LANES];
+            gi_table[hot+GI_HOT_BOUNCE+1u+w]=pack2x16float(vec2<f32>(a,b)/m);
+        }
+        gi_table[hot+GI_HOT_BOUNCE]=bitcast<u32>(m);
+    }
+    // The unfiltered value, the filter's source (G3).
+    if gi_filter_on(GI_FILTER_BOUNCE) {
+        for(var w=GI_HOT_BOUNCE;w<GI_HOT_BOUNCE+7u;w+=1u) { gi_raw[gi_raw_at(slot,w)]=gi_table[hot+w]; }
+    }
+    // The schedule: one gather done. A gather that met hit cells without a value yet
+    // (new this frame, or requested now) is repeated once more.
+    var left=(state&GI_GATHER_MASK)>>GI_GATHER_SHIFT;
+    left=select(0u,left-1u,left>0u);
+    // GC1: a gather whose every hit value was final ends the schedule. The cell's fixed
+    // rays meet the same cells, whose values no longer change, so a further gather would
+    // replace this value with itself (W1 form 1); an event that changes them schedules
+    // its cells again. Cells reached while their hits still change keep the G gathers.
+    // Moving cameras create cells among settled ones, which then gather once, not G
+    // times (docs/m7-gc1.md).
+    if missing==0u && atomicLoad(&gi_wg_changing)==0u { left=0u; }
+    // The bounce series to convergence (white-furnace fixture, src/gi_furnace_tests.rs): each
+    // gather is one Jacobi step of the radiosity fixed point, so a fixed G truncated it (a
+    // closed box of albedo 0.5 read 0.88 of Le / (1 - rho), and 0.28 at albedo 0.9). While its
+    // hits still change, a cell gathers again until its own value moves by at most
+    // GI_CONVERGED of its size between gathers; the changes shrink by the loop's gain each step,
+    // so the schedule ends. Hits that are all final would give this value again (GC1 above).
+    let after=vec3<f32>(gi_wg_bounce[0],gi_wg_bounce[GI_GATHER_LANES],gi_wg_bounce[2u*GI_GATHER_LANES]);
+    let moved=max(abs(after-before).x,max(abs(after-before).y,abs(after-before).z));
+    if atomicLoad(&gi_wg_changing)!=0u && moved>GI_CONVERGED*max(after.x,max(after.y,after.z)) { left=max(left,1u); }
+    var retry=state&GI_RETRY;
+    if missing!=0u {
+        if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
+    } else {
+        retry=0u;
+    }
+    gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
+    gi_queue_shade(slot);
+    gi_schedule(slot,left);
+}
 var<workgroup> gi_wg_rays:atomic<u32>;
 // Whether this iteration's cell gathers this frame, for the whole workgroup (P-GI).
 var<workgroup> gi_wg_live:u32;
@@ -2395,58 +2476,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
         if live && lane==0u {
             atomicAdd(&gi_work[GI_W_GATHERS],1u);
             atomicAdd(&gi_work[GI_W_GATHER_RAYS],atomicLoad(&gi_wg_rays));
-            let missing=atomicLoad(&gi_wg_missing);
-            if missing!=0u { atomicAdd(&gi_work[GI_W_GATHER_MISSES],missing); }
-            // A fixed-direction ray whose hit had no value yet at any level is left out of the
-            // average (the rejection estimator): counting it as zero light at full weight biased
-            // every such cell's bounce low (Glint's goal view: 4.5% of settled gather rays).
-            // Aimed rays and emitters are their own estimates and are added as they are.
-            let hits=atomicLoad(&gi_wg_hits);
-            let valued=atomicLoad(&gi_wg_valued);
-            let scale=select(1.0,f32(hits)/f32(valued),valued>0u && hits>valued);
-            for(var j=0u;j<12u;j+=1u) {
-                gi_wg_bounce[j*GI_GATHER_LANES]=gi_wg_bounce[j*GI_GATHER_LANES]*scale+gi_wg_bounce[(12u+j)*GI_GATHER_LANES];
-            }
-            var m=0.0;
-            for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[j*GI_GATHER_LANES])); }
-            let hot=gi_hot(slot);
-            if valued==0u && hits>0u {
-                // Every hit was without a value: nothing to average, so the cell keeps its last
-                // bounce (its retry gathers again).
-            } else if m<=0.0 {
-                gi_table[hot+GI_HOT_BOUNCE]=GI_BOUNCE_NONE;
-            } else {
-                for(var w=0u;w<6u;w+=1u) {
-                    let a=gi_wg_bounce[(2u*w)*GI_GATHER_LANES];
-                    let b=gi_wg_bounce[(2u*w+1u)*GI_GATHER_LANES];
-                    gi_table[hot+GI_HOT_BOUNCE+1u+w]=pack2x16float(vec2<f32>(a,b)/m);
-                }
-                gi_table[hot+GI_HOT_BOUNCE]=bitcast<u32>(m);
-            }
-            // The unfiltered value, the filter's source (G3).
-            if gi_filter_on(GI_FILTER_BOUNCE) {
-                for(var w=GI_HOT_BOUNCE;w<GI_HOT_BOUNCE+7u;w+=1u) { gi_raw[gi_raw_at(slot,w)]=gi_table[hot+w]; }
-            }
-            // The schedule: one gather done. A gather that met hit cells without a value yet
-            // (new this frame, or requested now) is repeated once more.
-            var left=(state&GI_GATHER_MASK)>>GI_GATHER_SHIFT;
-            left=select(0u,left-1u,left>0u);
-            // GC1: a gather whose every hit value was final ends the schedule. The cell's fixed
-            // rays meet the same cells, whose values no longer change, so a further gather would
-            // replace this value with itself (W1 form 1); an event that changes them schedules
-            // its cells again. Cells reached while their hits still change keep the G gathers.
-            // Moving cameras create cells among settled ones, which then gather once, not G
-            // times (docs/m7-gc1.md).
-            if missing==0u && atomicLoad(&gi_wg_changing)==0u { left=0u; }
-            var retry=state&GI_RETRY;
-            if missing!=0u {
-                if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
-            } else {
-                retry=0u;
-            }
-            gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
-            gi_queue_shade(slot);
-            gi_schedule(slot,left);
+            gi_gather_finish(slot,state,cold);
         }
         }
         // Outside this frame's slot group: next frame's queue, the schedule unchanged.

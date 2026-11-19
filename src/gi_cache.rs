@@ -605,7 +605,9 @@ pub struct IndirectSettings {
     pub bounce: bool,
     /// Gathers an event schedules for each cell it reaches (1-7): new and re-traced cells,
     /// and every cell at a lighting, environment or program step. Each gather reads the
-    /// outgoing radiance the previous ones produced, so G gathers carry G + 1 bounces.
+    /// outgoing radiance the previous ones produced, so G gathers carry G + 1 bounces. While its
+    /// hits still change, a cell then gathers on until its own value converges (gi_cache.wgsl
+    /// GI_CONVERGED), so the bounce series is not truncated at G.
     pub gathers: u32,
     /// The most cells a frame gathers (G2b). When more are queued (a cut queues every visible
     /// cell), a frame gathers those in one fixed slot group (slot % P == frame % P, P the
