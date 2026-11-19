@@ -360,7 +360,8 @@ impl Cache {
         );
 
         let slots = 1u32 << settings.slots_log2;
-        let sizes = Sizes::of(slots, lights, &settings);
+        // The port keeps the emitter list at its starting capacity.
+        let sizes = Sizes::of(slots, lights, &settings, shared::EMITTERS_MAX);
         let stages = Entry::ALL
             .into_iter()
             .map(|entry| {
@@ -476,7 +477,7 @@ impl Cache {
         scene: CacheScene<'_>,
     ) -> Result<CacheFrame> {
         ensure!(
-            Sizes::of(self.slots, scene.lights, &self.settings).cold_words <= self.sizes.cold_words,
+            Sizes::of(self.slots, scene.lights, &self.settings, shared::EMITTERS_MAX).cold_words <= self.sizes.cold_words,
             "more lights than the cache's light bitset was allocated for"
         );
         let config = PlanConfig {
@@ -485,6 +486,7 @@ impl Cache {
             misses: self.sizes.misses,
             cold_words: self.sizes.cold_words,
             raw_slots: self.sizes.raw_slots,
+            emitters: shared::EMITTERS_MAX,
             software: false,
             field: scene.field,
             profiling: false,
