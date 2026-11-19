@@ -39,8 +39,12 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
 pub(crate) const COUNTER_WORDS: u64 = 384;
 /// Cells the external request list holds (shaders/gi_cache.wgsl GI_EXTERNAL_CAPACITY).
 const EXTERNAL_CAPACITY: u64 = 16384;
-/// The external request list's bytes: 4 header words, then 4 words per cell.
-const EXTERNAL_BYTES: u64 = (4 + 4 * EXTERNAL_CAPACITY) * 4;
+/// Words of the external list's per-slot bits (shaders/gi_cache.wgsl GI_EXTERNAL_SEEN_WORDS): one
+/// bit per slot of the largest table, 2^21.
+const EXTERNAL_SEEN_WORDS: u64 = (1 << 21) / 32;
+/// The external request list's bytes: 4 header words, 4 words per cell, then the reader's
+/// per-slot bits (cells it read, kept alive).
+const EXTERNAL_BYTES: u64 = (4 + 4 * EXTERNAL_CAPACITY + EXTERNAL_SEEN_WORDS) * 4;
 /// Workgroups of 64 that turn the external list into requests.
 const EXTERNAL_GROUPS: u32 = 64;
 const MISS_WORDS: u64 = 6;
@@ -1362,6 +1366,9 @@ pub(crate) struct Planner {
     bounce_busy: u32,
     /// Last collected frame's stale cells (shaders/gi_cache.wgsl GI_W_STALE_CELLS).
     pub(crate) stale_cells: u32,
+    /// Requests readers outside the cache appended on a recent frame (the external list's
+    /// count, read back without waiting): while any is unanswered the cache does not idle.
+    pub(crate) external_pending: u32,
     parity: bool,
     /// The gather queues (this frame's, next frame's) the tick's first frame used: later
     /// views of the tick trace into the same next queue.
@@ -1388,6 +1395,7 @@ impl Default for Planner {
             bounce_last: None,
             bounce_busy: 0,
             stale_cells: 0,
+            external_pending: 0,
             parity: false,
             tick_queues: [0; 2],
             light_key: None,
@@ -1785,7 +1793,9 @@ impl Planner {
         }
         // Gathers scheduled by a relight run on the frames after it, even where the view is
         // otherwise idle.
-        let busy = bounce && self.bounce_busy > 0;
+        // A reader outside the cache with unanswered requests (the final gather's probes) keeps
+        // the cache running: idle means nobody waits on a cell.
+        let busy = (bounce && self.bounce_busy > 0) || self.external_pending > 0;
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
                 s.gathers + 2
@@ -2035,6 +2045,9 @@ pub(super) struct GiState {
     probe_log: Option<ProbeWatch>,
     /// The still-view batch: misses plus queued gathers of recent cache frames.
     stale_watch: Option<FullWatch>,
+    /// The external list's count (word 0) at the start of each encode, idle or not: what
+    /// readers appended on the frame before (`Planner::external_pending`).
+    external_watch: Option<FullWatch>,
 }
 
 /// Measurement only: `RENDERLAB_GI_PROBE_LOG=PATH` counts the probe's work on every frame
@@ -2260,6 +2273,7 @@ impl GiState {
             grow: false,
             probe_log: None,
             stale_watch: None,
+            external_watch: None,
         }
     }
     /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
@@ -2268,6 +2282,9 @@ impl GiState {
             watch.submitted();
         }
         if let Some(watch) = &mut self.stale_watch {
+            watch.submitted();
+        }
+        if let Some(watch) = &mut self.external_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.probe_log {
@@ -2779,7 +2796,12 @@ impl Renderer {
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
                 raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
-                external: buffer("indirect cache external requests", EXTERNAL_BYTES, storage),
+                external: buffer(
+                    "indirect cache external requests",
+                    EXTERNAL_BYTES,
+                    // COPY_SRC: the count's readback (external_watch).
+                    storage | wgpu::BufferUsages::COPY_SRC,
+                ),
                 slots,
                 cold_words,
                 directions,
@@ -4019,6 +4041,13 @@ impl Renderer {
             let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
             self.gi.probe_log.get_or_insert_with(|| ProbeWatch::new(&self.device)).collect(path, slots);
         }
+        if self.gi.external_readers {
+            let device = &self.device;
+            let watch = self.gi.external_watch.get_or_insert_with(|| FullWatch::of_words(device, &[0]));
+            if let Some(pending) = watch.collect() {
+                self.gi.planner.external_pending = pending;
+            }
+        }
         if stale_budget() != 0 {
             let device = &self.device;
             let watch = self.gi.stale_watch.get_or_insert_with(|| FullWatch::of_words(device, &[247]));
@@ -4487,6 +4516,10 @@ impl GiState {
         shade: Option<ShadeGroups<'_>>,
         mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
+        // Before this frame's pass consumes it, on idle frames too: what readers asked last frame.
+        if let (Some(watch), Some(r)) = (self.external_watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.external);
+        }
         let Some(plan) = self.plan.take() else {
             return;
         };
