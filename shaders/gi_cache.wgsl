@@ -2217,8 +2217,10 @@ var<workgroup> gi_wg_bounce:array<f32,24u*GI_GATHER_LANES>;
 var<workgroup> gi_wg_missing:atomic<u32>;
 var<workgroup> gi_wg_changing:atomic<u32>;
 // Relative change of a cell's bounce (its L0 term's largest channel) below which its gathers
-// have converged: under the half-float storage's own step, well under a display step.
-const GI_CONVERGED:f32=1.0/256.0;
+// have converged. What the series still lacks then is about GI_CONVERGED * g / (1 - g) of the
+// answer at loop gain g: 1.8% at g = 0.9 (the furnace's orange red; 1/256 left 3.3%). Four times
+// the half-float storage's step (2^-11), so rounding cannot keep a cell unconverged.
+const GI_CONVERGED:f32=1.0/512.0;
 // The L0 term per channel of slot's stored bounce: the hot words, or with the bounce filter on
 // the unfiltered value the last gather wrote (gi_raw).
 fn gi_bounce_dc(slot:u32, hot:u32) -> vec3<f32> {
