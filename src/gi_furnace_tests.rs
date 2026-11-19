@@ -19,6 +19,10 @@
 //!   volume reaches the emitter's side) shows as light. With the final gather on, the test
 //!   also fails if the gather still asks the cache for cells on the settled view's last frame.
 //!
+//! Every case also builds the cache's emitter list (gi_emitters.wgsl) and fails unless it holds
+//! the scene's emitting triangles and draws and their total power (pi * luminance * area, within
+//! 0.1%): an empty or short list fails here, not as a colour error in some reader later.
+//!
 //! The estimator is whatever the process's switches select (RENDERLAB_GI_ACCUMULATE,
 //! RENDERLAB_FINAL_GATHER, ...); the test records them. Each case is its own renderer, so no
 //! case inherits another's cells.
@@ -282,6 +286,8 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
     // Single-sample frames: the estimator's own answer, not TR1's history of it.
     r.set_reconstruction(Reconstruction::off()).unwrap();
     r.set_indirect(IndirectSettings::default()).unwrap();
+    // Build the emitter list on every gathering frame, whatever reads it (the guard below).
+    r.gi.request_emitters();
     let target = color_target(&r, SIZE);
     let program = r
         .try_create_program(&ProgramDescriptor {
@@ -388,6 +394,7 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
             let c = r.indirect_counters().unwrap().unwrap_or_default();
             rows[view.name]["counters"] = json!(format!("{c:?}"));
         }
+        emitter_guard(&mut r, case);
         // The guard for readers outside the cache (the final gather): on a settled view every
         // probe hit has a value, so its last cache frame took no request. The counters hold the
         // last frame the cache ran, so a cache that went idle while a reader still asked fails too.
@@ -402,6 +409,43 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
         }
     }
     rows
+}
+
+/// The emitter list against the scene: every triangle of every emitting part listed, one draw per
+/// emitting part, and the power CDF's total equal to the parts' pi * luminance * area. The list
+/// is rebuilt on every gathering frame, so this reads the last one.
+fn emitter_guard(r: &mut Renderer, case: &Case) {
+    let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let emitting: Vec<&Part> = case.parts.iter().filter(|p| lum(p.glow) > 0.0).collect();
+    let triangles: u32 = emitting.iter().map(|p| 2 * p.faces.len() as u32).sum();
+    let power: f64 = emitting
+        .iter()
+        .map(|p| {
+            let area: f32 = p
+                .faces
+                .iter()
+                .map(|(c, _)| (c[1] - c[0]).cross(c[3] - c[0]).length())
+                .sum();
+            std::f64::consts::PI * f64::from(lum(p.glow)) * f64::from(area)
+        })
+        .sum();
+    // Header words (gi_cells.wgsl, gi_emitters.wgsl): 57 the list's first word, 58 its triangles,
+    // 59 its draws, 60 its capacity; per triangle 15 words, then 64 draws of 8 words, then the
+    // running power sums.
+    let h = r.indirect_table_words(0, 64).unwrap().unwrap();
+    let (base, count, draws, most) = (h[57], h[58], h[59], h[60]);
+    assert_eq!(count, triangles, "{}: emitter list triangles", case.name);
+    assert_eq!(draws, emitting.len() as u32, "{}: emitting draws listed", case.name);
+    if count > 0 {
+        let cdf = u64::from(base) + u64::from(most) * 15 + 64 * 8;
+        let total = r.indirect_table_words(cdf + u64::from(count) - 1, 1).unwrap().unwrap()[0];
+        let total = f64::from(f32::from_bits(total));
+        assert!(
+            (total - power).abs() <= 1e-3 * power,
+            "{}: emitter list power {total} against the scene's {power}",
+            case.name
+        );
+    }
 }
 
 /// Mean radiance per channel; with an answer, also the mean ratio per channel, the 1st and
