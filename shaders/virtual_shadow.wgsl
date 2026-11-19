@@ -700,11 +700,15 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
                 if dot(centre+vsm_sample(q)-a,nn)<0.0 {beyond|=1u<<q;}
             }
             if (cover&beyond)!=0u {continue;}
-            // The triangle's plane at the middle of the part inside the square, in the near layer.
+            // The texel's own occluder: the top's mesh (an outline sits on the mesh's steepest faces,
+            // below its top by up to its thickness: a rail's tube outlines at mid-height), or any
+            // mesh where the texel holds none.
+            if bid!=0u && placement!=(bid>>bits) {continue;}
+            // The triangle's plane at the middle of the part inside the square.
             let pm=centre+nn*(0.5*(off+hr));
             let wb=vec3<f32>(vsm_cross(tri[1].xy,tri[2].xy,pm),vsm_cross(tri[2].xy,tri[0].xy,pm),vsm_cross(tri[0].xy,tri[1].xy,pm))/area;
-            let zp=dot(wb,z);
-            if best>=0.0 && zp<best-gap {continue;}
+            // (Within the triangle's own heights: a steep face's plane runs off past its extent.)
+            let zp=clamp(dot(wb,z),min(z.x,min(z.y,z.z)),max(z.x,max(z.y,z.z)));
             // An outline edge.
             let nb=vsm_neighbour(batch,primitive,e);
             if nb!=VSM_MISSING {
@@ -749,9 +753,11 @@ fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
 // A line texel's column top: its outline edge's height where the edge passes nearest the centre.
 // Along a straight outline that height is steady; the surface's own height at the texel (its
 // samples' or centre's) moves with where the outline crosses each texel, a texel-periodic
-// sawtooth in the shadow's edge wherever the occluder slopes (a rail's tube). The texel's inner
-// side, higher on such an occluder, lies in its full neighbour. Off: the covered part's height.
-override VSM_LINE_EDGE_TOP:bool=true;
+// sawtooth in the shadow's edge wherever the occluder slopes (a rail's tube). But the edge can
+// sit far under the texel's top (a tube's mid-height), leaving a column too short for the part
+// above it: off by default (the texel's own top, raised to the edge's part where that stands
+// higher). Measurement: `RENDERLAB_VSM=VSM_LINE_EDGE_TOP=true`.
+override VSM_LINE_EDGE_TOP:bool=false;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=20u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
