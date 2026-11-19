@@ -156,10 +156,9 @@ const GI_W_BQUEUE:u32=38u;
 const GI_W_GATHER_ABSENT:u32=39u;
 const GI_W_GATHER_UNSHADED:u32=40u;
 const GI_W_GATHER_ORPHANS:u32=41u;
-// Gather rays a finer level answered (gi_hit_radiance): the hit level's cell an orphan or split
-// (the finer value is final), or absent or not yet shaded (it stands in; the gather repeats).
-const GI_W_GATHER_FINER_FINAL:u32=204u;
-const GI_W_GATHER_FINER_STANDIN:u32=205u;
+// Gather rays the hit's own level answered because the hit level's cell is an orphan or split
+// (gi_hit_radiance).
+const GI_W_GATHER_FINER:u32=204u;
 // Queued cells a capped gather frame left for next frame (gi_gather).
 const GI_W_GATHER_DEFERRED:u32=42u;
 // Listed misses a capped claim left for a later frame (gi_claim, GI_H_CLAIM_CELLS).
@@ -2048,8 +2047,9 @@ fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
 //   orphan (it never gets a value), a coarser one: cell shading wrote it with no gathers left
 //   (gi_shade_entry.wgsl marks values still changing below 1);
 // - GI_HIT_CHANGING (0.75): the same, but the cell still has gathers scheduled;
-// - GI_HIT_MISSING (0.5): a finer level's value while the hit level's cell is absent or not
-//   shaded yet, which a later gather reads instead (the gather is then repeated once);
+// - GI_HIT_MISSING (0.5): a stand-in value while the hit's cell is absent or not shaded yet (the
+//   gather is then repeated once). None is given since the footprint rule: gi_hit_radiance gives
+//   no value then (0 below) rather than another level's;
 // - GI_HIT_NONE (0.25): no value, and none can come: the hit level's cell is an orphan, or
 //   absent and not requested by this gather, and no coarser level has one (the ray adds
 //   nothing, finally);
@@ -2102,83 +2102,77 @@ fn gi_hit_own_level(world:vec3<f32>) -> u32 {
     }
     return level;
 }
+// The slot of the cell at `level` holding a gather hit at `world` in bin `bin` (0xffffffff: none),
+// kept alive like a pixel's: a gather keeps the cells it reads alive (the race is benign). With
+// pixels first (gi_gather_now) it stores last frame's stamp instead: this frame's stays the probe's,
+// which says a pixel read the cell. Every gather that stamps a cell stores the same value, and none
+// replaces the probe's, so those stamps do not depend on thread order.
+fn gi_hit_find(world:vec3<f32>, bin:u32, level:u32) -> u32 {
+    let slot=gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin)))));
+    if slot==0xffffffffu { return slot; }
+    if gi_word(GI_H_PIXEL_CELLS)==0u {
+        gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
+    } else if gi_table[gi_cold(slot)+GI_C_SEEN]+1u<gi_word(GI_H_FRAME) {
+        gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME)-1u;
+    }
+    return slot;
+}
+// A hit's reflected light from a valued cell: on an emitting draw its emission is the emitter
+// list's (gi_emitters.wgsl), sampled as a light by every gather, so the hit sends the rest only.
+fn gi_hit_value(slot:u32, h:GiHit) -> vec4<f32> {
+    let o=gi_outgoing[slot];
+    let reflected=max(o.rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
+    return vec4<f32>(reflected,select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0));
+}
+// A gather hit reads its footprint level's cell (gi_hit_level), never a coarser one: a coarser
+// cell averages its whole volume, and around thin geometry that holds the other side's light
+// (Glint's spinner: 15-17% of gather rays took a coarser value where the hit level's cell was an
+// orphan). Where that cell can never answer (an orphan: its probe found no surface at that level,
+// as at a thin part's coarse cells; or split: its probe lines met two surface layers facing its bin,
+// and its value mixes them), the hit's own level's cell answers, and is requested when absent. The
+// final gather reads the same way (reflection_cache_hits.wgsl rl_cache_cell). A cell that is
+// absent or not yet shaded gives no value for now (the ray is left out of the average, and the
+// gather repeats once); a tertiary gather requests nothing, so what it would request gives nothing.
 fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
     let bin=gi_bin(r.vertex);
     let own=gi_hit_own_level(world);
     let base=gi_hit_level(world,h.t);
-    var cause=0u;
-    // The hit level's cell can never answer (an orphan: its probe found no surface at that level,
-    // as at a thin part's coarse cells; or split: its probe lines met two surface layers facing its
-    // bin, and its value mixes them): the levels below it, down to the hit's own, are the answer.
-    var below=false;
-    // The hit's own level's cell: absent (requested when the hit level's cell cannot answer), or
-    // its state.
-    var own_absent=false;
-    var own_state=0u;
-    // From the hit's footprint level down to its own, never coarser: a coarser cell averages its
-    // whole volume, and around thin geometry that holds the other side's light (the slab test's
-    // roof; Glint's spinner: 15-17% of gather rays took a coarser value when the hit level's cell
-    // was an orphan). The final gather reads the same way (reflection_cache_hits.wgsl
-    // rl_cache_cell).
-    for(var k=0u;k<=base-own;k+=1u) {
-        let l=base-k;
-        let cell=vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)));
-        let slot=gi_find_pair(gi_key(l,bin,cell));
-        if slot==0xffffffffu {
-            if l==base && band!=0u { gi_request_one(l,bin,cell,band); }
-            if l==base { cause=GI_W_GATHER_ABSENT; }
-            if l==own { own_absent=true; }
-            continue;
+    var level=base;
+    var slot=gi_hit_find(world,bin,base);
+    if slot!=0xffffffffu {
+        let split=base>own && (gi_table[gi_hot(slot)+15u]&GI_SPLIT_HOT)!=0u;
+        if !split && gi_outgoing[slot].w>0.0 { return gi_hit_value(slot,h); }
+        let orphan=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u;
+        if !split && !orphan {
+            atomicAdd(&gi_work[GI_W_GATHER_UNSHADED],1u);
+            return vec4<f32>(0.0);
         }
-        // A gather keeps the cells it reads alive, like a pixel (the race is benign). With
-        // pixels first (gi_gather_now) it stores last frame's stamp instead: this frame's
-        // stays the probe's, which says a pixel read the cell. Every gather that stamps a
-        // cell stores the same value, and none replaces the probe's, so those stamps do not
-        // depend on thread order.
-        if gi_word(GI_H_PIXEL_CELLS)==0u {
-            gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
-        } else if gi_table[gi_cold(slot)+GI_C_SEEN]+1u<gi_word(GI_H_FRAME) {
-            gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME)-1u;
+        // The hit level's cell cannot answer: the hit's own level's.
+        if own==base {
+            atomicAdd(&gi_work[GI_W_GATHER_ORPHANS],1u);
+            return vec4<f32>(0.0,0.0,0.0,GI_HIT_NONE);
         }
-        // A split cell above the hit's own level is never read (gi_sample_refined: the pixels read
-        // finer there too).
-        let split=l>own && (gi_table[gi_hot(slot)+15u]&GI_SPLIT_HOT)!=0u;
-        let state=gi_table[gi_cold(slot)+GI_C_STATE];
-        if l==base && (split || (state&GI_ORPHAN)!=0u) { below=true; }
-        let o=gi_outgoing[slot];
-        if o.w>0.0 && !split {
-            let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0);
-            // A hit on an emitting draw sends its reflected light only: its emission is the
-            // emitter list's (gi_emitters.wgsl), sampled as a light by every gather.
-            let reflected=max(o.rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
-            // A finer level's value is the answer where the hit level's cell cannot give one; it
-            // stands in (and the gather repeats) while that cell is absent or not yet shaded.
-            if l<base { atomicAdd(&gi_work[select(GI_W_GATHER_FINER_STANDIN,GI_W_GATHER_FINER_FINAL,below)],1u); }
-            return vec4<f32>(reflected,select(GI_HIT_MISSING,settled,l==base || below));
+        level=own;
+        slot=gi_hit_find(world,bin,own);
+        if slot!=0xffffffffu {
+            if gi_outgoing[slot].w>0.0 {
+                atomicAdd(&gi_work[GI_W_GATHER_FINER],1u);
+                return gi_hit_value(slot,h);
+            }
+            if (gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u {
+                atomicAdd(&gi_work[GI_W_GATHER_ORPHANS],1u);
+                return vec4<f32>(0.0,0.0,0.0,GI_HIT_NONE);
+            }
+            atomicAdd(&gi_work[GI_W_GATHER_UNSHADED],1u);
+            return vec4<f32>(0.0);
         }
-        if l==base && !below { cause=GI_W_GATHER_UNSHADED; }
-        if l==own { own_state=state; }
     }
-    // No level answers. Where the hit level's cell cannot, the hit's own level's is asked for
-    // (an absent hit level's cell was requested above). Nothing comes, finally, for a tertiary
-    // gather (it requests nothing) or where the own level's cell is an orphan too.
-    var none=false;
-    if below {
-        if own_absent {
-            if band!=0u { gi_request_one(own,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(own),bin))),band); }
-            cause=GI_W_GATHER_ABSENT;
-            none=tertiary;
-        } else {
-            none=(own_state&GI_ORPHAN)!=0u;
-            cause=select(GI_W_GATHER_UNSHADED,0u,none);
-        }
-    } else if cause==GI_W_GATHER_ABSENT {
-        none=tertiary;
-    }
-    atomicAdd(&gi_work[select(GI_W_GATHER_ORPHANS,cause,cause!=0u && !none)],1u);
-    return vec4<f32>(0.0,0.0,0.0,select(0.0,GI_HIT_NONE,none));
+    // The cell at `level` is absent: requested, except by a tertiary gather.
+    if band!=0u { gi_request_one(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin))),band); }
+    atomicAdd(&gi_work[select(GI_W_GATHER_ABSENT,GI_W_GATHER_ORPHANS,tertiary)],1u);
+    return vec4<f32>(0.0,0.0,0.0,select(0.0,GI_HIT_NONE,tertiary));
 }
 // One workgroup per queued cell and one lane per fixed direction (k = lane, and lane + 64 with
 // 128 directions): each lane traces its direction when it is blocked, with a closest-hit ray,
