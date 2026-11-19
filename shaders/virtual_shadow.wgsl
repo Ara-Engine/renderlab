@@ -516,8 +516,9 @@ fn vsm_cover_side(i:u32,covered:u32) {
 // becomes the texel's top. Interior texels keep their centre's answer (fully covered or empty):
 // the cost follows the outlines' length. A caster covering no texel centre names no id and stays
 // unseen (the sliver limit; the multisampled raster sees it).
-// VSM_SIL_SCAN (measurement): the neighbourhood scan alone, no triangles.
+// VSM_SIL_SCAN (measurement): the neighbourhood scan alone, no triangles; VSM_SIL_OFF: no pass.
 override VSM_SIL_SCAN:bool=false;
+override VSM_SIL_OFF:bool=false;
 // The top word of window texel t of `level` whatever this frame drew; VSM_NONE outside the window
 // or on a page that is not resident.
 fn vsm_word_at(level:u32,t:vec2<i32>)->u32 {
@@ -641,6 +642,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
 // slot (its dirty rectangle).
 @compute @workgroup_size(256) fn vsm_silhouette_dense(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let slot=group.x;
+    if VSM_SIL_OFF {return;}
     if li==0u {vsm_wg_sil_dirty=vsm_render[slot];}
     let w=workgroupUniformLoad(&vsm_wg_sil_dirty);
     if w==0u {return;}
@@ -665,6 +667,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
 }
 // Sparse: one workgroup per page drawn this frame.
 @compute @workgroup_size(256) fn vsm_silhouette_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    if VSM_SIL_OFF {return;}
     let v=vsm_rendered(group.x);
     let n=vsm.counts.y;let level=v/(n*n);
     let slot=vsm_pages[vsm_section(2u)+v];
