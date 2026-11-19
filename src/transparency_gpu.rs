@@ -1718,6 +1718,10 @@ impl Renderer {
         let traced = self.primary_mode != PrimaryVisibility::Raster;
         self.tp_prepare_hit_depth(traced);
         self.tp_prepare_programs(&programs, rt, traced)?;
+        // The transmission map's pipelines: transparent casters colour the sun's light.
+        if !programs.is_empty() {
+            self.tp_transmission_pipelines();
+        }
         // The particle kernels, whether or not the scene has emitters yet: a game often spawns
         // them once play starts (Glint's first frames compiled them, 117 ms cold).
         let prelude = self.source_digest;
