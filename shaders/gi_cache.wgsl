@@ -100,17 +100,6 @@ const GI_SCAN_ENVIRONMENT:u32=4u;
 const GI_SCAN_PARTIAL:u32=8u;
 // Lighting, environment or program changed (G2): cells relight (bounce.z says which).
 const GI_SCAN_RELIGHT:u32=16u;
-// Unconverged cells (GI_UNCONVERGED) exist: the scan gathers those of this frame's turn
-// (GI_H_CONVERGE_TURN) again, and counts them all (GI_W_UNCONVERGED).
-const GI_SCAN_CONVERGE:u32=128u;
-// The convergence rotation's turn: a cell gathers again when (slot + frame) % turn == 0, the
-// power of two that spreads the unconverged cells to about the budget a frame (src/gi_cache.rs
-// converge_budget).
-const GI_H_CONVERGE_TURN:u32=44u;
-// Unconverged cells the scan met, and cells gathers newly marked unconverged (the CPU reads
-// their sum back without waiting to size the turn and keep the cache from idling).
-const GI_W_UNCONVERGED:u32=206u;
-const GI_W_UNCONVERGED_NEW:u32=207u;
 const GI_RELIGHT_ALL:u32=0x80000000u;
 const GI_RELIGHT_REQUESTS:u32=0x20000000u;
 // Work counters: misses, traces, integrations, then statistics.
@@ -1890,13 +1879,6 @@ fn gi_count_read(at:u32, cold:u32) {
                 gi_schedule(slot,select(1u,gi_word(GI_H_GATHERS),all));
             }
         }
-        if (flags&GI_SCAN_CONVERGE)!=0u && (state&GI_UNCONVERGED)!=0u {
-            atomicAdd(&gi_work[GI_W_UNCONVERGED],1u);
-            if (slot+gi_word(GI_H_FRAME))%max(gi_word(GI_H_CONVERGE_TURN),1u)==0u && (state&GI_BQUEUED)==0u {
-                gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_UNCONVERGED;
-                gi_schedule(slot,1u);
-            }
-        }
         if (flags&GI_SCAN_CASTER)!=0u && gi_light_reached(slot) {
             atomicAdd(&gi_work[GI_W_RESHADED],1u);
             gi_count_read(GI_W_RESHADED_READ,cold);
@@ -2278,15 +2260,15 @@ fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
     // gather is one Jacobi step of the radiosity fixed point, so a fixed G truncated it (a
     // closed box of albedo 0.5 read 0.88 of Le / (1 - rho), and 0.28 at albedo 0.9). While its
     // hits still change, a cell whose own value moved by more than GI_CONVERGED of its size is
-    // unconverged, and gathers again on the scan's convergence rotation: a fixed budget of cells
-    // a frame, as Lumen's radiosity updates a fixed share of its cards (gathering every such cell
-    // every frame cost 7-8 ms on a non-RT walk, where new cells keep their neighbours changing).
-    // The changes shrink by the loop's gain each step, so the rotation empties. Hits that are all
-    // final would give this value again (GC1 above).
+    // unconverged and is gathered again. Every gather is admitted under one per-frame ray budget
+    // (gi_gather_select), refinements like this one last, as Lumen's radiosity updates a fixed
+    // share of its cards: gathering every such cell every frame cost 7-8 ms on a non-RT walk,
+    // where new cells keep their neighbours changing. The changes shrink by the loop's gain each
+    // step, so the queue empties. Hits that are all final would give this value again (GC1).
     let after=vec3<f32>(gi_wg_bounce[0],gi_wg_bounce[GI_GATHER_LANES],gi_wg_bounce[2u*GI_GATHER_LANES]);
     let moved=max(abs(after-before).x,max(abs(after-before).y,abs(after-before).z));
     let unconverged=atomicLoad(&gi_wg_changing)!=0u && moved>GI_CONVERGED*max(after.x,max(after.y,after.z));
-    if unconverged && (state&GI_UNCONVERGED)==0u { atomicAdd(&gi_work[GI_W_UNCONVERGED_NEW],1u); }
+    if unconverged { left=max(left,1u); }
     var retry=state&GI_RETRY;
     if missing!=0u {
         if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
@@ -2309,19 +2291,22 @@ var<workgroup> gi_wg_hits:atomic<u32>;
 var<workgroup> gi_wg_valued:atomic<u32>;
 // The gather period P for `count` queued cells (1 without a cap).
 // ---- gather ray budget ----
-// A gather's cost is its rays, and they differ by cell: the fixed directions not open to the
-// sky (under the stride), plus GI_H_NEAR_RAYS + 1 aimed rays for every local light in range
-// above the cell's horizon (gi_near.wgsl). Cells near lamps and the fire cost two to three times
-// the others, and a cut's queue ends with them, so a budget counted in cells left the late
-// refill frames 2-3x dearer than the early ones. With GI_H_GATHER_RAYS set, a frame gathers the
-// queued cells whose estimated rays fit that budget, in a fixed order taken from each cell
-// alone: the parents first fill made, then the cells pixels read by lattice class (as the
-// claim), then the rest, which keep a quarter of the budget; a per-frame hash spreads each
-// order over 16 bins, so an order larger than the budget is taken in a different subset each
-// frame. The first non-empty bin always passes, so the queue always moves.
+// One fixed per-frame amount of gather work, in estimated rays (a gather's cost is its rays: the
+// fixed directions not open to the sky, under the stride, plus GI_H_NEAR_RAYS + 1 aimed rays for
+// every local light in range above the cell's horizon, gi_near.wgsl), shared by everything beyond
+// the pixels' own cells: the cells gathers' hits and readers outside the cache (the final gather)
+// request, and convergence's repeats. The cells pixels read this frame and first fill's parents
+// are gathered as before, whatever the budget. Within it the cells with no value yet come first,
+// then those that only refine; a per-frame hash spreads each order over 16 bins, so an order
+// larger than the budget is taken in a different subset each frame. What does not fit waits for a
+// later frame (its readers leave it out meanwhile, #209); the first non-empty bin always passes,
+// so the queue always moves. Without it the final gather's requests cost the cache 31 ms a frame
+// after Glint's goal cut without ray hardware (main 5cba636b).
 const GI_H_GATHER_RAYS:u32=53u;
 const GI_GATHER_SPREAD:u32=16u;
-const GI_GATHER_REST_BINS:u32=5u*GI_GATHER_SPREAD;
+// The bins in use (no value, refining); a cell outside the budget keeps this in its claim word.
+const GI_GATHER_BUDGET_BINS:u32=2u*GI_GATHER_SPREAD;
+const GI_GATHER_ALWAYS:u32=GI_GATHER_BINS;
 fn gi_gather_rays(slot:u32) -> u32 {
     let cold=gi_cold(slot);
     let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
@@ -2342,15 +2327,12 @@ fn gi_gather_rays(slot:u32) -> u32 {
     }
     return rays;
 }
+// A queued cell's admission bin: GI_GATHER_ALWAYS for the cells pixels read this frame (the
+// probe's stamp) and first fill's parents; else no value yet first, then refining.
 fn gi_gather_bin(slot:u32) -> u32 {
     let cold=gi_cold(slot);
-    var order=5u;
-    if (gi_table[cold+GI_C_STATE]&GI_FILL_PARENT)!=0u {
-        order=0u;
-    } else if gi_table[cold+GI_C_SEEN]==gi_word(GI_H_FRAME) {
-        let c=vec3<u32>(gi_table[cold+GI_C_CELL],gi_table[cold+GI_C_CELL+1u],gi_table[cold+GI_C_CELL+2u]);
-        order=1u+gi_fill_class(gi_table[cold+GI_C_DEF]>>8u,c);
-    }
+    if (gi_table[cold+GI_C_STATE]&GI_FILL_PARENT)!=0u || gi_table[cold+GI_C_SEEN]==gi_word(GI_H_FRAME) { return GI_GATHER_ALWAYS; }
+    let order=select(1u,0u,!(gi_outgoing[slot].w>0.0));
     return order*GI_GATHER_SPREAD+(gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u))>>28u);
 }
 fn gi_gather_queued(slot:u32) -> bool {
@@ -2369,39 +2351,33 @@ fn gi_gather_queued(slot:u32) -> bool {
         if !gi_gather_queued(slot) { continue; }
         let bin=gi_gather_bin(slot);
         atomicStore(&gi_work[GI_W_CLAIMS+slot],bin+1u);
-        atomicAdd(&gi_work[GI_W_GATHER_HIST+bin],gi_gather_rays(slot));
+        if bin<GI_GATHER_ALWAYS { atomicAdd(&gi_work[GI_W_GATHER_HIST+bin],gi_gather_rays(slot)); }
     }
 }
 @compute @workgroup_size(1) fn gi_gather_select() {
     let budget=gi_word(GI_H_GATHER_RAYS);
     if budget==0u { return; }
-    var wanted=0u;
-    for(var b=GI_GATHER_REST_BINS;b<GI_GATHER_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_GATHER_HIST+b]); }
-    let pixel_budget=budget-min(wanted,budget/4u);
     var total=0u;
-    for(var b=0u;b<GI_GATHER_REST_BINS;b+=1u) {
+    for(var b=0u;b<GI_GATHER_BUDGET_BINS;b+=1u) {
         let next=total+atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
-        if total!=0u && next>pixel_budget { atomicStore(&gi_work[GI_W_GATHER_CUT],b+1u); break; }
+        if total!=0u && next>budget { atomicStore(&gi_work[GI_W_GATHER_CUT],b+1u); return; }
         total=next;
-    }
-    let rest_budget=budget-min(total,budget);
-    var rest=0u;
-    for(var b=GI_GATHER_REST_BINS;b<GI_GATHER_BINS;b+=1u) {
-        let next=rest+atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
-        if rest!=0u && next>rest_budget { atomicStore(&gi_work[GI_W_GATHER_CUT+1u],b+1u); return; }
-        rest=next;
     }
 }
 // Reads and clears the bin gi_gather_count kept for a queue entry; whether the budget admits
 // it. Called once per queue entry by the gather pass, queued or not.
 var<private> gi_ray_admitted:bool;
+// The cell is outside the ray budget (gi_gather_bin): the cell-count rotation decides, as before.
+var<private> gi_ray_outside:bool;
 fn gi_gather_take(slot:u32) {
     gi_ray_admitted=true;
+    gi_ray_outside=false;
     if gi_word(GI_H_GATHER_RAYS)==0u { return; }
     let kept=atomicExchange(&gi_work[GI_W_CLAIMS+slot],0u);
     if kept==0u { gi_ray_admitted=false; return; }
     let bin=kept-1u;
-    let cut=atomicLoad(&gi_work[GI_W_GATHER_CUT+select(0u,1u,bin>=GI_GATHER_REST_BINS)]);
+    gi_ray_outside=bin==GI_GATHER_ALWAYS;
+    let cut=atomicLoad(&gi_work[GI_W_GATHER_CUT]);
     gi_ray_admitted=cut==0u || bin+1u<cut;
 }
 fn gi_gather_period(count:u32) -> u32 {
@@ -2437,7 +2413,7 @@ fn gi_fill_rank(slot:u32, period:u32) -> u32 {
     return (gi_fill_class(gi_table[cold+GI_C_DEF]>>8u,c)*period+gi_mix(slot)%period)/8u;
 }
 fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
-    if gi_word(GI_H_GATHER_RAYS)!=0u { return gi_ray_admitted; }
+    if gi_word(GI_H_GATHER_RAYS)!=0u && !gi_ray_outside { return gi_ray_admitted; }
     let frame=gi_word(GI_H_FRAME);
     let pixels=gi_word(GI_H_PIXEL_CELLS);
     let cap=gi_word(GI_H_GATHER_CELLS);
@@ -2471,13 +2447,17 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
         let state=gi_table[cold+GI_C_STATE];
         let queued=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
             && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
-        let live=queued && gi_gather_now(slot,period,count);
-        // Every lane reads the same slot, so `live` is the workgroup's: broadcast as a uniform
+        // Lane 0 takes the cell's admission (gi_gather_take clears its budget bin) and decides;
+        // every lane reads the same slot, so `live` is the workgroup's: broadcast as a uniform
         // value (the load carries the barrier that ordered lane 0's resets), so a cell outside
         // this frame's slot group, or not queued, skips the sums and their reduction, which
         // gathered zeros for it (P-GI: a capped cut defers 140-200k cells a frame).
-        if lane==0u { gi_wg_live=select(0u,1u,live); }
-        if workgroupUniformLoad(&gi_wg_live)!=0u {
+        if lane==0u {
+            gi_gather_take(slot);
+            gi_wg_live=select(0u,1u,queued && gi_gather_now(slot,period,count));
+        }
+        let live=workgroupUniformLoad(&gi_wg_live)!=0u;
+        if live {
         for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); gi_gather_fixed[i]=vec3<f32>(0.0); }
         if live {
             let c=gi_cell(slot);
