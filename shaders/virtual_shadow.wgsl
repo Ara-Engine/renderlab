@@ -494,7 +494,7 @@ fn vsm_fold(i:u32) {
     // Only a partly covered texel needs its line (the lookup reads it where k is 1-7).
     if partial {
         let n=vsm_centroid_side(bits);
-        vsm_cover_line(i,n,vsm_area_offset(n,f32(k)/8.0));
+        vsm_cover_line(i,n,vsm_area_offset(n,f32(k)/8.0),k>=4u);
     }
 }
 // The side of a texel's covered samples: their centroid's direction from its centre.
@@ -519,14 +519,16 @@ fn vsm_area_offset(n:vec2<f32>,f:f32)->f32 {
     return u*(0.5-f);
 }
 // Texel i's covered part is {x : n . (x - centre) >= s} (texels; n a unit normal into it): the
-// angle of n in 256 steps (low byte) and s over -0.75..0.75 in 255 (high byte), for the Disk
-// lookup (virtual_shadow_disk.wgsl vd_half).
-fn vsm_cover_line(i:u32,n:vec2<f32>,s:f32) {
+// angle of n in 256 steps (bits 0-7), s over -0.75..0.75 in 127 (bits 8-14), and whether its
+// centre is covered (bit 15: the texel's binary answer, as the map holds it without the
+// fraction; the multisampled raster takes most samples), for the Disk lookup
+// (virtual_shadow_disk.wgsl vd_side, vd_half).
+fn vsm_cover_line(i:u32,n:vec2<f32>,s:f32,centre:bool) {
     let a=u32(round(atan2(n.y,n.x)*(256.0/6.28318531)+256.0))%256u;
-    let o=u32(round((clamp(s,-0.75,0.75)+0.75)*(255.0/1.5)));
+    let o=u32(round((clamp(s,-0.75,0.75)+0.75)*(127.0/1.5)));
     let shift=vsm_cover_shift(i);
     atomicAnd(&vsm_cover[i>>1u],~(0xffffu<<shift));
-    atomicOr(&vsm_cover[i>>1u],(a|(o<<8u))<<shift);
+    atomicOr(&vsm_cover[i>>1u],(a|(o<<8u)|select(0u,0x8000u,centre))<<shift);
 }
 // ---- The covered fraction from ids (RENDERLAB_VSM_FRACTION=1) ----
 // Both layers rasterize at texel centres. Then a texel whose 3x3 neighbourhood disagrees (an
@@ -737,7 +739,8 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     if bid!=id || partial {
         atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(bid));
     }
-    if partial {vsm_cover_line(i,ln,ls);}
+    // The centre's own surface is still the top: the texel's binary answer (vd_side).
+    if partial {vsm_cover_line(i,ln,ls,id!=0u && bid==id);}
 }
 // The share of the unit square past offset s along unit n (vsm_area_offset's inverse).
 fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {

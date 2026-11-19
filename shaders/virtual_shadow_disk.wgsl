@@ -794,7 +794,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
                 // The fraction is coverage filtered over the texel: right where the sun's cone
                 // at the column's top is a texel wide or more, wrong under that (a contact: one
                 // grey a texel, stairs). Below half a texel the texel is binary as without the
-                // fraction (covered where most of it is; the exact hard edges decide outlines),
+                // fraction (covered where its centre is; the exact hard edges decide outlines),
                 // blended to the rank shares by one texel.
                 let wide=smoothstep(0.5,1.0,2.0*vd_px.radius*chi/size);
                 m=vd_side(m,i,k,wide);
@@ -841,7 +841,8 @@ override VD_FRACTION:bool=false;
 // neighbouring texels of one edge (no texture of per-texel subsets).
 @group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
 // Texel i's line (virtual_shadow.wgsl vsm_cover_line): the angle of n into the covered part in
-// 256 steps (low byte), its offset s from the centre over -0.75..0.75 texels in 255 (high byte).
+// 256 steps (bits 0-7), its offset s from the centre over -0.75..0.75 texels in 127 (bits 8-14),
+// whether its centre is covered (bit 15).
 fn vd_cover_word(i:u32)->u32 {return (vd_cover[i>>1u]>>((i&1u)*16u))&0xffffu;}
 // Per angle a of n (VD_SIDE_ANGLES of them) and rank r in 0..=64: the mask of the r sample
 // directions furthest along n (two u32s each; virtual_shadow_gpu.rs `side_table`).
@@ -865,7 +866,7 @@ fn vd_half(m:vec2<u32>,i:u32,c:vec2<f32>,size:f32,lo:f32,hi:f32)->vec2<u32> {
     let w=vd_cover_word(i);
     let a=f32(w&255u)*(6.28318531/256.0);
     let n=vec2<f32>(cos(a),sin(a));
-    let s=f32(w>>8u)*(1.5/255.0)-0.75;
+    let s=f32((w>>8u)&127u)*(1.5/127.0)-0.75;
     // The part is n . x >= q (metres, from the receiver). Of the column's directions m, each keeps
     // its bit when its ray meets the square and the part at one height in lo..hi: the column's
     // union over heights clipped by the part's union over heights would also keep rays that meet
@@ -901,11 +902,12 @@ fn vd_half_word(word:u32,base:u32,c:vec2<f32>,half:f32,lo:f32,hi:f32,n:vec2<f32>
     return out;
 }
 // Of the directions in m (a column of texel i whose near layer covers k eighths), the k/8 through
-// its covered side, blended by `wide` (0..1) from the binary texel: all of m where k >= 4, none
-// under.
+// its covered side, blended by `wide` (0..1) from the binary texel: all of m where its centre is
+// covered (the map's answer without the fraction), none where not.
 fn vd_side(m:vec2<u32>,i:u32,k:u32,wide:f32)->vec2<u32> {
     let c=countOneBits(m.x)+countOneBits(m.y);
-    let t=u32(round(mix(f32(select(0u,c,k>=4u)),f32(k*c)/8.0,wide)));
+    let centre=(vd_cover_word(i)&0x8000u)!=0u;
+    let t=u32(round(mix(f32(select(0u,c,centre)),f32(k*c)/8.0,wide)));
     if t==0u {return vec2<u32>(0u);}
     if t>=c {return m;}
     // The side's angle, found once from the covered samples at the page raster (vsm_fold).
