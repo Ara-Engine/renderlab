@@ -267,6 +267,8 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     fg_no_value=false;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
     let cell=rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t);
+    fg_touch(rl_cache_slots.x);
+    fg_touch(rl_cache_slots.y);
     fg_no_value=cell.w==0.0;
     fg_unanswered=fg_no_value;
     // A ray that meets an emitting draw keeps its cell's reflected light and its emission weighted
@@ -316,6 +318,16 @@ var<private> fg_no_value:bool;
 // meet the same cell.
 @group(2) @binding(30) var<storage,read_write> fg_requests:array<atomic<u32>>;
 const FG_REQUESTS_MAX:u32=16384u;
+// After the entries, one bit per cache slot: the cells this frame's probe hits read, or found
+// without a value at their cone level. The cache stamps them seen, as its own readers' cells, so
+// they are not taken from a full bucket while the gather still reads them, and schedules those
+// still without a value (gi_cache.wgsl GI_EXTERNAL_SEEN).
+const FG_SEEN:u32=4u+4u*FG_REQUESTS_MAX;
+fn fg_touch(slot:u32) {
+    if slot==0xffffffffu { return; }
+    let w=FG_SEEN+(slot>>5u);
+    if w<arrayLength(&fg_requests) { atomicOr(&fg_requests[w],1u<<(slot&31u)); }
+}
 var<workgroup> fg_asked:array<atomic<u32>,2>;
 // The workgroup's probe rays and emitter shadow rays, added to the external list's spare words 2
 // and 3, which the GI log prints as fg_rays and fg_shadow_rays.

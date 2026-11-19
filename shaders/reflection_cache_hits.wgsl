@@ -58,6 +58,11 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
 var<private> rl_cache_missed:vec4<u32>;
 // The hit's geometric normal (unnormalized), for the reader's own use of the same triangle.
 var<private> rl_cache_geometric:vec3<f32>;
+// The slots the last rl_cache_cell used (0xffffffff: none): x the cell whose value it returned,
+// y the cone level's cell when it exists. A reader that can report them (the final gather, through
+// the cache's external list) keeps them alive: its reads count as the cache's own (gi_cache.wgsl
+// GI_EXTERNAL_SEEN).
+var<private> rl_cache_slots:vec2<u32>;
 fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
     if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
@@ -74,6 +79,7 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
     let start=rl_cache_level(world,cone);
     var at_start=0xffffffffu;
     var at_own=0xffffffffu;
+    rl_cache_slots=vec2<u32>(0xffffffffu);
     for(var k=0u;k<=start-own;k+=1u) {
         let l=start-k;
         let slot=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
@@ -85,8 +91,9 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
         // them. The cache's own lookup reads finer there too (gi_sample_refined).
         if l>own && (gi_word(gi_hot(slot)+15u)&GI_SPLIT_HOT)!=0u { continue; }
         let o=rl_cache_outgoing[slot];
-        if o.w>0.0 { return vec4<f32>(o.rgb,1.0); }
+        if o.w>0.0 { rl_cache_slots=vec2<u32>(slot,at_start); return vec4<f32>(o.rgb,1.0); }
     }
+    rl_cache_slots.y=at_start;
     // The cell to ask for: the cone level's when it is absent; the hit's own level's when the cone
     // level's is an orphan (its probe found no surface at that level, as at a thin part's coarse
     // cells, so it never gets a value) or split, and the own one is absent; none while the cell
