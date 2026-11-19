@@ -828,24 +828,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
         let under=vsm_height(peel);
         let t2=under-p.z;
         if t2>lo && vd_above(vec3<f32>(c,under),margin) {
-            var b2=t2-VD_THICK*size;
-            // The covered fraction: under a partly covered texel the second surface is what its
-            // open samples see (vsm_silhouette), often the top of a solid running on beside it (a
-            // tower under the rail along its edge). Its rank shares open those directions, so the
-            // column reaches that solid's underside as its neighbours of the same mesh show it.
-            if VD_FRACTION && VD_FR_UNDER && stride==1 && (top.y&7u)!=0u {
-                for(var k=0u;k<4u;k+=1u) {
-                    let n=cell+vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
-                    if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
-                    let j=vsm_index(n,level);
-                    if j==VSM_NONE {continue;}
-                    let other=vsm_top_words[j];
-                    if other.x==0u || other.x>>bits!=peel.x>>bits {continue;}
-                    let op=vsm_peel_words[j];
-                    if op.x!=0u && op.x>>bits==peel.x>>bits {b2=min(b2,vsm_height(op)-p.z);}
-                }
-            }
-            let m2=vd_column_mask(c-p.xy,0.5*size,max(max(b2,lo),1e-6*size),min(t2,hi));
+            let m2=vd_column_mask(c-p.xy,0.5*size,max(max(t2-VD_THICK*size,lo),1e-6*size),min(t2,hi));
             vd_mask|=m2;
             if vd_edge && !vd_replaced(cell,level,stride,min(t2,hi)) {vd_far|=m2;}
         }
@@ -861,9 +844,6 @@ override VD_FRACTION:bool=false;
 // (vd_near); VD_FR_WIDE in 0..1 forces the regime blend (vd_side), negative computes it.
 override VD_FR_NEAR:bool=true;
 override VD_FR_WIDE:f32=-1.0;
-// The second surface under a partly covered texel reaches its mesh's underside (vd_texel); off:
-// measurement.
-override VD_FR_UNDER:bool=true;
 // The covered side (VD_FRACTION): a texel whose near layer covers k of its samples (vd_cover, the
 // page raster's sample bits) has its covered part on the side of those samples' centroid, n
 // (its angle replaces the bits, vsm_cover_side): the same every frame, and nested between
