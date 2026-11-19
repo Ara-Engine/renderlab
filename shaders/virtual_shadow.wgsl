@@ -591,6 +591,7 @@ fn vsm_sil_load(level:u32,origin:vec2<i32>,li:u32) {
 }
 // Texel t (map index i), at entry ce of the loaded tile.
 fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
+    if level>VSM_SIL_MAX_LEVEL {return;}
     let id=vsm_wg_sil_id[ce];
     let h=vsm_wg_sil_h[ce];
     let bits=vsm.misc.x;
@@ -810,6 +811,8 @@ override VSM_SIL_RING:bool=false;
 override VSM_SIL_FILL:bool=true;
 // The open samples' surface into the peel word (vsm_silhouette); off: measurement.
 override VSM_SIL_UNDER:bool=true;
+// Measurement: the finest level (index) the silhouette pass serves.
+override VSM_SIL_MAX_LEVEL:u32=99u;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=32u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
