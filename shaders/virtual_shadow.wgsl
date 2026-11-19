@@ -629,7 +629,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     }
     // Per sample, the highest covering height and its triangle's reach across the samples; per
     // triangle, the mean height of what it covers (its covered part's height) and its samples.
-    for(var s=0u;s<8u;s+=1u) {vsm_sil_z[s]=-1.0;vsm_sil_reach[s]=0.0;vsm_sil_tid[s]=0u;}
+    for(var s=0u;s<8u;s+=1u) {vsm_sil_z[s]=-1.0;vsm_sil_reach[s]=0.0;vsm_sil_tid[s]=0u;vsm_sil_area[s]=0.0;}
     vsm_sil_best=select(-1.0,h,id!=0u);vsm_sil_bid=id;
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
     var inside:array<u32,VSM_SIL_IDS>;
@@ -680,6 +680,13 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
             if nid!=VSM_SIL_OUT && nid!=0u && ((nid>>bits)==own || vsm_wg_sil_h[j]>=lowest) {covered=true;}
         }
         if covered {cover|=1u<<s;}
+    }
+    // Resolved geometry only: the ids name an outline's triangles where those are texel-sized or
+    // larger. Where a covered sample's triangle is smaller than VSM_SIL_MIN_AREA texels (a
+    // coarse level's detail, which the candidates name in part), the texel keeps the map's own
+    // answer, as without the fraction: no count, no promotion.
+    for(var s=0u;s<VSM_SAMPLES;s+=1u) {
+        if (cover&(1u<<s))!=0u && vsm_sil_tid[s]!=0u && vsm_sil_area[s]<VSM_SIL_MIN_AREA {return;}
     }
     // The silhouette map: the outline crossing this texel as a line. Of the edges of the near
     // layer's triangles (a plane reaching the near layer at the texel) that cross the texel's
@@ -811,7 +818,9 @@ override VSM_SIL_RING:bool=false;
 override VSM_SIL_FILL:bool=true;
 // The open samples' surface into the peel word (vsm_silhouette); off: measurement.
 override VSM_SIL_UNDER:bool=true;
-// Measurement: the finest level (index) the silhouette pass serves.
+// The least triangle area (texels) whose outline the ids resolve (vsm_silhouette).
+override VSM_SIL_MIN_AREA:f32=1.0;
+// Measurement: the coarsest level (index) the silhouette pass serves.
 override VSM_SIL_MAX_LEVEL:u32=99u;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=32u;
@@ -819,8 +828,9 @@ const VSM_SIL_IDS:u32=32u;
 // its triangle's reach, and the highest covered part's mean height and triangle.
 var<private> vsm_sil_z:array<f32,8>;
 var<private> vsm_sil_reach:array<f32,8>;
-// Each sample's highest covering triangle (its map id; 0: none).
+// Each sample's highest covering triangle (its map id; 0: none) and its area in texels.
 var<private> vsm_sil_tid:array<u32,8>;
+var<private> vsm_sil_area:array<f32,8>;
 var<private> vsm_sil_best:f32;
 var<private> vsm_sil_bid:u32;
 // Triangle `tid` against the texel's samples: updates the per-sample state; its inside mask.
@@ -839,7 +849,7 @@ fn vsm_sil_triangle(tid:u32,level:u32,centre:vec2<f32>)->u32 {
         let wb=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p))/area;
         if any(wb<vec3<f32>(0.0)) {continue;}
         let zs=dot(wb,z);
-        if zs>vsm_sil_z[s] {vsm_sil_z[s]=zs;vsm_sil_reach[s]=reach;vsm_sil_tid[s]=tid;}
+        if zs>vsm_sil_z[s] {vsm_sil_z[s]=zs;vsm_sil_reach[s]=reach;vsm_sil_tid[s]=tid;vsm_sil_area[s]=0.5*abs(area);}
         sum+=zs;mask|=1u<<s;
     }
     let count=countOneBits(mask);
