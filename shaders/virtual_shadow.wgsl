@@ -656,53 +656,82 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
             n+=1u;
         }
     }
-    let best=vsm_sil_best;let bid=vsm_sil_bid;
-    let lowest=best-gap;
+    let lowest=vsm_sil_best-gap;
     var cover=0u;
     for(var s=0u;s<VSM_SAMPLES;s+=1u) {
         if vsm_sil_z[s]>=0.0 && vsm_sil_z[s]>=lowest-vsm_sil_reach[s] {cover|=1u<<s;}
     }
-    // The fold (vsm_fold) here, as no other pass writes this texel's samples: the count in the
-    // top word's low height bits (the raster cleared them) with any promotion, and the line.
-    let k=countOneBits(cover);
-    let partial=k>0u && k<8u;
-    if bid!=id || partial {
-        atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(bid));
-    }
-    if !partial {return;}
-    // The line: of the edges of the triangles covering near samples, one whose inner side holds
-    // every covered sample and no other (an outline crossing the texel), placed where the edge
-    // lies; ties go to the edge whose cut area is nearest k/8. A line never drops a covered
-    // sample (that would open the texel's covered part to light). At a convex corner each edge
-    // also holds one open sample: the edge doing so serves, and the corner's other edge is lost
-    // inside this texel. Otherwise (a cut by the peel gap on a slope, no edge) the samples'
-    // centroid side, placed by the count.
-    var extra=2u;var err=2.0;var ln=vec2<f32>(0.0);var ls=0.0;
+    // The silhouette map: the outline crossing this texel as a line. Of the edges of the near
+    // layer's triangles (a plane reaching the near layer at the texel) that cross the texel's
+    // square, an outline edge (its adjacency neighbour missing or facing away from the light) with
+    // no covered sample beyond it (another surface's cover there means the near layer goes on),
+    // the one nearest the centre. Its line holds wherever it crosses, whether or not a sample saw
+    // it: a corner of a full texel past the outline, or of an empty one under it, is a texel-wide
+    // error the samples cannot see. At a convex corner two edges cross: the nearer serves, the
+    // other is lost inside this texel. Where no edge crosses but the samples are split (a cut by
+    // the peel gap on a slope), their centroid side, placed by their count.
+    var best=vsm_sil_best;var bid=vsm_sil_bid;
+    var near=2.0;var ln=vec2<f32>(0.0);var ls=0.0;var lid=0u;var lz=0.0;
     for(var m=0u;m<n;m+=1u) {
-        if (inside[m]&cover)==0u {continue;}
         let tri=vsm_id_triangle(ids[m],level);
-        let side=sign(vsm_cross(tri[0].xy,tri[1].xy,tri[2].xy));
+        let area=vsm_cross(tri[0].xy,tri[1].xy,tri[2].xy);
+        if area==0.0 {continue;}
+        let side=sign(area);
+        let z=vec3<f32>(tri[0].z,tri[1].z,tri[2].z);
+        let placement=ids[m]>>bits;
+        let batch=primary_placements[placement-1u]&0x1fffffffu;
+        let primitive=ids[m]&((1u<<bits)-1u);
         for(var e=0u;e<3u;e+=1u) {
             let a=tri[e].xy;let d=tri[(e+1u)%3u].xy-a;
-            if dot(d,d)==0.0 {continue;}
-            let nn=normalize(vec2<f32>(-d.y,d.x))*side;
-            var held=0u;
-            for(var s=0u;s<8u;s+=1u) {
-                if dot(centre+vsm_sample(s)-a,nn)>=0.0 {held|=1u<<s;}
-            }
-            if (cover&~held)!=0u {continue;}
-            let x=countOneBits(held&~cover&0xffu);
+            let len=length(d);
+            if len==0.0 {continue;}
+            let nn=vec2<f32>(-d.y,d.x)*(side/len);
             let off=-dot(centre-a,nn);
-            if x>1u || abs(off)>0.75 {continue;}
-            let e2=abs(vsm_area_beyond(nn,off)-f32(k)/8.0);
-            if x<extra || (x==extra && e2<err) {extra=x;err=e2;ln=nn;ls=off;}
+            // Crossing the square: the line within its half-diagonal along nn, and the segment
+            // over the square's extent along the edge.
+            let hr=0.5*(abs(nn.x)+abs(nn.y));
+            if abs(off)>=hr || abs(off)>=near {continue;}
+            let du=d/len;
+            let pc=dot(centre-a,du);let hw=0.5*(abs(du.x)+abs(du.y));
+            if pc+hw<0.0 || pc-hw>len {continue;}
+            // No covered sample beyond the line.
+            var beyond=0u;
+            for(var q=0u;q<8u;q+=1u) {
+                if dot(centre+vsm_sample(q)-a,nn)<0.0 {beyond|=1u<<q;}
+            }
+            if (cover&beyond)!=0u {continue;}
+            // The triangle's plane at the middle of the part inside the square, in the near layer.
+            let pm=centre+nn*(0.5*(off+hr));
+            let wb=vec3<f32>(vsm_cross(tri[1].xy,tri[2].xy,pm),vsm_cross(tri[2].xy,tri[0].xy,pm),vsm_cross(tri[0].xy,tri[1].xy,pm))/area;
+            let zp=dot(wb,z);
+            if best>=0.0 && zp<best-gap {continue;}
+            // An outline edge.
+            let nb=vsm_neighbour(batch,primitive,e);
+            if nb!=VSM_MISSING {
+                let other=vsm_id_triangle((placement<<bits)|nb,level);
+                if sign(vsm_cross(other[0].xy,other[1].xy,other[2].xy))==side {continue;}
+            }
+            near=abs(off);ln=nn;ls=off;lid=ids[m];lz=zp;
         }
     }
-    if extra>1u {
+    var k=countOneBits(cover);
+    var partial=k>0u && k<8u;
+    if near<2.0 {
+        // The line's part is the covered one: its triangle becomes the top where it stands above
+        // the texel's own (or the texel had none), and the count is its area's.
+        if lid!=bid && lz>best {best=lz;bid=lid;}
+        k=clamp(u32(round(vsm_area_beyond(ln,ls)*8.0)),1u,7u);
+        partial=true;
+    } else if partial {
         ln=vsm_centroid_side(cover);
         ls=vsm_area_offset(ln,f32(k)/8.0);
     }
-    vsm_cover_line(i,ln,ls);
+    // The fold (vsm_fold) here, as no other pass writes this texel's samples: the count in the
+    // top word's low height bits (the raster cleared them) with any promotion, and the line.
+    if bid!=id || partial {
+        atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(bid));
+    }
+    if partial {vsm_cover_line(i,ln,ls);}
 }
 // The share of the unit square past offset s along unit n (vsm_area_offset's inverse).
 fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
