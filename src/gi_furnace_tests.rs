@@ -261,8 +261,6 @@ fn cases() -> Vec<Case> {
             c.parts[0].faces = subdivided(std::mem::take(&mut c.parts[0].faces), 40);
             Case { name: "many", ..c }
         },
-        ordered("order-ab", false),
-        ordered("order-ba", true),
         Case {
             name: "orange",
             ..room([0.9, 0.4, 0.1])
@@ -283,6 +281,9 @@ fn cases() -> Vec<Case> {
             name: "slab-tall",
             ..roofed(4.0)
         },
+        // Last, so a reader that fails the order check has run every other case first.
+        ordered("order-ab", false),
+        ordered("order-ba", true),
     ];
     if let Ok(only) = std::env::var("RENDERLAB_FURNACE_CASES") {
         out.retain(|c| only.split(',').any(|n| n.trim() == c.name));
