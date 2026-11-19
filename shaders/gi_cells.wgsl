@@ -206,6 +206,10 @@ const GI_TERTIARY:u32=1024u;
 // the bounce series has not converged there, and the scan's convergence rotation gathers it again
 // (gi_cache.wgsl gi_gather_finish, gi_scan). Cell shading marks its value as changing meanwhile.
 const GI_UNCONVERGED:u32=0x40000u;
+// The cell's next gather is only convergence's repeat (no event scheduled it): it is admitted
+// under the gather ray budget, as a refinement, whoever reads the cell (gi_cache.wgsl
+// gi_gather_bin). Any event's schedule clears it (gi_schedule).
+const GI_REPEAT:u32=0x80000u;
 const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY|GI_GATHER_MASK;
 
 // Each module defines gi_word(i), the table's word i: the kernels index a u32 array,

@@ -968,7 +968,7 @@ fn gi_schedule(slot:u32, gathers:u32) {
     let cold=gi_cold(slot);
     let state=gi_table[cold+GI_C_STATE];
     let left=max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,min(gathers,7u));
-    var next=(state&~GI_GATHER_MASK)|(left<<GI_GATHER_SHIFT);
+    var next=(state&~(GI_GATHER_MASK|GI_REPEAT))|(left<<GI_GATHER_SHIFT);
     if (state&GI_BQUEUED)==0u {
         next|=GI_BQUEUED;
         let at=atomicAdd(&gi_work[gi_frame.bounce.y],1u);
@@ -2277,17 +2277,20 @@ fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
     let after=vec3<f32>(gi_wg_bounce[0],gi_wg_bounce[GI_GATHER_LANES],gi_wg_bounce[2u*GI_GATHER_LANES]);
     let moved=max(abs(after-before).x,max(abs(after-before).y,abs(after-before).z));
     let unconverged=atomicLoad(&gi_wg_changing)!=0u && moved>GI_CONVERGED*max(after.x,max(after.y,after.z));
-    if unconverged || atomicLoad(&gi_wg_unconverged)!=0u { left=max(left,1u); }
     var retry=state&GI_RETRY;
     if missing!=0u {
         if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
     } else {
         retry=0u;
     }
+    // Convergence's repeat, when nothing else asks for another gather: budgeted as a refinement.
+    let repeat=left==0u && (unconverged || atomicLoad(&gi_wg_unconverged)!=0u);
+    if repeat { left=1u; }
     let kept=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
     gi_table[cold+GI_C_STATE]=(kept&~GI_UNCONVERGED)|select(0u,GI_UNCONVERGED,unconverged);
     gi_queue_shade(slot);
     gi_schedule(slot,left);
+    if repeat { gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]|GI_REPEAT; }
 }
 var<workgroup> gi_wg_rays:atomic<u32>;
 // Whether this iteration's cell gathers this frame, for the whole workgroup (P-GI).
@@ -2336,12 +2339,15 @@ fn gi_gather_rays(slot:u32) -> u32 {
     }
     return rays;
 }
-// A queued cell's admission bin: GI_GATHER_ALWAYS for the cells pixels read this frame (the
-// probe's stamp) and first fill's parents; else no value yet first, then refining.
+// A queued cell's admission bin: convergence's repeats refine, whoever reads the cell; else
+// GI_GATHER_ALWAYS for the cells pixels read this frame (the probe's stamp) and first fill's
+// parents; else no value yet first, then refining.
 fn gi_gather_bin(slot:u32) -> u32 {
     let cold=gi_cold(slot);
-    if (gi_table[cold+GI_C_STATE]&GI_FILL_PARENT)!=0u || gi_table[cold+GI_C_SEEN]==gi_word(GI_H_FRAME) { return GI_GATHER_ALWAYS; }
-    let order=select(1u,0u,!(gi_outgoing[slot].w>0.0));
+    let state=gi_table[cold+GI_C_STATE];
+    let repeat=(state&GI_REPEAT)!=0u;
+    if !repeat && ((state&GI_FILL_PARENT)!=0u || gi_table[cold+GI_C_SEEN]==gi_word(GI_H_FRAME)) { return GI_GATHER_ALWAYS; }
+    let order=select(1u,0u,!repeat && !(gi_outgoing[slot].w>0.0));
     return order*GI_GATHER_SPREAD+(gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u))>>28u);
 }
 fn gi_gather_queued(slot:u32) -> bool {
