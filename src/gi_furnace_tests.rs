@@ -16,7 +16,8 @@
 //!   above it. No path from the emitter reaches the roof or the slab's top face (light passing
 //!   the slab's edges climbs past the roof's), so both must read exactly 0. Gathers here do hit
 //!   the top face and the roof, so a hit that reads a cell coarser than its footprint (whose
-//!   volume reaches the emitter's side) shows as light.
+//!   volume reaches the emitter's side) shows as light. With the final gather on, the test
+//!   also fails if the gather still asks the cache for cells on the settled view's last frame.
 //!
 //! The estimator is whatever the process's switches select (RENDERLAB_GI_ACCUMULATE,
 //! RENDERLAB_FINAL_GATHER, ...); the test records them. Each case is its own renderer, so no
@@ -27,7 +28,8 @@
 //!   RENDERLAB_FURNACE_OUT=<dir>   furnace.json and one PFM per case (optional)
 //!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark,slab-roof (default all)
 //!   RENDERLAB_FURNACE_FRAMES=300  frames per view; the report also samples frames 1, 4, 16, 64
-//!   RENDERLAB_FURNACE_COUNTERS=1  adds the cache's counters for each view's last frame
+//!   RENDERLAB_FURNACE_COUNTERS=1  adds the cache's counters for each view's last frame;
+//!                                 =frames also records a few of them on every frame up to 64
 //!   cargo test --lib gi_furnace -- --ignored --nocapture
 use super::*;
 
@@ -343,6 +345,7 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
     for view in &case.views {
         let camera = Camera::look_at(view.eye, view.target, view.up, FOV, 0.01, 100.0).unwrap();
         let mut samples = json!({});
+        let mut per_frame = vec![];
         let mut last = vec![];
         for frame in 1..=frames {
             let mut draws: Vec<Draw<'_>> = meshes
@@ -359,6 +362,12 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
                 r.test_drain("furnace admission");
             }
             drop(draws);
+            if frame <= 64 && std::env::var("RENDERLAB_FURNACE_COUNTERS").as_deref() == Ok("frames") {
+                let c = r.indirect_counters().unwrap().unwrap_or_default();
+                per_frame.push(json!([frame, c.created, c.created_secondary, c.orphans, c.splits,
+                    c.gathers, c.gather_misses, c.gather_unshaded, c.gather_orphans,
+                    c.external_requests, c.fg_rays, c.evicted, r.indirect_stats().idle_frames]));
+            }
             if SAMPLES.contains(&frame) || frame == frames {
                 last = capture_radiance(&mut r, 0.0);
                 samples[frame.to_string()] = score(&last, view.expected);
@@ -368,11 +377,28 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
             write_pfm(&dir.join(format!("{}-{}.pfm", case.name, view.name)), &last);
         }
         rows[view.name] = json!({"expected": view.expected, "frames": samples});
+        if !per_frame.is_empty() {
+            rows[view.name]["per_frame"] = json!({"columns": ["frame", "created", "created_secondary",
+                "orphans", "splits", "gathers", "gather_misses", "gather_unshaded", "gather_orphans",
+                "external_requests", "fg_rays", "evicted", "idle_frames"], "rows": per_frame});
+        }
         // The cache's counters for the view's last frame (cells created by band, orphans,
         // splits, gather misses by cause, external requests), with RENDERLAB_FURNACE_COUNTERS.
         if std::env::var_os("RENDERLAB_FURNACE_COUNTERS").is_some() {
             let c = r.indirect_counters().unwrap().unwrap_or_default();
             rows[view.name]["counters"] = json!(format!("{c:?}"));
+        }
+        // The guard for readers outside the cache (the final gather): on a settled view every
+        // probe hit has a value, so its last cache frame took no request. The counters hold the
+        // last frame the cache ran, so a cache that went idle while a reader still asked fails too.
+        if case.name == "slab-roof" && crate::program::final_gather() {
+            let c = r.indirect_counters().unwrap().unwrap_or_default();
+            rows[view.name]["external_requests_last"] = json!(c.external_requests);
+            assert_eq!(
+                c.external_requests, 0,
+                "slab-roof {}: the gather still asks for cells after {frames} frames",
+                view.name
+            );
         }
     }
     rows
