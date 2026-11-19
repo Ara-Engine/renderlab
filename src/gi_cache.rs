@@ -3187,10 +3187,16 @@ impl Renderer {
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
     pub fn indirect_table(&mut self) -> Result<Option<Vec<u32>>, Error> {
+        let words = self.gi.resources.as_ref().map_or(0, |r| r.table.size() / 4);
+        self.indirect_table_words(0, words)
+    }
+    /// Blocks until the GPU is idle and copies `count` table words from word `at` (the header,
+    /// the emitter list).
+    pub(crate) fn indirect_table_words(&mut self, at: u64, count: u64) -> Result<Option<Vec<u32>>, Error> {
         let Some(r) = self.gi.resources.as_ref() else {
             return Ok(None);
         };
-        let size = r.table.size();
+        let size = count * 4;
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("indirect cache table readback"),
             size,
@@ -3198,7 +3204,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&r.table, 0, &readback, 0, size);
+        encoder.copy_buffer_to_buffer(&r.table, at * 4, &readback, 0, size);
         self.queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
