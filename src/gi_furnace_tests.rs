@@ -18,6 +18,12 @@
 //!   the top face and the roof, so a hit that reads a cell coarser than its footprint (whose
 //!   volume reaches the emitter's side) shows as light. With the final gather on, the test
 //!   also fails if the gather still asks the cache for cells on the settled view's last frame.
+//! - `slab-tall`: the same with the roof 4 m up, so gathers between roof and slab reach both at
+//!   footprint levels whose cells span the slab (cells 2 m on an edge and more, which hold the
+//!   emitter's light below it unless split detection keeps them out).
+//!
+//!   In both roofed cases every reader fails the test unless the top face and the roof stay black
+//!   (no pixel above 1e-3 cd/m^2) on every sampled frame.
 //!
 //! Every case also builds the cache's emitter list (gi_emitters.wgsl) and fails unless it holds
 //! the scene's emitting triangles and draws and their total power (pi * luminance * area, within
@@ -30,7 +36,7 @@
 //! Run (one GPU lease, every case on one path):
 //!   RENDERLAB_FURNACE_PATH=rt|nort (default nort; rt needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK)
 //!   RENDERLAB_FURNACE_OUT=<dir>   furnace.json and one PFM per case (optional)
-//!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark,slab-roof (default all)
+//!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark,slab-roof,slab-tall (default all)
 //!   RENDERLAB_FURNACE_FRAMES=300  frames per view; the report also samples frames 1, 4, 16, 64
 //!   RENDERLAB_FURNACE_COUNTERS=1  adds the cache's counters for each view's last frame;
 //!                                 =frames also records a few of them on every frame up to 64
@@ -159,29 +165,34 @@ fn cases() -> Vec<Case> {
             },
         ],
     };
-    let mut roofed = slab(20.0);
-    roofed.sky = 0.0;
-    roofed.parts.push(Part {
-        faces: vec![quad(Vec3::new(0.0, 0.5, 0.0), -Vec3::Y, Vec3::X * 1.5, 1.5)],
-        albedo: [0.5; 3],
-        glow: [0.0; 3],
-    });
-    roofed.views = vec![
-        FurnaceView {
-            name: "top",
-            eye: Vec3::new(0.0, 0.3, 0.0),
-            target: Vec3::ZERO,
-            up: Vec3::Z,
-            expected: Some([0.0; 3]),
-        },
-        FurnaceView {
-            name: "roof",
-            eye: Vec3::new(0.0, 0.2, 0.0),
-            target: Vec3::new(0.0, 0.5, 0.0),
-            up: Vec3::Z,
-            expected: Some([0.0; 3]),
-        },
-    ];
+    // The lit slab under a black sky with a grey roof `height` above it; the top face and the roof
+    // must read 0. The views sit between them, the top's at 0.6 and the roof's at 0.4 of the gap.
+    let roofed = |height: f32| {
+        let mut c = slab(20.0);
+        c.sky = 0.0;
+        c.parts.push(Part {
+            faces: vec![quad(Vec3::new(0.0, height, 0.0), -Vec3::Y, Vec3::X * 1.5, 1.5)],
+            albedo: [0.5; 3],
+            glow: [0.0; 3],
+        });
+        c.views = vec![
+            FurnaceView {
+                name: "top",
+                eye: Vec3::new(0.0, 0.6 * height, 0.0),
+                target: Vec3::ZERO,
+                up: Vec3::Z,
+                expected: Some([0.0; 3]),
+            },
+            FurnaceView {
+                name: "roof",
+                eye: Vec3::new(0.0, 0.4 * height, 0.0),
+                target: Vec3::new(0.0, height, 0.0),
+                up: Vec3::Z,
+                expected: Some([0.0; 3]),
+            },
+        ];
+        c
+    };
     let mut out = vec![
         Case {
             name: "grey",
@@ -201,7 +212,11 @@ fn cases() -> Vec<Case> {
         },
         Case {
             name: "slab-roof",
-            ..roofed
+            ..roofed(0.5)
+        },
+        Case {
+            name: "slab-tall",
+            ..roofed(4.0)
         },
     ];
     if let Ok(only) = std::env::var("RENDERLAB_FURNACE_CASES") {
@@ -377,6 +392,11 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
             if SAMPLES.contains(&frame) || frame == frames {
                 last = capture_radiance(&mut r, 0.0);
                 samples[frame.to_string()] = score(&last, view.expected);
+                // The roofed slabs: no light from below reaches above the slab, at any frame.
+                if case.name.starts_with("slab-") && view.expected == Some([0.0; 3]) {
+                    let most = samples[frame.to_string()]["max_lum"].as_f64().unwrap();
+                    assert!(most <= 1e-3, "{} {} frame {frame}: light from below, {most} cd/m^2", case.name, view.name);
+                }
             }
         }
         if let Some(dir) = out {
