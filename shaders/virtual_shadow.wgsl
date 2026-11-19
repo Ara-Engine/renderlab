@@ -670,13 +670,14 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
         atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(bid));
     }
     if !partial {return;}
-    // The line: of the edges of the triangles covering near samples, the one whose inner side
-    // holds exactly the covered samples (an outline crossing the texel), placed where the edge
-    // lies; ties go to the edge whose cut area is nearest k/8. At a corner no single edge holds
-    // them all: an edge missing one sample still serves (the corner's other edge is then lost
-    // inside this texel). Otherwise (a cut by the peel gap on a slope, no edge) the samples'
+    // The line: of the edges of the triangles covering near samples, one whose inner side holds
+    // every covered sample and no other (an outline crossing the texel), placed where the edge
+    // lies; ties go to the edge whose cut area is nearest k/8. A line never drops a covered
+    // sample (that would open the texel's covered part to light). At a convex corner each edge
+    // also holds one open sample: the edge doing so serves, and the corner's other edge is lost
+    // inside this texel. Otherwise (a cut by the peel gap on a slope, no edge) the samples'
     // centroid side, placed by the count.
-    var agree=0u;var err=2.0;var ln=vec2<f32>(0.0);var ls=0.0;
+    var extra=2u;var err=2.0;var ln=vec2<f32>(0.0);var ls=0.0;
     for(var m=0u;m<n;m+=1u) {
         if (inside[m]&cover)==0u {continue;}
         let tri=vsm_id_triangle(ids[m],level);
@@ -689,14 +690,15 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
             for(var s=0u;s<8u;s+=1u) {
                 if dot(centre+vsm_sample(s)-a,nn)>=0.0 {held|=1u<<s;}
             }
-            let g=8u-countOneBits((held^cover)&0xffu);
+            if (cover&~held)!=0u {continue;}
+            let x=countOneBits(held&~cover&0xffu);
             let off=-dot(centre-a,nn);
-            if abs(off)>0.75 {continue;}
+            if x>1u || abs(off)>0.75 {continue;}
             let e2=abs(vsm_area_beyond(nn,off)-f32(k)/8.0);
-            if g>agree || (g==agree && e2<err) {agree=g;err=e2;ln=nn;ls=off;}
+            if x<extra || (x==extra && e2<err) {extra=x;err=e2;ln=nn;ls=off;}
         }
     }
-    if agree<7u {
+    if extra>1u {
         ln=vsm_centroid_side(cover);
         ls=vsm_area_offset(ln,f32(k)/8.0);
     }
