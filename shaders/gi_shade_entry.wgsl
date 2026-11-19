@@ -254,6 +254,9 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
         // it repeat (gi_gather). It depends only on the cell's state, so a mixed frame's
         // dispatches agree whichever stored the value.
         let gs_out=gi_shade_out[slot];
-        if gs_out.w>0.0 && (gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED|GI_UNCONVERGED))!=0u { gi_shade_out[slot]=vec4<f32>(gs_out.xyz,0.75); }
+        // Unconverged cells read as 0.625 (gi_cache.wgsl GI_HIT_UNCONVERGED), still scheduled
+        // ones as 0.75.
+        let gs_state=gi_word(gi_cold(slot)+GI_C_STATE);
+        if gs_out.w>0.0 && (gs_state&(GI_GATHER_MASK|GI_BQUEUED|GI_UNCONVERGED))!=0u { gi_shade_out[slot]=vec4<f32>(gs_out.xyz,select(0.75,0.625,(gs_state&GI_UNCONVERGED)!=0u)); }
     }
 }

@@ -73,6 +73,7 @@ var<workgroup> gi_drain_base:u32;
         if lane==0u {
             atomicStore(&gi_wg_missing,0u);
             atomicStore(&gi_wg_changing,0u);
+            atomicStore(&gi_wg_unconverged,0u);
             atomicStore(&gi_wg_rays,0u);
             atomicStore(&gi_wg_hits,0u);
             atomicStore(&gi_wg_valued,0u);
@@ -122,7 +123,8 @@ var<workgroup> gi_drain_base:u32;
                 hits+=1u;
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
                 if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
-                if o.w==GI_HIT_CHANGING { changing+=1u; }
+                if o.w==GI_HIT_CHANGING || o.w==GI_HIT_UNCONVERGED { changing+=1u; }
+                if o.w==GI_HIT_UNCONVERGED { atomicAdd(&gi_wg_unconverged,1u); }
                 if o.w<=GI_HIT_NONE { continue; }
                 valued+=1u;
                 gi_sh_basis(d);

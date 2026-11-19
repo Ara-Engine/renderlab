@@ -2047,6 +2047,9 @@ fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
 //   orphan (it never gets a value), a coarser one: cell shading wrote it with no gathers left
 //   (gi_shade_entry.wgsl marks values still changing below 1);
 // - GI_HIT_CHANGING (0.75): the same, but the cell still has gathers scheduled;
+// - GI_HIT_UNCONVERGED (0.625): the same, and the cell's last gather moved its value by more than
+//   GI_CONVERGED (GI_UNCONVERGED): its readers gather again whatever their own value did, since
+//   the cache keeps no list of a cell's readers to tell them when it settles;
 // - GI_HIT_MISSING (0.5): a stand-in value while the hit's cell is absent or not shaded yet (the
 //   gather is then repeated once). None is given since the footprint rule: gi_hit_radiance gives
 //   no value then (0 below) rather than another level's;
@@ -2058,6 +2061,7 @@ fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
 // orphan does: the coarser value it reads is the one a repeated gather would read.
 const GI_HIT_FINAL:f32=1.0;
 const GI_HIT_CHANGING:f32=0.75;
+const GI_HIT_UNCONVERGED:f32=0.625;
 const GI_HIT_MISSING:f32=0.5;
 const GI_HIT_NONE:f32=0.25;
 // A gather hit's cell edge over the hit's distance along the ray, for the hits that follow (0:
@@ -2122,7 +2126,7 @@ fn gi_hit_find(world:vec3<f32>, bin:u32, level:u32) -> u32 {
 fn gi_hit_value(slot:u32, h:GiHit) -> vec4<f32> {
     let o=gi_outgoing[slot];
     let reflected=max(o.rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
-    return vec4<f32>(reflected,select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0));
+    return vec4<f32>(reflected,select(select(GI_HIT_CHANGING,GI_HIT_UNCONVERGED,o.w==GI_HIT_UNCONVERGED),GI_HIT_FINAL,o.w>=1.0));
 }
 // A gather hit reads its footprint level's cell (gi_hit_level), never a coarser one: a coarser
 // cell averages its whole volume, and around thin geometry that holds the other side's light
@@ -2192,6 +2196,8 @@ const GI_GATHER_PERIOD_MAX:u32=64u;
 var<workgroup> gi_wg_bounce:array<f32,24u*GI_GATHER_LANES>;
 var<workgroup> gi_wg_missing:atomic<u32>;
 var<workgroup> gi_wg_changing:atomic<u32>;
+// Of those, hits on unconverged cells (GI_HIT_UNCONVERGED).
+var<workgroup> gi_wg_unconverged:atomic<u32>;
 // Relative change of a cell's bounce (its L0 term's largest channel) below which its gathers
 // have converged. What the series still lacks then is about GI_CONVERGED * g / (1 - g) of the
 // answer at loop gain g: 1.8% at g = 0.9 (the furnace's orange red; 1/256 left 3.3%). Four times
@@ -2260,7 +2266,10 @@ fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
     // gather is one Jacobi step of the radiosity fixed point, so a fixed G truncated it (a
     // closed box of albedo 0.5 read 0.88 of Le / (1 - rho), and 0.28 at albedo 0.9). While its
     // hits still change, a cell whose own value moved by more than GI_CONVERGED of its size is
-    // unconverged and is gathered again. Every gather is admitted under one per-frame ray budget
+    // unconverged and is gathered again, and so is a cell that read an unconverged hit (whose
+    // value may still move after this gather, which a reader would otherwise never see: a budget
+    // that defers the hit left its readers settled on its old value, the furnace's grey box
+    // stopping at 0.936). Every gather is admitted under one per-frame ray budget
     // (gi_gather_select), refinements like this one last, as Lumen's radiosity updates a fixed
     // share of its cards: gathering every such cell every frame cost 7-8 ms on a non-RT walk,
     // where new cells keep their neighbours changing. The changes shrink by the loop's gain each
@@ -2268,7 +2277,7 @@ fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
     let after=vec3<f32>(gi_wg_bounce[0],gi_wg_bounce[GI_GATHER_LANES],gi_wg_bounce[2u*GI_GATHER_LANES]);
     let moved=max(abs(after-before).x,max(abs(after-before).y,abs(after-before).z));
     let unconverged=atomicLoad(&gi_wg_changing)!=0u && moved>GI_CONVERGED*max(after.x,max(after.y,after.z));
-    if unconverged { left=max(left,1u); }
+    if unconverged || atomicLoad(&gi_wg_unconverged)!=0u { left=max(left,1u); }
     var retry=state&GI_RETRY;
     if missing!=0u {
         if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
@@ -2438,6 +2447,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
         if lane==0u {
             atomicStore(&gi_wg_missing,0u);
             atomicStore(&gi_wg_changing,0u);
+            atomicStore(&gi_wg_unconverged,0u);
             atomicStore(&gi_wg_rays,0u);
             atomicStore(&gi_wg_hits,0u);
             atomicStore(&gi_wg_valued,0u);
@@ -2502,7 +2512,8 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
                 hits+=1u;
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
                 if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
-                if o.w==GI_HIT_CHANGING { changing+=1u; }
+                if o.w==GI_HIT_CHANGING || o.w==GI_HIT_UNCONVERGED { changing+=1u; }
+                if o.w==GI_HIT_UNCONVERGED { atomicAdd(&gi_wg_unconverged,1u); }
                 if o.w<=GI_HIT_NONE { continue; }
                 valued+=1u;
                 gi_sh_basis(d);
