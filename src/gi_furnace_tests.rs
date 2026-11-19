@@ -27,6 +27,7 @@
 //!   RENDERLAB_FURNACE_OUT=<dir>   furnace.json and one PFM per case (optional)
 //!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark,slab-roof (default all)
 //!   RENDERLAB_FURNACE_FRAMES=300  frames per view; the report also samples frames 1, 4, 16, 64
+//!   RENDERLAB_FURNACE_COUNTERS=1  adds the cache's counters for each view's last frame
 //!   cargo test --lib gi_furnace -- --ignored --nocapture
 use super::*;
 
@@ -367,6 +368,12 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
             write_pfm(&dir.join(format!("{}-{}.pfm", case.name, view.name)), &last);
         }
         rows[view.name] = json!({"expected": view.expected, "frames": samples});
+        // The cache's counters for the view's last frame (cells created by band, orphans,
+        // splits, gather misses by cause, external requests), with RENDERLAB_FURNACE_COUNTERS.
+        if std::env::var_os("RENDERLAB_FURNACE_COUNTERS").is_some() {
+            let c = r.indirect_counters().unwrap().unwrap_or_default();
+            rows[view.name]["counters"] = json!(format!("{c:?}"));
+        }
     }
     rows
 }
