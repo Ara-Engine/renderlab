@@ -203,10 +203,10 @@ const GI_RETRY:u32=512u;
 // Made for a secondary cell's gather: requests nothing (GI_SECONDARY is set too).
 const GI_TERTIARY:u32=1024u;
 // The cell's last gather moved its value by more than GI_CONVERGED while its hits still changed:
-// the bounce series has not converged there, and the scan's convergence rotation gathers it again
-// (gi_cache.wgsl gi_gather_finish, gi_scan). Cell shading marks its value as changing meanwhile.
+// the bounce series has not converged there (gi_cache.wgsl gi_gather_finish); the refinement
+// sweep gathers it again. Cell shading marks its value as unconverged (0.625) meanwhile.
 const GI_UNCONVERGED:u32=0x40000u;
-// The cell's next gather is only convergence's repeat (no event scheduled it): it is admitted
+// The cell's next gather is only the refinement sweep's (no event scheduled it): it is admitted
 // under the gather ray budget, as a refinement, whoever reads the cell (gi_cache.wgsl
 // gi_gather_bin). Any event's schedule clears it (gi_schedule).
 const GI_REPEAT:u32=0x80000u;

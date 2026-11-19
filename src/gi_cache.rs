@@ -174,6 +174,10 @@ fn gather_rays(software: bool) -> u32 {
     ((ms * per_ms) as u32).max(4096)
 }
 const GATHER_MS: f32 = 1.5;
+/// A gather's estimated rays, for sizing the refinement sweep's turn.
+const SWEEP_RAYS_PER_CELL: u64 = 32;
+/// Longest refinement sweep turn, in frames.
+const SWEEP_TURN_MAX: u32 = 256;
 const GATHER_RAYS_PER_MS_SOFTWARE: f32 = 40_000.0;
 const GATHER_RAYS_PER_MS_HARDWARE: f32 = 160_000.0;
 /// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
@@ -959,10 +963,11 @@ pub struct IndirectCounters {
     /// Gather rays the hit's own level answered because the hit level's cell is an orphan or
     /// split (gi_hit_radiance, which never reads coarser than a hit's footprint).
     pub gather_finer: u32,
-    /// Measurement: admitted gathers under the ray budget, and schedules gathers' ends made
-    /// again [convergence's repeat, otherwise].
+    /// Gathers admitted under the ray budget, gathers that moved their cell's value by more than
+    /// the convergence tolerance, and valued cells the refinement sweep met.
     pub gather_budgeted: u32,
-    pub gather_again: [u32; 2],
+    pub gather_moved: u32,
+    pub sweep_live: u32,
     /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
     pub gather_deferred: u32,
     /// Listed misses a capped claim left for a later frame (`IndirectSettings::claim_cells`).
@@ -981,8 +986,9 @@ pub struct IndirectCounters {
     pub evicted_recent: u32,
     /// Pixels' misses that found no slot, once per claim round (`full` counts every band's).
     pub full_pixel: u32,
-    /// The gather ray budget (first fill): the queue's estimated rays, and the cuts (1 + the
-    /// first bin left for later; 0 none) for pixels' cells and the rest.
+    /// The gather ray budget: the queue's estimated rays (cells outside the budget excluded), and
+    /// the cut (1 + the bin that crossed the budget; 0 none) with that bin's admitted share of
+    /// 65536.
     pub gather_estimate: u32,
     pub gather_cuts: [u32; 2],
     /// Gathers' aimed rays, and those at lights the cell holds occluded.
@@ -1404,9 +1410,14 @@ pub(crate) struct Planner {
     /// Last collected frame's stale cells (shaders/gi_cache.wgsl GI_W_STALE_CELLS).
     pub(crate) stale_cells: u32,
     /// Cells queued for a gather on a recent frame (work word 38, read back without waiting):
-    /// while any wait (the ray budget deferred them, or convergence repeats them) the cache does
-    /// not idle.
+    /// while any wait (the ray budget deferred them) the cache does not idle.
     pub(crate) queued: u32,
+    /// The refinement sweep (shaders/gi_cache.wgsl GI_SCAN_SWEEP): valued cells the last sweep
+    /// frame met, frames since a cell was made or a gather moved one (both read back without
+    /// waiting), and the turn. The sweep runs, and the cache does not idle, until two whole turns
+    /// pass with no change.
+    pub(crate) live: u32,
+    pub(crate) quiet: u32,
     /// Requests readers outside the cache appended on a recent frame (the external list's
     /// count, read back without waiting): while any is unanswered the cache does not idle.
     pub(crate) external_pending: u32,
@@ -1437,6 +1448,8 @@ impl Default for Planner {
             bounce_busy: 0,
             stale_cells: 0,
             queued: 0,
+            live: 0,
+            quiet: 0,
             external_pending: 0,
             parity: false,
             tick_queues: [0; 2],
@@ -1484,6 +1497,16 @@ impl Planner {
     /// Stale cells' turns [read, sweep] (shaders/gi_cache.wgsl GI_STALE): with a budget, the
     /// power of two that spreads last frame's stale cells to about the budget a frame (1 below
     /// it), unread ones four times slower; else the fixed periods.
+    /// The refinement sweep's turn: the power of two that spreads the valued cells' estimated rays
+    /// (SWEEP_RAYS_PER_CELL each) to about the gather budget a frame.
+    fn sweep_turn(&self, software: bool) -> u32 {
+        let rays = u64::from(self.live) * SWEEP_RAYS_PER_CELL;
+        (rays.div_ceil(u64::from(gather_rays(software)).max(1)) as u32).max(1).next_power_of_two().min(SWEEP_TURN_MAX)
+    }
+    /// The sweep runs until two whole turns pass with no cell made and no value moved.
+    fn sweeping(&self) -> bool {
+        self.quiet < 2 * self.sweep_turn(true).max(8)
+    }
     fn stale_turns(&self) -> [u32; 2] {
         let [read, sweep] = stale_periods();
         let budget = stale_budget();
@@ -1583,6 +1606,7 @@ impl Planner {
         let [read, sweep] = self.stale_turns();
         header[62] = read;
         header[63] = sweep;
+        header[44] = self.sweep_turn(software);
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -1759,6 +1783,10 @@ impl Planner {
         if !boxes.is_empty() && s.invalidate_casters {
             flags |= 1;
         }
+        // The refinement sweep: this frame's turn of the valued cells gathers again.
+        if s.bounce && self.sweeping() {
+            flags |= 128;
+        }
         // Partially traced cells re-queue: form 2 always; a clear's phases on the frames after
         // its first, and one frame past its window, where a cell still partial (made late in
         // the window) traces every remaining direction. The cut refill makes no partial cells.
@@ -1839,7 +1867,7 @@ impl Planner {
         // otherwise idle.
         // A reader outside the cache with unanswered requests (the final gather's probes) keeps
         // the cache running: idle means nobody waits on a cell.
-        let busy = (bounce && (self.bounce_busy > 0 || self.queued > 0)) || self.external_pending > 0;
+        let busy = (bounce && (self.bounce_busy > 0 || self.queued > 0 || self.sweeping())) || self.external_pending > 0;
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
                 s.gathers + 2
@@ -2091,6 +2119,9 @@ pub(super) struct GiState {
     stale_watch: Option<FullWatch>,
     /// Cells queued for a gather on recent cache frames (`Planner::queued`).
     queue_watch: Option<FullWatch>,
+    /// Made cells and moved values, and valued cells the sweep met (`Planner::quiet`, `live`).
+    change_watch: Option<FullWatch>,
+    live_watch: Option<FullWatch>,
     /// The external list's count (word 0) at the start of each encode, idle or not: what
     /// readers appended on the frame before (`Planner::external_pending`).
     external_watch: Option<FullWatch>,
@@ -2325,6 +2356,8 @@ impl GiState {
             stale_watch: None,
             external_watch: None,
             queue_watch: None,
+            change_watch: None,
+            live_watch: None,
             emitters_max: EMITTERS_MAX,
             emitter_watch: None,
         }
@@ -2338,6 +2371,12 @@ impl GiState {
             watch.submitted();
         }
         if let Some(watch) = &mut self.queue_watch {
+            watch.submitted();
+        }
+        if let Some(watch) = &mut self.change_watch {
+            watch.submitted();
+        }
+        if let Some(watch) = &mut self.live_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.external_watch {
@@ -3257,7 +3296,8 @@ impl Renderer {
             gather_orphans: w[41],
             gather_finer: w[204],
             gather_budgeted: w[210],
-            gather_again: [w[211], w[212]],
+            gather_moved: w[211],
+            sweep_live: w[212],
             gather_deferred: w[42],
             claim_deferred: w[43],
             external_requests: w[220],
@@ -4160,6 +4200,18 @@ impl Renderer {
             if let Some(queued) = watch.collect() {
                 self.gi.planner.queued = queued;
             }
+            // Made cells (word 7) and moved values (211) restart the sweep's quiet count; the
+            // valued cells it met (212) size its turn.
+            let changes = self.gi.change_watch.get_or_insert_with(|| FullWatch::of_words(device, &[7, 211]));
+            match changes.collect() {
+                Some(0) => self.gi.planner.quiet = self.gi.planner.quiet.saturating_add(1),
+                Some(_) => self.gi.planner.quiet = 0,
+                None => {}
+            }
+            let live = self.gi.live_watch.get_or_insert_with(|| FullWatch::of_words(device, &[212]));
+            if let Some(n) = live.collect().filter(|&n| n > 0) {
+                self.gi.planner.live = n;
+            }
         }
         if stale_budget() != 0 {
             let device = &self.device;
@@ -4890,6 +4942,12 @@ impl GiState {
             watch.record(encoder, &r.work);
         }
         if let (Some(watch), Some(r)) = (self.queue_watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
+        }
+        if let (Some(watch), Some(r)) = (self.change_watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
+        }
+        if let (Some(watch), Some(r)) = (self.live_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
         if let (Some(watch), Some(r)) = (self.emitter_watch.as_mut(), self.resources.as_ref()) {

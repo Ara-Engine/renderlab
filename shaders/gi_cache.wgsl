@@ -100,6 +100,10 @@ const GI_SCAN_ENVIRONMENT:u32=4u;
 const GI_SCAN_PARTIAL:u32=8u;
 // Lighting, environment or program changed (G2): cells relight (bounce.z says which).
 const GI_SCAN_RELIGHT:u32=16u;
+// The refinement sweep runs (gi_gather_finish): valued cells gather again, one turn of them a frame.
+const GI_SCAN_SWEEP:u32=128u;
+// The sweep's turn: a cell gathers again when (slot + frame) % turn == 0.
+const GI_H_SWEEP_TURN:u32=44u;
 const GI_RELIGHT_ALL:u32=0x80000000u;
 const GI_RELIGHT_REQUESTS:u32=0x20000000u;
 // Work counters: misses, traces, integrations, then statistics.
@@ -1879,6 +1883,15 @@ fn gi_count_read(at:u32, cold:u32) {
                 gi_schedule(slot,select(1u,gi_word(GI_H_GATHERS),all));
             }
         }
+        // The refinement sweep: this frame's turn of the valued cells gathers again, budgeted as a
+        // refinement (GI_REPEAT), until a whole turn moves none (src/gi_cache.rs Planner::sweep).
+        if (flags&GI_SCAN_SWEEP)!=0u && gi_outgoing[slot].w>0.0 {
+            atomicAdd(&gi_work[GI_W_LIVE],1u);
+            if (slot+gi_word(GI_H_FRAME))%max(gi_word(GI_H_SWEEP_TURN),1u)==0u && (gi_table[cold+GI_C_STATE]&GI_BQUEUED)==0u {
+                gi_schedule(slot,1u);
+                gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]|GI_REPEAT;
+            }
+        }
         if (flags&GI_SCAN_CASTER)!=0u && gi_light_reached(slot) {
             atomicAdd(&gi_work[GI_W_RESHADED],1u);
             gi_count_read(GI_W_RESHADED_READ,cold);
@@ -2196,8 +2209,6 @@ const GI_GATHER_PERIOD_MAX:u32=64u;
 var<workgroup> gi_wg_bounce:array<f32,24u*GI_GATHER_LANES>;
 var<workgroup> gi_wg_missing:atomic<u32>;
 var<workgroup> gi_wg_changing:atomic<u32>;
-// Of those, hits on unconverged cells (GI_HIT_UNCONVERGED).
-var<workgroup> gi_wg_unconverged:atomic<u32>;
 // Relative change of a cell's bounce (its L0 term's largest channel) below which its gathers
 // have converged. What the series still lacks then is about GI_CONVERGED * g / (1 - g) of the
 // answer at loop gain g: 1.8% at g = 0.9 (the furnace's orange red; 1/256 left 3.3%). Four times
@@ -2266,10 +2277,12 @@ fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
     // gather is one Jacobi step of the radiosity fixed point, so a fixed G truncated it (a
     // closed box of albedo 0.5 read 0.88 of Le / (1 - rho), and 0.28 at albedo 0.9). While its
     // hits still change, a cell whose own value moved by more than GI_CONVERGED of its size is
-    // unconverged and is gathered again, and so is a cell that read an unconverged hit (whose
-    // value may still move after this gather, which a reader would otherwise never see: a budget
-    // that defers the hit left its readers settled on its old value, the furnace's grey box
-    // stopping at 0.936). Every gather is admitted under one per-frame ray budget
+    // unconverged (GI_W_MOVED counts them). The series converges through the refinement sweep
+    // (gi_scan GI_SCAN_SWEEP): every valued cell is gathered again in turn, under the gather ray
+    // budget, until a whole turn moves no cell, as Lumen's radiosity updates its cards. A cell's
+    // readers cannot be told when it settles (the cache keeps no list of them), so a repeat only
+    // for cells that moved, or that read one that did, left readers settled on a hit's old value
+    // whenever the budget deferred the hit (the furnace's grey box stopped at 0.936). Every gather is admitted under one per-frame ray budget
     // (gi_gather_select), refinements like this one last, as Lumen's radiosity updates a fixed
     // share of its cards: gathering every such cell every frame cost 7-8 ms on a non-RT walk,
     // where new cells keep their neighbours changing. The changes shrink by the loop's gain each
@@ -2283,15 +2296,11 @@ fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
     } else {
         retry=0u;
     }
-    // Convergence's repeat, when nothing else asks for another gather: budgeted as a refinement.
-    let repeat=left==0u && (unconverged || atomicLoad(&gi_wg_unconverged)!=0u);
-    if repeat { left=1u; }
-    if left!=0u { atomicAdd(&gi_work[GI_W_GATHER_AGAIN+select(1u,0u,repeat)],1u); }
+    if unconverged { atomicAdd(&gi_work[GI_W_MOVED],1u); }
     let kept=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
     gi_table[cold+GI_C_STATE]=(kept&~GI_UNCONVERGED)|select(0u,GI_UNCONVERGED,unconverged);
     gi_queue_shade(slot);
     gi_schedule(slot,left);
-    if repeat { gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]|GI_REPEAT; }
 }
 var<workgroup> gi_wg_rays:atomic<u32>;
 // Whether this iteration's cell gathers this frame, for the whole workgroup (P-GI).
@@ -2308,7 +2317,7 @@ var<workgroup> gi_wg_valued:atomic<u32>;
 // fixed directions not open to the sky, under the stride, plus GI_H_NEAR_RAYS + 1 aimed rays for
 // every local light in range above the cell's horizon, gi_near.wgsl), shared by everything beyond
 // the pixels' own cells: the cells gathers' hits and readers outside the cache (the final gather)
-// request, and convergence's repeats. The cells pixels read this frame and first fill's parents
+// request, and the refinement sweep's repeats. The cells pixels read this frame and first fill's parents
 // are gathered as before, whatever the budget. Within it the cells with no value yet come first,
 // then those that only refine; a per-frame hash spreads each order over 16 bins, so an order
 // larger than the budget is taken in a different subset each frame. What does not fit waits for a
@@ -2320,10 +2329,13 @@ const GI_GATHER_SPREAD:u32=16u;
 // The bins in use (no value, refining); a cell outside the budget keeps this in its claim word.
 const GI_GATHER_BUDGET_BINS:u32=2u*GI_GATHER_SPREAD;
 const GI_GATHER_ALWAYS:u32=GI_GATHER_BINS;
-// Admitted gathers under the budget; schedules gathers' ends made again, as
-// convergence's repeat and otherwise (GI log gather_admit, gather_again).
+// Admitted gathers under the budget (GI log gather_budgeted); gathers that moved their cell's value
+// by more than GI_CONVERGED; valued cells the sweep met (both read back to run the sweep).
 const GI_W_GATHER_BUDGETED:u32=210u;
-const GI_W_GATHER_AGAIN:u32=211u;
+const GI_W_MOVED:u32=211u;
+const GI_W_LIVE:u32=212u;
+// The cut bin's admitted share of its cells, of 65536 (gi_gather_select).
+const GI_W_GATHER_SHARE:u32=353u;
 fn gi_gather_rays(slot:u32) -> u32 {
     let cold=gi_cold(slot);
     let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
@@ -2344,7 +2356,7 @@ fn gi_gather_rays(slot:u32) -> u32 {
     }
     return rays;
 }
-// A queued cell's admission bin: convergence's repeats refine, whoever reads the cell; else
+// A queued cell's admission bin: the sweep's repeats refine, whoever reads the cell; else
 // GI_GATHER_ALWAYS for the cells pixels read this frame (the probe's stamp) and first fill's
 // parents; else no value yet first, then refining.
 fn gi_gather_bin(slot:u32) -> u32 {
@@ -2379,9 +2391,15 @@ fn gi_gather_queued(slot:u32) -> bool {
     if budget==0u { return; }
     var total=0u;
     for(var b=0u;b<GI_GATHER_BUDGET_BINS;b+=1u) {
-        let next=total+atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
-        if total!=0u && next>budget { atomicStore(&gi_work[GI_W_GATHER_CUT],b+1u); return; }
-        total=next;
+        let h=atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
+        if total+h>budget {
+            // The bin that crosses the budget admits the share of its cells that fits (by a
+            // per-frame hash of each slot), at least one in 65536, so the queue always moves.
+            atomicStore(&gi_work[GI_W_GATHER_CUT],b+1u);
+            atomicStore(&gi_work[GI_W_GATHER_SHARE],max(u32(f32(budget-total)/f32(h)*65536.0),1u));
+            return;
+        }
+        total+=h;
     }
 }
 // Reads and clears the bin gi_gather_count kept for a queue entry; whether the budget admits
@@ -2398,7 +2416,9 @@ fn gi_gather_take(slot:u32) {
     let bin=kept-1u;
     gi_ray_outside=bin==GI_GATHER_ALWAYS;
     let cut=atomicLoad(&gi_work[GI_W_GATHER_CUT]);
-    gi_ray_admitted=cut==0u || bin+1u<cut;
+    let share=atomicLoad(&gi_work[GI_W_GATHER_SHARE]);
+    let pick=gi_mix(slot^(gi_word(GI_H_FRAME)*0x85ebca6bu))&0xffffu;
+    gi_ray_admitted=cut==0u || bin+1u<cut || (bin+1u==cut && pick<share);
     if !gi_ray_outside && gi_ray_admitted { atomicAdd(&gi_work[GI_W_GATHER_BUDGETED],1u); }
 }
 fn gi_gather_period(count:u32) -> u32 {
@@ -2459,7 +2479,6 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
         if lane==0u {
             atomicStore(&gi_wg_missing,0u);
             atomicStore(&gi_wg_changing,0u);
-            atomicStore(&gi_wg_unconverged,0u);
             atomicStore(&gi_wg_rays,0u);
             atomicStore(&gi_wg_hits,0u);
             atomicStore(&gi_wg_valued,0u);
@@ -2525,7 +2544,6 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
                 if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
                 if o.w==GI_HIT_CHANGING || o.w==GI_HIT_UNCONVERGED { changing+=1u; }
-                if o.w==GI_HIT_UNCONVERGED { atomicAdd(&gi_wg_unconverged,1u); }
                 if o.w<=GI_HIT_NONE { continue; }
                 valued+=1u;
                 gi_sh_basis(d);

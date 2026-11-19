@@ -109,7 +109,6 @@ fn gi_near_gather(lane:u32, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>, band:u
             let o=gi_hit_radiance(origin,d,h,band,tertiary);
             if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
             if o.w==GI_HIT_CHANGING || o.w==GI_HIT_UNCONVERGED { changing+=1u; }
-            if o.w==GI_HIT_UNCONVERGED { atomicAdd(&gi_wg_unconverged,1u); }
             if o.w<=GI_HIT_NONE { continue; }
             gi_sh_basis(d);
             let radiance=o.rgb*weight;
