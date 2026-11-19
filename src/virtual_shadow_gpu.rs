@@ -1003,7 +1003,8 @@ pub(super) fn shader_source() -> String {
     }
     source
 }
-/// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): each silhouette texel's
+/// The covered fraction (on by default; `RENDERLAB_VSM_FRACTION=0` turns it off, as before it,
+/// with the receiver jitter back on, WGSL `VD_JITTER`): each silhouette texel's
 /// near-layer coverage becomes a count of eighths and its covered side (WGSL `vsm_cover`), and
 /// the Disk lookup lets a partly covered column block that share of its directions from that
 /// side where the sun's cone there is a texel wide or more, the texel binary where it is
@@ -1018,10 +1019,10 @@ fn fraction_on() -> bool {
 fn fraction_mode() -> u8 {
     static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("RENDERLAB_VSM_FRACTION").as_deref().map(str::trim) {
-        Ok("1") => 1,
+        Ok("0") | Ok("off") => 0,
         Ok("msaa") => 2,
         Ok("line") => 3,
-        _ => 0,
+        _ => 1,
     })
 }
 /// The covered fraction's samples a texel (WGSL `VSM_SAMPLES`): the hardware raster runs on a
@@ -1130,6 +1131,12 @@ pub(super) fn disk_source() -> String {
         .replacen(
             "override VD_SIDE_LINE:bool=false;",
             &format!("override VD_SIDE_LINE:bool={};", fraction_mode() == 3),
+            1,
+        )
+        // The fraction smooths the staircase the receiver jitter dithered: off with it.
+        .replacen(
+            "override VD_JITTER:f32=0.5;",
+            if fraction_on() { "override VD_JITTER:f32=0.0;" } else { "override VD_JITTER:f32=0.5;" },
             1,
         );
     // Last, so a measurement can set the switches above as well.

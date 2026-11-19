@@ -530,7 +530,7 @@ fn vsm_cover_line(i:u32,n:vec2<f32>,s:f32,centre:bool) {
     atomicAnd(&vsm_cover[i>>1u],~(0xffffu<<shift));
     atomicOr(&vsm_cover[i>>1u],(a|(o<<8u)|select(0u,0x8000u,centre))<<shift);
 }
-// ---- The covered fraction from ids (RENDERLAB_VSM_FRACTION=1) ----
+// ---- The covered fraction from ids (the default; RENDERLAB_VSM_FRACTION=0 turns it off) ----
 // Both layers rasterize at texel centres. Then a texel whose 3x3 neighbourhood disagrees (an
 // occupied texel beside an empty one, another placement, or a pair of opposite neighbours off the
 // texel's plane by more than the peel gap: the only texels an outline can cross) takes its
@@ -975,7 +975,7 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
         atomicMax(&vsm_top_map[i],value);
     }
 }
-// ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow_gpu.rs `fraction_on`) ----
+// ---- Covered fraction (on by default, virtual_shadow_gpu.rs `fraction_on`) ----
 // The raster samples each texel at the eight positions of the 8x multisample pattern instead of
 // its centre. The top layer keeps the highest surface over those samples, each at its plane's
 // height at the texel centre (a caster covering part of the texel wins over the surface under it;
