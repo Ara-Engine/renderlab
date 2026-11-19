@@ -2796,7 +2796,12 @@ impl Renderer {
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
                 raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
-                external: buffer("indirect cache external requests", EXTERNAL_BYTES, storage),
+                external: buffer(
+                    "indirect cache external requests",
+                    EXTERNAL_BYTES,
+                    // COPY_SRC: the count's readback (external_watch).
+                    storage | wgpu::BufferUsages::COPY_SRC,
+                ),
                 slots,
                 cold_words,
                 directions,

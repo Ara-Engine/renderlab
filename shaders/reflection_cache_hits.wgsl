@@ -64,6 +64,7 @@ var<private> rl_cache_geometric:vec3<f32>;
 // GI_EXTERNAL_SEEN).
 var<private> rl_cache_slots:vec2<u32>;
 fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
+    rl_cache_slots=vec2<u32>(0xffffffffu);
     if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
     let hit=primary_decode(record);
@@ -79,7 +80,6 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
     let start=rl_cache_level(world,cone);
     var at_start=0xffffffffu;
     var at_own=0xffffffffu;
-    rl_cache_slots=vec2<u32>(0xffffffffu);
     for(var k=0u;k<=start-own;k+=1u) {
         let l=start-k;
         let slot=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
