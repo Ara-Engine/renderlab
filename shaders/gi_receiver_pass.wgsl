@@ -240,12 +240,16 @@ fn fg_basis(n:vec3<f32>)->mat3x3<f32> {
     let a=-1.0/(s+n.z);let b=n.x*n.y*a;
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
 }
-// Uniform hemisphere direction k of `count` (stratified on a near-square grid), turned by r.
+// Uniform hemisphere direction k of `count`, turned by r.
+// The height z (uniform in solid angle) is stratified by k over `count` and the azimuth follows a
+// golden-ratio sequence, both jittered and turned by r, so every count covers the hemisphere
+// evenly. A side x side grid left two cells near the zenith empty at 14 rays: the irradiance's
+// cosine term then read low (gicut's furnace: a slab under an open sky 8% dark).
 fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
-    let side=u32(ceil(sqrt(f32(count))));
     let jitter=vec2<f32>(f32(r&0xffffu),f32(r>>16u))*(1.0/65536.0);
-    let u=fract((vec2<f32>(f32(k%side),f32(k/side))+jitter)/vec2<f32>(f32(side),f32((count+side-1u)/side)));
-    let z=u.x;let rr=sqrt(max(1.0-z*z,0.0));let phi=6.283185307179586*u.y;
+    let z=(f32(k)+jitter.x)/f32(count);
+    let rr=sqrt(max(1.0-z*z,0.0));
+    let phi=6.283185307179586*fract(f32(k)*0.6180339887498949+jitter.y);
     return fg_basis(n)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
 }
 // Incoming radiance (unexposed) along d from `origin`. A hit reads its lighting-cache cell's
