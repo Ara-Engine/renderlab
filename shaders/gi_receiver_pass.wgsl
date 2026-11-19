@@ -240,12 +240,16 @@ fn fg_basis(n:vec3<f32>)->mat3x3<f32> {
     let a=-1.0/(s+n.z);let b=n.x*n.y*a;
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
 }
-// Uniform hemisphere direction k of `count` (stratified on a near-square grid), turned by r.
+// Uniform hemisphere direction k of `count`, turned by r.
+// The height z (uniform in solid angle) is stratified by k over `count` and the azimuth follows a
+// golden-ratio sequence, both jittered and turned by r, so every count covers the hemisphere
+// evenly. A side x side grid left two cells near the zenith empty at 14 rays: the irradiance's
+// cosine term then read low (gicut's furnace: a slab under an open sky 8% dark).
 fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
-    let side=u32(ceil(sqrt(f32(count))));
     let jitter=vec2<f32>(f32(r&0xffffu),f32(r>>16u))*(1.0/65536.0);
-    let u=fract((vec2<f32>(f32(k%side),f32(k/side))+jitter)/vec2<f32>(f32(side),f32((count+side-1u)/side)));
-    let z=u.x;let rr=sqrt(max(1.0-z*z,0.0));let phi=6.283185307179586*u.y;
+    let z=(f32(k)+jitter.x)/f32(count);
+    let rr=sqrt(max(1.0-z*z,0.0));
+    let phi=6.283185307179586*fract(f32(k)*0.6180339887498949+jitter.y);
     return fg_basis(n)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
 }
 // Incoming radiance (unexposed) along d from `origin`. A hit reads its lighting-cache cell's
@@ -263,6 +267,8 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     fg_no_value=false;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
     let cell=rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t);
+    fg_touch(rl_cache_slots.x);
+    fg_touch(rl_cache_slots.y);
     fg_no_value=cell.w==0.0;
     fg_unanswered=fg_no_value;
     // A ray that meets an emitting draw keeps its cell's reflected light and its emission weighted
@@ -312,6 +318,16 @@ var<private> fg_no_value:bool;
 // meet the same cell.
 @group(2) @binding(30) var<storage,read_write> fg_requests:array<atomic<u32>>;
 const FG_REQUESTS_MAX:u32=16384u;
+// After the entries, one bit per cache slot: the cells this frame's probe hits read, or found
+// without a value at their cone level. The cache stamps them seen, as its own readers' cells, so
+// they are not taken from a full bucket while the gather still reads them, and schedules those
+// still without a value (gi_cache.wgsl GI_EXTERNAL_SEEN).
+const FG_SEEN:u32=4u+4u*FG_REQUESTS_MAX;
+fn fg_touch(slot:u32) {
+    if slot==0xffffffffu { return; }
+    let w=FG_SEEN+(slot>>5u);
+    if w<arrayLength(&fg_requests) { atomicOr(&fg_requests[w],1u<<(slot&31u)); }
+}
 var<workgroup> fg_asked:array<atomic<u32>,2>;
 // The workgroup's probe rays and emitter shadow rays, added to the external list's spare words 2
 // and 3, which the GI log prints as fg_rays and fg_shadow_rays.

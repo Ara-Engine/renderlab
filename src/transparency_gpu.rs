@@ -1718,6 +1718,13 @@ impl Renderer {
         let traced = self.primary_mode != PrimaryVisibility::Raster;
         self.tp_prepare_hit_depth(traced);
         self.tp_prepare_programs(&programs, rt, traced)?;
+        // The particle kernels, whether or not the scene has emitters yet: a game often spawns
+        // them once play starts (Glint's first frames compiled them, 117 ms cold).
+        let prelude = self.source_digest;
+        if self.transparency.gpu.as_ref().unwrap().particles.as_ref().is_none_or(|p| p.prelude != prelude) {
+            let pipelines = self.tp_particle_pipelines();
+            self.transparency.gpu.as_mut().unwrap().particles = Some(pipelines);
+        }
         if rt && traced && programs.iter().any(|&p| self.program_slot(p).traits.declares_reflection) {
             opaque.sort_unstable();
             opaque.dedup();

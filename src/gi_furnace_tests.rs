@@ -16,7 +16,20 @@
 //!   above it. No path from the emitter reaches the roof or the slab's top face (light passing
 //!   the slab's edges climbs past the roof's), so both must read exactly 0. Gathers here do hit
 //!   the top face and the roof, so a hit that reads a cell coarser than its footprint (whose
-//!   volume reaches the emitter's side) shows as light.
+//!   volume reaches the emitter's side) shows as light. With the final gather on, the test
+//!   also fails if the gather still asks the cache for cells on the settled view's last frame.
+//! - `slab-tall`: the same with the roof 4 m up, so gathers between roof and slab read both at
+//!   coarse footprint levels (cells 2 m on an edge and more). The slab's top-face cells are not
+//!   orphans and the cell lattice is aligned at y = 0, between the emitter and the top face, so
+//!   neither case reproduces the coarse fallback that leaked around Glint's thin spinner parts
+//!   (gi_hit_radiance); they guard that every level a reader reaches here stays black.
+//!
+//!   In both roofed cases every reader fails the test unless the top face and the roof stay black
+//!   (no pixel above 1e-3 cd/m^2) on every sampled frame.
+//!
+//! Every case also builds the cache's emitter list (gi_emitters.wgsl) and fails unless it holds
+//! the scene's emitting triangles and draws and their total power (pi * luminance * area, within
+//! 0.1%): an empty or short list fails here, not as a colour error in some reader later.
 //!
 //! The estimator is whatever the process's switches select (RENDERLAB_GI_ACCUMULATE,
 //! RENDERLAB_FINAL_GATHER, ...); the test records them. Each case is its own renderer, so no
@@ -25,8 +38,10 @@
 //! Run (one GPU lease, every case on one path):
 //!   RENDERLAB_FURNACE_PATH=rt|nort (default nort; rt needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK)
 //!   RENDERLAB_FURNACE_OUT=<dir>   furnace.json and one PFM per case (optional)
-//!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark,slab-roof (default all)
+//!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark,slab-roof,slab-tall (default all)
 //!   RENDERLAB_FURNACE_FRAMES=300  frames per view; the report also samples frames 1, 4, 16, 64
+//!   RENDERLAB_FURNACE_COUNTERS=1  adds the cache's counters for each view's last frame;
+//!                                 =frames also records a few of them on every frame up to 64
 //!   cargo test --lib gi_furnace -- --ignored --nocapture
 use super::*;
 
@@ -152,29 +167,34 @@ fn cases() -> Vec<Case> {
             },
         ],
     };
-    let mut roofed = slab(20.0);
-    roofed.sky = 0.0;
-    roofed.parts.push(Part {
-        faces: vec![quad(Vec3::new(0.0, 0.5, 0.0), -Vec3::Y, Vec3::X * 1.5, 1.5)],
-        albedo: [0.5; 3],
-        glow: [0.0; 3],
-    });
-    roofed.views = vec![
-        FurnaceView {
-            name: "top",
-            eye: Vec3::new(0.0, 0.3, 0.0),
-            target: Vec3::ZERO,
-            up: Vec3::Z,
-            expected: Some([0.0; 3]),
-        },
-        FurnaceView {
-            name: "roof",
-            eye: Vec3::new(0.0, 0.2, 0.0),
-            target: Vec3::new(0.0, 0.5, 0.0),
-            up: Vec3::Z,
-            expected: Some([0.0; 3]),
-        },
-    ];
+    // The lit slab under a black sky with a grey roof `height` above it; the top face and the roof
+    // must read 0. The views sit between them, the top's at 0.6 and the roof's at 0.4 of the gap.
+    let roofed = |height: f32| {
+        let mut c = slab(20.0);
+        c.sky = 0.0;
+        c.parts.push(Part {
+            faces: vec![quad(Vec3::new(0.0, height, 0.0), -Vec3::Y, Vec3::X * 1.5, 1.5)],
+            albedo: [0.5; 3],
+            glow: [0.0; 3],
+        });
+        c.views = vec![
+            FurnaceView {
+                name: "top",
+                eye: Vec3::new(0.0, 0.6 * height, 0.0),
+                target: Vec3::ZERO,
+                up: Vec3::Z,
+                expected: Some([0.0; 3]),
+            },
+            FurnaceView {
+                name: "roof",
+                eye: Vec3::new(0.0, 0.4 * height, 0.0),
+                target: Vec3::new(0.0, height, 0.0),
+                up: Vec3::Z,
+                expected: Some([0.0; 3]),
+            },
+        ];
+        c
+    };
     let mut out = vec![
         Case {
             name: "grey",
@@ -194,7 +214,11 @@ fn cases() -> Vec<Case> {
         },
         Case {
             name: "slab-roof",
-            ..roofed
+            ..roofed(0.5)
+        },
+        Case {
+            name: "slab-tall",
+            ..roofed(4.0)
         },
     ];
     if let Ok(only) = std::env::var("RENDERLAB_FURNACE_CASES") {
@@ -279,6 +303,8 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
     // Single-sample frames: the estimator's own answer, not TR1's history of it.
     r.set_reconstruction(Reconstruction::off()).unwrap();
     r.set_indirect(IndirectSettings::default()).unwrap();
+    // Build the emitter list on every gathering frame, whatever reads it (the guard below).
+    r.gi.request_emitters();
     let target = color_target(&r, SIZE);
     let program = r
         .try_create_program(&ProgramDescriptor {
@@ -342,6 +368,7 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
     for view in &case.views {
         let camera = Camera::look_at(view.eye, view.target, view.up, FOV, 0.01, 100.0).unwrap();
         let mut samples = json!({});
+        let mut per_frame = vec![];
         let mut last = vec![];
         for frame in 1..=frames {
             let mut draws: Vec<Draw<'_>> = meshes
@@ -358,17 +385,89 @@ fn run_case(case: &Case, rt: bool, frames: u32, out: Option<&Path>) -> Json {
                 r.test_drain("furnace admission");
             }
             drop(draws);
+            if frame <= 64 && std::env::var("RENDERLAB_FURNACE_COUNTERS").as_deref() == Ok("frames") {
+                let c = r.indirect_counters().unwrap().unwrap_or_default();
+                per_frame.push(json!([frame, c.created, c.created_secondary, c.orphans, c.splits,
+                    c.gathers, c.gather_misses, c.gather_unshaded, c.gather_orphans,
+                    c.external_requests, c.fg_rays, c.evicted, r.indirect_stats().idle_frames]));
+            }
             if SAMPLES.contains(&frame) || frame == frames {
                 last = capture_radiance(&mut r, 0.0);
                 samples[frame.to_string()] = score(&last, view.expected);
+                // The roofed slabs: no light from below reaches above the slab, at any frame.
+                if case.name.starts_with("slab-") && view.expected == Some([0.0; 3]) {
+                    let most = samples[frame.to_string()]["max_lum"].as_f64().unwrap();
+                    assert!(most <= 1e-3, "{} {} frame {frame}: light from below, {most} cd/m^2", case.name, view.name);
+                }
             }
         }
         if let Some(dir) = out {
             write_pfm(&dir.join(format!("{}-{}.pfm", case.name, view.name)), &last);
         }
         rows[view.name] = json!({"expected": view.expected, "frames": samples});
+        if !per_frame.is_empty() {
+            rows[view.name]["per_frame"] = json!({"columns": ["frame", "created", "created_secondary",
+                "orphans", "splits", "gathers", "gather_misses", "gather_unshaded", "gather_orphans",
+                "external_requests", "fg_rays", "evicted", "idle_frames"], "rows": per_frame});
+        }
+        // The cache's counters for the view's last frame (cells created by band, orphans,
+        // splits, gather misses by cause, external requests), with RENDERLAB_FURNACE_COUNTERS.
+        if std::env::var_os("RENDERLAB_FURNACE_COUNTERS").is_some() {
+            let c = r.indirect_counters().unwrap().unwrap_or_default();
+            rows[view.name]["counters"] = json!(format!("{c:?}"));
+        }
+        emitter_guard(&mut r, case);
+        // The guard for readers outside the cache (the final gather): on a settled view every
+        // probe hit has a value, so its last cache frame took no request. The counters hold the
+        // last frame the cache ran, so a cache that went idle while a reader still asked fails too.
+        if case.name == "slab-roof" && crate::program::final_gather() {
+            let c = r.indirect_counters().unwrap().unwrap_or_default();
+            rows[view.name]["external_requests_last"] = json!(c.external_requests);
+            assert_eq!(
+                c.external_requests, 0,
+                "slab-roof {}: the gather still asks for cells after {frames} frames",
+                view.name
+            );
+        }
     }
     rows
+}
+
+/// The emitter list against the scene: every triangle of every emitting part listed, one draw per
+/// emitting part, and the power CDF's total equal to the parts' pi * luminance * area. The list
+/// is rebuilt on every gathering frame, so this reads the last one.
+fn emitter_guard(r: &mut Renderer, case: &Case) {
+    let lum = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let emitting: Vec<&Part> = case.parts.iter().filter(|p| lum(p.glow) > 0.0).collect();
+    let triangles: u32 = emitting.iter().map(|p| 2 * p.faces.len() as u32).sum();
+    let power: f64 = emitting
+        .iter()
+        .map(|p| {
+            let area: f32 = p
+                .faces
+                .iter()
+                .map(|(c, _)| (c[1] - c[0]).cross(c[3] - c[0]).length())
+                .sum();
+            std::f64::consts::PI * f64::from(lum(p.glow)) * f64::from(area)
+        })
+        .sum();
+    // Header words (gi_cells.wgsl, gi_emitters.wgsl): 57 the list's first word, 58 its triangles,
+    // 59 its draws, 60 its capacity; per triangle 15 words, then 64 draws of 8 words, then the
+    // running power sums.
+    let h = r.indirect_table_words(0, 64).unwrap().unwrap();
+    let (base, count, draws, most) = (h[57], h[58], h[59], h[60]);
+    assert_eq!(count, triangles, "{}: emitter list triangles", case.name);
+    assert_eq!(draws, emitting.len() as u32, "{}: emitting draws listed", case.name);
+    if count > 0 {
+        let cdf = u64::from(base) + u64::from(most) * 15 + 64 * 8;
+        let total = r.indirect_table_words(cdf + u64::from(count) - 1, 1).unwrap().unwrap()[0];
+        let total = f64::from(f32::from_bits(total));
+        assert!(
+            (total - power).abs() <= 1e-3 * power,
+            "{}: emitter list power {total} against the scene's {power}",
+            case.name
+        );
+    }
 }
 
 /// Mean radiance per channel; with an answer, also the mean ratio per channel, the 1st and

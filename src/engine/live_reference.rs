@@ -46,7 +46,8 @@ impl LiveReference {
     }
 }
 
-fn pfm(path: &std::path::Path, size: [u32; 2], pixels: &[[f32; 3]]) -> Result<(), Error> {
+/// A binary PFM of linear RGB, rows bottom to top (also the armed frame readback's HDR image).
+pub(super) fn pfm(path: &std::path::Path, size: [u32; 2], pixels: &[[f32; 3]]) -> Result<(), Error> {
     let mut bytes = format!("PF\n{} {}\n-1\n", size[0], size[1]).into_bytes();
     for row in (0..size[1] as usize).rev() {
         for p in &pixels[row * size[0] as usize..(row + 1) * size[0] as usize] {
