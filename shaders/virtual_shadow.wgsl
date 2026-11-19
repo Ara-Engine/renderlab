@@ -628,7 +628,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     }
     // Per sample, the highest covering height and its triangle's reach across the samples; per
     // triangle, the mean height of what it covers (its covered part's height) and its samples.
-    for(var s=0u;s<8u;s+=1u) {vsm_sil_z[s]=-1.0;vsm_sil_reach[s]=0.0;vsm_sil_pl[s]=0u;}
+    for(var s=0u;s<8u;s+=1u) {vsm_sil_z[s]=-1.0;vsm_sil_reach[s]=0.0;vsm_sil_tid[s]=0u;}
     vsm_sil_best=select(-1.0,h,id!=0u);vsm_sil_bid=id;
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
     var inside:array<u32,VSM_SIL_IDS>;
@@ -666,7 +666,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     var cover=0u;
     for(var s=0u;s<VSM_SAMPLES;s+=1u) {
         let near=vsm_sil_z[s]>=0.0 && vsm_sil_z[s]>=lowest-vsm_sil_reach[s];
-        var covered=near || (own!=0u && vsm_sil_pl[s]==own);
+        var covered=near || (own!=0u && (vsm_sil_tid[s]>>bits)==own);
         // A sample no candidate covers lies on a triangle none names (a sliver between named
         // centres) or on nothing: the texel toward it decides, covered where its centre holds
         // the top's mesh or a surface in the near layer. A sample over another object's named
@@ -765,6 +765,20 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     // The texel's binary answer (vd_side, vd_near): its centre's own surface is in the near
     // layer of the final top or of its mesh (a promotion within one caster keeps it).
     if partial {vsm_cover_line(i,ln,ls,id!=0u && (h>=best-gap || (id>>bits)==(bid>>bits)));}
+    // The open samples' own surface: another object under the top (the floor, or a second
+    // caster the top hides). The rank shares open those directions, so that surface goes where
+    // the lookup reads a second surface, the peel word (VD_PEEL2), when it stands above the
+    // centre's: its column then blocks them at its own height.
+    if partial && VSM_SIL_UNDER {
+        var low=-1.0;var lid=0u;
+        for(var s=0u;s<VSM_SAMPLES;s+=1u) {
+            if (cover&(1u<<s))==0u && vsm_sil_z[s]>low {low=vsm_sil_z[s];lid=vsm_sil_tid[s];}
+        }
+        let pw=atomicLoad(&vsm_peel_map[i]);
+        if lid!=0u && (u32(pw&0xfffffffflu)==0u || low>bitcast<f32>(u32(pw>>32u))) {
+            atomicStore(&vsm_peel_map[i],(u64(bitcast<u32>(low))<<32u)|u64(lid));
+        }
+    }
 }
 // The share of the unit square past offset s along unit n (vsm_area_offset's inverse).
 fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
@@ -794,14 +808,16 @@ override VSM_SIL_GEOM:bool=false;
 override VSM_SIL_RING:bool=false;
 // Samples no candidate covers take the texel toward them (vsm_silhouette); off: measurement.
 override VSM_SIL_FILL:bool=true;
+// The open samples' surface into the peel word (vsm_silhouette); off: measurement.
+override VSM_SIL_UNDER:bool=true;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
 const VSM_SIL_IDS:u32=32u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
 // its triangle's reach, and the highest covered part's mean height and triangle.
 var<private> vsm_sil_z:array<f32,8>;
 var<private> vsm_sil_reach:array<f32,8>;
-// The placement + 1 of each sample's highest covering triangle (0: none).
-var<private> vsm_sil_pl:array<u32,8>;
+// Each sample's highest covering triangle (its map id; 0: none).
+var<private> vsm_sil_tid:array<u32,8>;
 var<private> vsm_sil_best:f32;
 var<private> vsm_sil_bid:u32;
 // Triangle `tid` against the texel's samples: updates the per-sample state; its inside mask.
@@ -820,7 +836,7 @@ fn vsm_sil_triangle(tid:u32,level:u32,centre:vec2<f32>)->u32 {
         let wb=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p))/area;
         if any(wb<vec3<f32>(0.0)) {continue;}
         let zs=dot(wb,z);
-        if zs>vsm_sil_z[s] {vsm_sil_z[s]=zs;vsm_sil_reach[s]=reach;vsm_sil_pl[s]=tid>>vsm.misc.x;}
+        if zs>vsm_sil_z[s] {vsm_sil_z[s]=zs;vsm_sil_reach[s]=reach;vsm_sil_tid[s]=tid;}
         sum+=zs;mask|=1u<<s;
     }
     let count=countOneBits(mask);
