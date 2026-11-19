@@ -48,7 +48,9 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
 // the same side, and around thin geometry that includes light from the other side. Glint's course
 // underglow lit the top of the spinner's pad through the +Y cells that held both the thin pad
 // and the surfaces beneath it (79/130/204 there with the underglow alone, against the reference's
-// 0.8/1.2/1.6). A hit no level answers is left out of the probe's average (gi_receiver_pass.wgsl
+// 0.8/1.2/1.6). Split cells above the own level are passed over for the same reason (gicut's
+// slab-roof furnace: the roof's -Y cells at the cone level also held the lit underside 0.5 m
+// below, and the slab's dark top read 0.35). A hit no level answers is left out of the probe's average (gi_receiver_pass.wgsl
 // fg_lane). Movers read their cells too: those lag the surface by a frame or so, which a probe's
 // hemisphere integral does not show. With no value it leaves the cell to request in rl_cache_missed, as
 // the cache's external request list takes it (level | bin << 8, then the lattice cell; x
@@ -78,17 +80,22 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
         if l==start { at_start=slot; }
         if l==own { at_own=slot; }
         if slot==0xffffffffu { continue; }
+        // A split cell above the hit's own level is not read: its probe lines met two surface
+        // layers facing its bin (a slab's underside and a roof's above it), and its value mixes
+        // them. The cache's own lookup reads finer there too (gi_sample_refined).
+        if l>own && (gi_word(gi_hot(slot)+15u)&GI_SPLIT_HOT)!=0u { continue; }
         let o=rl_cache_outgoing[slot];
         if o.w>0.0 { return vec4<f32>(o.rgb,1.0); }
     }
     // The cell to ask for: the cone level's when it is absent; the hit's own level's when the cone
     // level's is an orphan (its probe found no surface at that level, as at a thin part's coarse
-    // cells, so it never gets a value) and the own one is absent; none while the cell there only
-    // waits for its first gather.
+    // cells, so it never gets a value) or split, and the own one is absent; none while the cell
+    // there only waits for its first gather.
     rl_cache_missed=vec4<u32>(0xffffffffu);
     var ask=0xffffffffu;
     if at_start==0xffffffffu { ask=start; }
     else if (gi_word(gi_cold(at_start)+GI_C_STATE)&GI_ORPHAN)!=0u && at_own==0xffffffffu { ask=own; }
+    else if (gi_word(gi_hot(at_start)+15u)&GI_SPLIT_HOT)!=0u && at_own==0xffffffffu { ask=own; }
     if ask!=0xffffffffu {
         rl_cache_missed=vec4<u32>(ask|(bin<<8u),bitcast<vec3<u32>>(vec3<i32>(floor(gi_lattice(world,gi_edge(ask),bin)))));
     }
