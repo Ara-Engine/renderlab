@@ -156,6 +156,10 @@ const GI_W_BQUEUE:u32=38u;
 const GI_W_GATHER_ABSENT:u32=39u;
 const GI_W_GATHER_UNSHADED:u32=40u;
 const GI_W_GATHER_ORPHANS:u32=41u;
+// Gather rays a coarser level answered: the hit level's cell an orphan (taken as final), or
+// absent (taken while it is requested; the gather repeats once).
+const GI_W_GATHER_COARSE_ORPHAN:u32=204u;
+const GI_W_GATHER_COARSE_ABSENT:u32=205u;
 // Queued cells a capped gather frame left for next frame (gi_gather).
 const GI_W_GATHER_DEFERRED:u32=42u;
 // Listed misses a capped claim left for a later frame (gi_claim, GI_H_CLAIM_CELLS).
@@ -2123,6 +2127,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             // A hit on an emitting draw sends its reflected light only: its emission is the
             // emitter list's (gi_emitters.wgsl), sampled as a light by every gather.
             let reflected=max(o.rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
+            if l>base { atomicAdd(&gi_work[select(GI_W_GATHER_COARSE_ABSENT,GI_W_GATHER_COARSE_ORPHAN,orphan)],1u); }
             return vec4<f32>(reflected,select(GI_HIT_MISSING,settled,l==base || orphan));
         }
         if l==base {
