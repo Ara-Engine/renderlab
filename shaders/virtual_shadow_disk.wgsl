@@ -857,11 +857,39 @@ fn vd_half(m:vec2<u32>,i:u32,c:vec2<f32>,size:f32,lo:f32,hi:f32)->vec2<u32> {
     let a=f32(w&255u)*(6.28318531/256.0);
     let n=vec2<f32>(cos(a),sin(a));
     let s=f32(w>>8u)*(1.5/255.0)-0.75;
-    // The part is n . x >= q (metres, from the receiver); a direction d meets it at some height
-    // in lo..hi where n . d >= q / hi (q > 0) or q / lo (q <= 0).
+    // The part is n . x >= q (metres, from the receiver). Of the column's directions m, each keeps
+    // its bit when its ray meets the square and the part at one height in lo..hi: the column's
+    // union over heights clipped by the part's union over heights would also keep rays that meet
+    // the square at one height and the part's side only at another, a texel-periodic overreach.
     let q=dot(c,n)+s*size;
-    let reach=q/select(lo,hi,q>0.0);
-    return m&vd_plane(vec3<f32>(n,-reach),1.0);
+    return vec2<u32>(vd_half_word(m.x,0u,c,0.5*size,lo,hi,n,q),vd_half_word(m.y,32u,c,0.5*size,lo,hi,n,q));
+}
+// The bits of one mask word (samples `base`..base+31) whose ray meets the clipped column.
+fn vd_half_word(word:u32,base:u32,c:vec2<f32>,half:f32,lo:f32,hi:f32,n:vec2<f32>,q:f32)->u32 {
+    var bits=word;var out=0u;
+    while bits!=0u {
+        let b=firstTrailingBit(bits);
+        bits&=bits-1u;
+        let pair=vd.samples[(base+b)>>1u];
+        let d=vd_px.centre+vd_px.radius*select(pair.xy,pair.zw,(b&1u)==1u);
+        // The heights where the ray (t d) is over the square, axis by axis, then on the part's side.
+        var t0=lo;var t1=hi;
+        for(var j=0u;j<2u;j+=1u) {
+            let dj=select(d.x,d.y,j==1u);let cj=select(c.x,c.y,j==1u);
+            if abs(dj)<1e-12 {
+                if abs(cj)>half {t1=-1.0;}
+            } else {
+                let a=(cj-half)/dj;let e=(cj+half)/dj;
+                t0=max(t0,min(a,e));t1=min(t1,max(a,e));
+            }
+        }
+        let dn=dot(d,n);
+        if abs(dn)<1e-12 {
+            if q>0.0 {t1=-1.0;}
+        } else if dn>0.0 {t0=max(t0,q/dn);} else {t1=min(t1,q/dn);}
+        if t0<=t1 {out|=1u<<b;}
+    }
+    return out;
 }
 // Of the directions in m (a column of texel i whose near layer covers k eighths), the k/8 through
 // its covered side (VD_SIDE_RANK).
