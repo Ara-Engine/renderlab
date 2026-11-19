@@ -71,13 +71,18 @@ const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 /// Gather workgroups (one cell each) and light workgroups (64 cells), fixed grids like the
 /// others.
 pub(crate) const GATHER_GROUPS: u32 = 4096;
-/// The emitter list (shaders/gi_emitters.wgsl, docs/design-gi-emitters.md): at most this many
-/// emitting triangles a frame (the rest are counted as dropped), 15 words each, then up to
-/// EMITTER_DRAWS_MAX emitting draws (stable id, batch, probe radiance, first listed triangle,
-/// triangle count, first placement: EMITTER_DRAW_WORDS each),
-/// in the table after the slots.
-/// Its build pass loops over every emitting draw's triangles on a fixed grid.
+/// The emitter list (shaders/gi_emitters.wgsl, docs/design-gi-emitters.md): its emitting
+/// triangles, 15 words each, then up to EMITTER_DRAWS_MAX emitting draws (stable id, batch, probe
+/// radiance, first listed triangle, triangle count, first placement: EMITTER_DRAW_WORDS each),
+/// in the table after the slots. Its build pass loops over every emitting draw's triangles on a
+/// fixed grid. The list starts with room for EMITTERS_MAX triangles; a build that drops some (the
+/// work counters' listed + dropped, read back without waiting) grows it to the next power of two
+/// that holds them all, up to EMITTERS_CAP, reallocating the cache once (`grow_emitters`). Glint's
+/// 17 emitting draws hold 91,776 triangles: at a fixed 8192 the list held 9% of them, and every
+/// hit on the rest found no listed emission.
 pub(crate) const EMITTERS_MAX: u32 = 8192;
+/// The list's largest capacity (about 21 MB of table and outgoing radiance).
+const EMITTERS_CAP: u32 = 1 << 18;
 const EMITTER_WORDS: u64 = 15;
 const EMITTER_DRAWS_MAX: u32 = 64;
 /// Whether the cache's own gathers sample the emitter list (RENDERLAB_GI_EMITTERS=1; off by
@@ -478,7 +483,8 @@ pub(crate) struct Sizes {
     pub(crate) raw: u64,
 }
 impl Sizes {
-    pub(crate) fn of(slots: u32, lights: u32, settings: &IndirectSettings) -> Self {
+    /// `emitters`: the emitter list's capacity, in triangles.
+    pub(crate) fn of(slots: u32, lights: u32, settings: &IndirectSettings, emitters: u32) -> Self {
         // A frame lists at most 2^19 misses (a 2 px cut at 1080p makes about 240k cells):
         // the miss list and request table stay at G2's size with the larger tables.
         let misses = slots.min(1 << 19);
@@ -487,9 +493,9 @@ impl Sizes {
         // The slots, then the emitter list (gi_emitters.wgsl): its triangles, then its draws.
         let table_bytes = (HEADER_WORDS
             + u64::from(slots) * (24 + u64::from(cold_words))
-            + u64::from(EMITTERS_MAX) * EMITTER_WORDS
+            + u64::from(emitters) * EMITTER_WORDS
             + u64::from(EMITTER_DRAWS_MAX) * EMITTER_DRAW_WORDS
-            + u64::from(EMITTERS_MAX))
+            + u64::from(emitters))
             * 4;
         // Counters, claims, misses, trace and integrate queues, ray items and their
         // staged bits, the request table, then bounce's two gather queues (a count, then
@@ -506,7 +512,7 @@ impl Sizes {
         // The slots' outgoing radiance, then each draw's emission (cell shading's probe).
         // Per slot its outgoing radiance, per draw its emission probe, per listed emitter triangle
         // its mean emission (gi_cells.wgsl gi_emitter_mean_at).
-        let outgoing_bytes = (u64::from(slots) + u64::from(TRACED_DRAWS) + u64::from(EMITTERS_MAX)) * 16;
+        let outgoing_bytes = (u64::from(slots) + u64::from(TRACED_DRAWS) + u64::from(emitters)) * 16;
         let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
         let raw_slots = if settings.filter != 0 { slots } else { 1 };
         let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
@@ -923,7 +929,7 @@ pub struct IndirectCounters {
     /// cell not shaded yet, and an orphan whose coarser levels had no value either.
     pub gather_absent: u32,
     /// The emitter list (shaders/gi_emitters.wgsl): triangles listed, emitting draws, visibility
-    /// rays the gathers traced toward them, and triangles past EMITTERS_MAX.
+    /// rays the gathers traced toward them, and triangles past the list's capacity.
     pub emitters: u32,
     pub emitter_draws: u32,
     pub emitter_rays: u32,
@@ -1019,6 +1025,8 @@ struct Resources {
     misses: u32,
     /// Slots the filter sources hold (1 without a filter).
     raw_slots: u32,
+    /// The emitter list's capacity, in triangles.
+    emitters: u32,
     _allocations: [Allocation; 6],
 }
 struct Layouts {
@@ -1282,6 +1290,8 @@ pub(crate) struct PlanConfig {
     pub(crate) misses: u32,
     pub(crate) cold_words: u32,
     pub(crate) raw_slots: u32,
+    /// The emitter list's capacity, in triangles.
+    pub(crate) emitters: u32,
     /// Software rays (the non-RT path) rather than hardware ray queries.
     pub(crate) software: bool,
     /// An environment map is selected.
@@ -1542,7 +1552,7 @@ impl Planner {
         // passes them at full strength, as before. Software rays pass them at full strength
         // until the cache traces the reflection BVH4.
         header[35] = u32::from(std::env::var("RENDERLAB_GI_SEE_THROUGH").as_deref() != Ok("0"));
-        header[60] = EMITTERS_MAX;
+        header[60] = c.emitters;
         // The cache's own gathers sample the list (and subtract emission at hits) only with
         // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
         header[43] = u32::from(!emitters_on());
@@ -2056,6 +2066,10 @@ pub(super) struct GiState {
     /// The external list's count (word 0) at the start of each encode, idle or not: what
     /// readers appended on the frame before (`Planner::external_pending`).
     external_watch: Option<FullWatch>,
+    /// The emitter list's capacity the next allocation takes (EMITTERS_MAX, grown by
+    /// `grow_emitters`), and its listed + dropped triangles of recent builds.
+    emitters_max: u32,
+    emitter_watch: Option<FullWatch>,
 }
 
 /// Measurement only: `RENDERLAB_GI_PROBE_LOG=PATH` counts the probe's work on every frame
@@ -2282,6 +2296,8 @@ impl GiState {
             probe_log: None,
             stale_watch: None,
             external_watch: None,
+            emitters_max: EMITTERS_MAX,
+            emitter_watch: None,
         }
     }
     /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
@@ -2293,6 +2309,9 @@ impl GiState {
             watch.submitted();
         }
         if let Some(watch) = &mut self.external_watch {
+            watch.submitted();
+        }
+        if let Some(watch) = &mut self.emitter_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.probe_log {
@@ -2746,6 +2765,29 @@ impl Renderer {
     /// earlier ones. The cache is on by default (G2b) and allocates on the first frame whose
     /// program calls an indirect input (`prepare_gi`), so a renderer whose programs never do
     /// holds none of it.
+    /// While the emitter list is built: a build that dropped triangles (listed + dropped above the
+    /// capacity) grows the list to the next power of two that holds them, up to EMITTERS_CAP, and
+    /// reallocates the cache (emptied, as a table doubling empties it). Once per scene that needs it.
+    fn grow_emitters(&mut self) -> Result<(), Error> {
+        if !(self.gi.emitter_readers || emitters_on()) {
+            return Ok(());
+        }
+        let device = &self.device;
+        let watch = self.gi.emitter_watch.get_or_insert_with(|| FullWatch::of_words(device, &[200, 203]));
+        let Some(wanted) = watch.collect() else {
+            return Ok(());
+        };
+        if wanted <= self.gi.emitters_max || self.gi.emitters_max >= EMITTERS_CAP {
+            return Ok(());
+        }
+        self.gi.emitters_max = wanted.next_power_of_two().min(EMITTERS_CAP);
+        self.gi.emitter_watch = None;
+        let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
+        if slots != 0 {
+            self.allocate_gi(slots)?;
+        }
+        Ok(())
+    }
     fn allocate_gi(&mut self, slots: u32) -> Result<(), Error> {
         {
             let Sizes {
@@ -2757,7 +2799,7 @@ impl Renderer {
                 outgoing: outgoing_bytes,
                 draws: draws_bytes,
                 raw: raw_bytes,
-            } = Sizes::of(slots, self.lighting.pending.count, &self.gi.settings);
+            } = Sizes::of(slots, self.lighting.pending.count, &self.gi.settings, self.gi.emitters_max);
             let directions = self.gi.settings.directions;
             let limits = self.device.limits();
             if table_bytes
@@ -2815,6 +2857,7 @@ impl Renderer {
                 directions,
                 misses,
                 raw_slots,
+                emitters: self.gi.emitters_max,
                 _allocations: [
                     self.ledger.allocate(AllocationKind::Light, table_bytes),
                     self.ledger.allocate(AllocationKind::Light, work_bytes),
@@ -4089,6 +4132,7 @@ impl Renderer {
             self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
             self.gi.grow |= full > 0;
         }
+        self.grow_emitters()?;
         if self.gi.grow {
             self.gi.grow = false;
             let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
@@ -4149,6 +4193,7 @@ impl Renderer {
             misses: r.misses,
             cold_words: r.cold_words,
             raw_slots: r.raw_slots,
+            emitters: r.emitters,
             software,
             field: self.environment.selected.is_some(),
             profiling: self.gi.profile.is_some() || probe_log_path().is_some(),
@@ -4804,6 +4849,9 @@ impl GiState {
         if let (Some(watch), Some(r)) = (self.stale_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
+        if let (Some(watch), Some(r)) = (self.emitter_watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
+        }
     }
 }
 
@@ -4837,6 +4885,7 @@ mod tests {
             misses: 1 << 16,
             cold_words: 4,
             raw_slots: 1 << 20,
+            emitters: EMITTERS_MAX,
             software: true,
             field: false,
             profiling: false,
