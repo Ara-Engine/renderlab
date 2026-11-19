@@ -2286,6 +2286,7 @@ fn gi_gather_finish(slot:u32, state:u32, cold:u32) {
     // Convergence's repeat, when nothing else asks for another gather: budgeted as a refinement.
     let repeat=left==0u && (unconverged || atomicLoad(&gi_wg_unconverged)!=0u);
     if repeat { left=1u; }
+    if left!=0u { atomicAdd(&gi_work[GI_W_GATHER_AGAIN+select(1u,0u,repeat)],1u); }
     let kept=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
     gi_table[cold+GI_C_STATE]=(kept&~GI_UNCONVERGED)|select(0u,GI_UNCONVERGED,unconverged);
     gi_queue_shade(slot);
@@ -2319,6 +2320,10 @@ const GI_GATHER_SPREAD:u32=16u;
 // The bins in use (no value, refining); a cell outside the budget keeps this in its claim word.
 const GI_GATHER_BUDGET_BINS:u32=2u*GI_GATHER_SPREAD;
 const GI_GATHER_ALWAYS:u32=GI_GATHER_BINS;
+// Admitted gathers under the budget; schedules gathers' ends made again, as
+// convergence's repeat and otherwise (GI log gather_admit, gather_again).
+const GI_W_GATHER_BUDGETED:u32=210u;
+const GI_W_GATHER_AGAIN:u32=211u;
 fn gi_gather_rays(slot:u32) -> u32 {
     let cold=gi_cold(slot);
     let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
@@ -2394,6 +2399,7 @@ fn gi_gather_take(slot:u32) {
     gi_ray_outside=bin==GI_GATHER_ALWAYS;
     let cut=atomicLoad(&gi_work[GI_W_GATHER_CUT]);
     gi_ray_admitted=cut==0u || bin+1u<cut;
+    if !gi_ray_outside && gi_ray_admitted { atomicAdd(&gi_work[GI_W_GATHER_BUDGETED],1u); }
 }
 fn gi_gather_period(count:u32) -> u32 {
     let cap=gi_word(GI_H_GATHER_CELLS);

@@ -464,7 +464,7 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         return Ok(());
     };
     let line = format!(
-        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{},\"instances\":{},\"relight_parts\":{},\"slots\":{},\"slot_doublings\":{},\"peak_full\":{},\"gather_estimate\":{},\"gather_cuts\":[{},{}],\"aimed_rays\":{},\"aimed_occluded\":{},\"created_secondary\":{},\"created_tertiary\":{},\"evicted_secondary\":{},\"moved_boxes\":{},\"invalidated_read\":{:?},\"invalidated_cube\":{},\"reshaded\":{:?},\"external_requests\":{},\"external_overflow\":{},\"fg_rays\":{},\"fg_shadow_rays\":{},\"emitters\":{},\"emitter_draws\":{},\"emitter_rays\":{},\"emitters_dropped\":{},\"emitters_unevaluated\":{},\"emitters_zero\":{},\"gather_absent\":{},\"gather_unshaded\":{},\"gather_orphans\":{},\"gather_finer\":{}}}\n",
+        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{},\"instances\":{},\"relight_parts\":{},\"slots\":{},\"slot_doublings\":{},\"peak_full\":{},\"gather_estimate\":{},\"gather_cuts\":[{},{}],\"aimed_rays\":{},\"aimed_occluded\":{},\"created_secondary\":{},\"created_tertiary\":{},\"evicted_secondary\":{},\"moved_boxes\":{},\"invalidated_read\":{:?},\"invalidated_cube\":{},\"reshaded\":{:?},\"external_requests\":{},\"external_overflow\":{},\"fg_rays\":{},\"fg_shadow_rays\":{},\"emitters\":{},\"emitter_draws\":{},\"emitter_rays\":{},\"emitters_dropped\":{},\"emitters_unevaluated\":{},\"emitters_zero\":{},\"gather_absent\":{},\"gather_unshaded\":{},\"gather_orphans\":{},\"gather_finer\":{},\"gather_budgeted\":{},\"gather_again\":{:?}}}\n",
         c.misses,
         c.miss_overflow,
         c.created,
@@ -518,6 +518,8 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         c.gather_unshaded,
         c.gather_orphans,
         c.gather_finer,
+        c.gather_budgeted,
+        c.gather_again,
     );
     // `RENDERLAB_GI_PROFILE` also turns on the cache's stage timestamps and logs the latest
     // profiled frame's stages (milliseconds) in a second line.
