@@ -630,17 +630,14 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     vsm_sil_best=select(-1.0,h,id!=0u);vsm_sil_bid=id;
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
     var inside:array<u32,VSM_SIL_IDS>;
-    var open=0xffu;
     for(var m=0u;m<n;m+=1u) {
         inside[m]=vsm_sil_triangle(ids[m],level,centre);
-        open&=~inside[m];
     }
     // A fan or strip meeting inside the texel can hold triangles whose corners no texel centre
-    // sees: where samples are left open, the edge neighbours (the index buffer's adjacency) of the
-    // triangles that cover any sample, once.
+    // sees, and an outline's outermost face (a tube's, steep) is often such a sliver: the edge
+    // neighbours (the index buffer's adjacency) of the named triangles, once.
     let named=n;
-    for(var m=0u;m<named && open!=0u && open!=0xffu;m+=1u) {
-        if inside[m]==0u {continue;}
+    for(var m=0u;m<named;m+=1u) {
         let placement=ids[m]>>bits;
         let batch=primary_placements[placement-1u]&0x1fffffffu;
         for(var e=0u;e<3u;e+=1u) {
@@ -652,7 +649,6 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
             if seen {continue;}
             ids[n]=nid;
             inside[n]=vsm_sil_triangle(nid,level,centre);
-            open&=~inside[n];
             n+=1u;
         }
     }
@@ -672,7 +668,7 @@ fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
     // the peel gap on a slope), their centroid side, placed by their count.
     var best=vsm_sil_best;var bid=vsm_sil_bid;
     var near=2.0;var ln=vec2<f32>(0.0);var ls=0.0;var lid=0u;var lz=0.0;
-    for(var m=0u;m<n;m+=1u) {
+    for(var m=0u;m<select(0u,n,VSM_SIL_GEOM);m+=1u) {
         let tri=vsm_id_triangle(ids[m],level);
         let area=vsm_cross(tri[0].xy,tri[1].xy,tri[2].xy);
         if area==0.0 {continue;}
@@ -758,8 +754,11 @@ fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
 // above it: off by default (the texel's own top, raised to the edge's part where that stands
 // higher). Measurement: `RENDERLAB_VSM=VSM_LINE_EDGE_TOP=true`.
 override VSM_LINE_EDGE_TOP:bool=false;
+// Measurement (`RENDERLAB_VSM=VSM_SIL_GEOM=false`): lines only where the samples split, placed by
+// their centroid and count (the mark test against the multisampled raster counts samples).
+override VSM_SIL_GEOM:bool=true;
 // Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
-const VSM_SIL_IDS:u32=20u;
+const VSM_SIL_IDS:u32=32u;
 // One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
 // its triangle's reach, and the highest covered part's mean height and triangle.
 var<private> vsm_sil_z:array<f32,8>;
