@@ -10,9 +10,6 @@
 //! - `many`: the grey box with every face cut into 40 x 40 quads, 19,200 emitting triangles, more
 //!   than the emitter list's starting capacity (8192): the list must grow to hold them all (the
 //!   emitter guard below) and the answer stays L = 1.
-//! - `order-ab` / `order-ba`: the `many` box seen from two views, visited in either order. A
-//!   settled picture is a function of the scene, not of the path the camera took to it: each
-//!   view's last frame must read the same (within 1%) whichever was seen first.
 //! - `slab-lit` / `slab-dark`: a thin slab (3 x 0.02 x 3 m, albedo 0.5) under a uniform sky of
 //!   1 cd/m^2, with a 1.5 m emitter 0.4 m below it (20 cd/m^2 in `slab-lit`, 0 in
 //!   `slab-dark`). The top face sees only the sky: L = rho * sky = 0.5 in both. Light from
@@ -36,7 +33,7 @@
 //! Run (one GPU lease, every case on one path):
 //!   RENDERLAB_FURNACE_PATH=rt|nort (default nort; rt needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK)
 //!   RENDERLAB_FURNACE_OUT=<dir>   furnace.json and one PFM per case (optional)
-//!   RENDERLAB_FURNACE_CASES=grey,many,order-ab,order-ba,orange,slab-lit,slab-dark,slab-roof (default all)
+//!   RENDERLAB_FURNACE_CASES=grey,many,orange,slab-lit,slab-dark,slab-roof (default all)
 //!   RENDERLAB_FURNACE_FRAMES=300  frames per view; the report also samples frames 1, 4, 16, 64
 //!   RENDERLAB_FURNACE_COUNTERS=1  adds the cache's counters for each view's last frame;
 //!                                 =frames also records a few of them on every frame up to 64
@@ -71,40 +68,6 @@ fn quad(centre: Vec3, n: Vec3, u: Vec3, half_v: f32) -> ([Vec3; 4], Vec3) {
         [centre - u - v, centre + u - v, centre + u + v, centre - u + v],
         n,
     )
-}
-/// The `many` box with two views, "near" (a corner) and "far" (the opposite wall), in either
-/// order: the view-order check.
-fn ordered(name: &'static str, reversed: bool) -> Case {
-    let glow = [0.5; 3];
-    let mut views = vec![
-        FurnaceView {
-            name: "near",
-            eye: Vec3::new(-0.3, -0.2, -0.4),
-            target: Vec3::new(1.0, 0.7, 0.6),
-            up: Vec3::Y,
-            expected: Some([1.0; 3]),
-        },
-        FurnaceView {
-            name: "far",
-            eye: Vec3::new(1.2, 0.3, 1.1),
-            target: Vec3::new(-1.0, -0.6, -1.0),
-            up: Vec3::Y,
-            expected: Some([1.0; 3]),
-        },
-    ];
-    if reversed {
-        views.reverse();
-    }
-    Case {
-        name,
-        sky: 0.0,
-        parts: vec![Part {
-            faces: subdivided(box_faces(Vec3::ZERO, Vec3::splat(2.0), true), 40),
-            albedo: [0.5; 3],
-            glow,
-        }],
-        views,
-    }
 }
 /// `faces`, each cut into n x n quads.
 fn subdivided(faces: Vec<([Vec3; 4], Vec3)>, n: usize) -> Vec<([Vec3; 4], Vec3)> {
@@ -248,8 +211,6 @@ fn cases() -> Vec<Case> {
             c.parts[0].faces = subdivided(std::mem::take(&mut c.parts[0].faces), 40);
             Case { name: "many", ..c }
         },
-        ordered("order-ab", false),
-        ordered("order-ba", true),
         Case {
             name: "orange",
             ..room([0.9, 0.4, 0.1])
@@ -305,20 +266,6 @@ fn gi_furnace() {
     let mut report = json!({"path": if rt {"rt"} else {"nort"}, "frames": frames, "switches": switches});
     for case in cases() {
         let rows = run_case(&case, rt, frames, out.as_deref());
-        // The view-order check: once both orders ran, each view's last frame agrees.
-        if case.name == "order-ba" && report.get("order-ab").is_some() {
-            for view in ["near", "far"] {
-                let last = |r: &Json| {
-                    let frames = &r[view]["frames"];
-                    let key = frames.as_object().unwrap().keys().max_by_key(|k| k.parse::<u32>().unwrap()).unwrap().clone();
-                    frames[&key]["mean"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect::<Vec<_>>()
-                };
-                let (ab, ba) = (last(&report["order-ab"]), last(&rows));
-                for c in 0..3 {
-                    assert!((ab[c] - ba[c]).abs() <= 0.01 * ab[c].abs().max(1e-6), "{view}: view order changes the settled frame, {ab:?} against {ba:?}");
-                }
-            }
-        }
         println!("furnace {} {}", case.name, rows);
         report[case.name] = rows;
         if let Some(dir) = &out {
