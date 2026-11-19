@@ -40,7 +40,7 @@ fn default_on(device: &wgpu::Device) -> bool {
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
     )
 }
-pub(super) fn enabled(device: &wgpu::Device) -> bool {
+pub(in crate::renderer) fn enabled(device: &wgpu::Device) -> bool {
     requested().unwrap_or_else(|| default_on(device))
 }
 fn default_head_for(head: &mut String, default: bool, override_on: Option<bool>) {
@@ -160,7 +160,7 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
 /// on frames the cache runs, looks up as before. The keys (one word a pixel, a hash of the
 /// placement and bin, 0 for misses) live in the pass's own group 2, so reuse needs the lean layout.
 /// `RENDERLAB_GI_RX_REUSE=0` looks up every pixel every frame.
-fn reuse() -> bool {
+pub(in crate::renderer) fn reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         lean() && !program::final_gather() && std::env::var("RENDERLAB_GI_RX_REUSE").map_or(true, |v| v != "0")
@@ -287,14 +287,31 @@ fn shade_source_for(mut source: String, eligible: bool, specular: bool, enabled:
     source.push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().0);
     source
 }
+/// What a receiver pipeline set is built for: the `Shading` index, the prelude's hash
+/// (`primary_hash`), whether group 2 holds the reuse keys, and the view's shade and array
+/// layouts.
+pub(in crate::renderer) type ReceiverKey = (usize, [u8; 32], bool, wgpu::BindGroupLayout, wgpu::BindGroupLayout);
+
+/// The receiver's pipelines for one `ReceiverKey`. The renderer keeps them
+/// (`Renderer::gi_receiver_pipelines`) apart from the size-dependent `Targets`, so a resize
+/// compiles nothing and `prepare_view_pipelines` builds them before a frame.
+pub(in crate::renderer) struct ReceiverPipelines {
+    key: ReceiverKey,
+    pipeline: Owned<wgpu::ComputePipeline>,
+    /// Whether `pipeline` is on the lean layout (`lean`), binding `group_layout` as group 2:
+    /// empty, or the reuse keys (`reuse`).
+    lean: bool,
+    group_layout: Owned<wgpu::BindGroupLayout>,
+    /// The final gather's five kernels and their group 2 layout (`program::final_gather`).
+    gather: Option<[Owned<wgpu::ComputePipeline>; 5]>,
+    gather_group: Option<Owned<wgpu::BindGroupLayout>>,
+}
+
 pub(super) struct Targets {
     pub values: Buffer,
     args: Buffer,
-    pipelines: [Option<Owned<wgpu::ComputePipeline>>; 2],
-    source_hash: [[u8; 32]; 2],
-    /// Whether each pipeline is on the lean layout (`lean`), and the group 2 it binds there:
-    /// empty, or the reuse keys (`reuse`).
-    lean: [bool; 2],
+    /// Per `Shading`, the pipelines this target last bound, and its group 2 for them.
+    pipelines: [Option<std::sync::Arc<ReceiverPipelines>>; 2],
     empty: Option<Owned<wgpu::BindGroup>>,
     /// Reuse's keys (`reuse`), and whether a lookup has written them and the records.
     keys: Option<Buffer>,
@@ -305,16 +322,13 @@ pub(super) struct Targets {
     /// new region clears them (`clear_keys`, encoded with the pass) and does not reuse.
     region: [u32; 4],
     clear_keys: bool,
-    /// The final gather (`program::final_gather`): its trace, filter, adaptive-probe and
-    /// resolve pipelines per `Shading`. Its probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK
-    /// block and the tile probes' filtered copies, follow the pixels' records in `values`
-    /// (gi_receiver_pass.wgsl FgProbe).
-    gather: [Option<[Owned<wgpu::ComputePipeline>; 5]>; 2],
-    /// The gather's group 2: its probes read cache cells and sample no material, so instead of
-    /// the materials group it binds the cache's external request list (binding 30), where hits
-    /// without a cell value ask for their cells. Not in the shared lighting group: one more
-    /// writable buffer there put the reflection hits' pipeline over the per-stage storage limit.
-    gather_group: Option<Owned<wgpu::BindGroupLayout>>,
+    /// The final gather (`program::final_gather`; its kernels are in `ReceiverPipelines`): its
+    /// probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK block and the tile probes' filtered
+    /// copies, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe). Its
+    /// group 2 binds the cache's external request list (binding 30) instead of the materials
+    /// group: its probes read cache cells and sample no material, and hits without a cell
+    /// value ask for their cells there. Not in the shared lighting group: one more writable
+    /// buffer there put the reflection hits' pipeline over the per-stage storage limit.
     /// Binding 30's stand-in while the cache has no resources (its own stand-in is bound
     /// read-only in the lighting group): four words, no room for an entry.
     requests_stand_in: Option<Buffer>,
@@ -366,8 +380,6 @@ impl Renderer {
                 wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
             ),
             pipelines: [None, None],
-            source_hash: [[0; 32]; 2],
-            lean: [false; 2],
             empty: None,
             keys: reuse().then(|| {
                 Buffer::new(
@@ -381,8 +393,6 @@ impl Renderer {
             table: None,
             region: [0; 4],
             clear_keys: false,
-            gather: [None, None],
-            gather_group: None,
             requests_stand_in: program::final_gather()
                 .then(|| Buffer::new(self, "final gather requests stand-in", 16, wgpu::BufferUsages::STORAGE)),
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
@@ -411,8 +421,10 @@ impl Renderer {
                 .flat_map(u32::to_ne_bytes)
                 .collect::<Vec<_>>(),
         );
-        let built = target.pipelines[shading as usize].is_some()
-            && target.source_hash[shading as usize] == self.primary_hash;
+        let key = self.gi_receiver_key(shading, target.keys.is_some());
+        let current = target.pipelines[shading as usize].as_ref().filter(|p| p.key == key);
+        let built = current.is_some();
+        let lean = current.is_some_and(|p| p.lean);
         let region = state.region;
         let moved = target.region != region;
         let table = self.gi.table_generation();
@@ -424,7 +436,7 @@ impl Renderer {
                 .reconstruction_state
                 .as_ref()
                 .is_some_and(|s| s.plan.held_frames() > 0);
-            let reuse = built && !moved && still && target.lean[shading as usize] && target.computed && table.is_some() && target.table == table;
+            let reuse = built && !moved && still && lean && target.computed && table.is_some() && target.table == table;
             self.queue.write_buffer(&keys.value, 0, &u32::from(reuse).to_ne_bytes());
         }
         if gathers {
@@ -438,6 +450,49 @@ impl Renderer {
         target.region = region;
         if built {
             return Ok(());
+        }
+        let pipelines = self.gi_receiver_pipelines(shading, key)?;
+        let target = self.view.primary.as_ref().unwrap().targets.as_ref().unwrap().gi_receiver.as_ref().unwrap();
+        let mut group = Vec::new();
+        if let Some(k) = &target.keys {
+            group.push(wgpu::BindGroupEntry { binding: 0, resource: k.value.as_entire_binding() });
+        }
+        let empty = self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GI receiver, group 2"),
+                layout: &pipelines.group_layout,
+                entries: &group,
+            }),
+            ResourceKind::BindGroup,
+        );
+        let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
+        target.empty = Some(empty);
+        target.pipelines[shading as usize] = Some(pipelines);
+        Ok(())
+    }
+
+    /// The selected view's receiver key for `shading`, with or without the reuse keys.
+    pub(in crate::renderer) fn gi_receiver_key(&self, shading: Shading, keys: bool) -> ReceiverKey {
+        let state = self.view.primary.as_ref().unwrap();
+        (
+            shading as usize,
+            self.primary_hash,
+            keys,
+            (*state.shade_bindings[shading as usize]).clone(),
+            (*state.array_bindings).clone(),
+        )
+    }
+
+    /// The receiver's pipelines for `key`, built the first time it is seen and kept: frames
+    /// bind them through their targets, and `prepare_view_pipelines` builds them before the
+    /// first frame. A new prelude hash replaces the entry it supersedes.
+    pub(in crate::renderer) fn gi_receiver_pipelines(
+        &mut self,
+        shading: Shading,
+        key: ReceiverKey,
+    ) -> Result<std::sync::Arc<ReceiverPipelines>, Error> {
+        if let Some(p) = self.gi_receiver_pipelines.iter().find(|p| p.key == key) {
+            return Ok(p.clone());
         }
         let state = self.view.primary.as_ref().unwrap();
         let head = &self.primary_sources.as_ref().unwrap().1[shading as usize];
@@ -471,10 +526,8 @@ impl Renderer {
             },
             count: None,
         };
-        let own = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref());
-        let keys = own.and_then(|t| t.keys.as_ref());
         let mut group_entries = Vec::new();
-        if keys.is_some() {
+        if key.2 {
             group_entries.push(storage(0, KEYS_HEAD + 4));
         }
         let empty_layout = self.ledger.own(
@@ -533,18 +586,6 @@ impl Renderer {
             gather_group = Some(group);
         }
         let pipeline = lean_built.unwrap_or_else(|| build(&state.shade_layouts[shading as usize]));
-        let mut group = Vec::new();
-        if let Some(k) = keys {
-            group.push(wgpu::BindGroupEntry { binding: 0, resource: k.value.as_entire_binding() });
-        }
-        let empty = self.ledger.own(
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("GI receiver, group 2"),
-                layout: &empty_layout,
-                entries: &group,
-            }),
-            ResourceKind::BindGroup,
-        );
         eprintln!(
             "gi_receiver_compile_seconds={:.3}",
             start.elapsed().as_secs_f64()
@@ -557,36 +598,19 @@ impl Renderer {
             ));
         }
         self.pipelines.created += 1;
-        self.view
-            .primary
-            .as_mut()
-            .unwrap()
-            .targets
-            .as_mut()
-            .unwrap()
-            .gi_receiver
-            .as_mut()
-            .unwrap()
-            .source_hash[shading as usize] = self.primary_hash;
-        self.view
-            .primary
-            .as_mut()
-            .unwrap()
-            .targets
-            .as_mut()
-            .unwrap()
-            .gi_receiver
-            .as_mut()
-            .unwrap()
-            .pipelines[shading as usize] = Some(pipeline);
-        let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
-        target.lean[shading as usize] = is_lean;
-        target.empty = Some(empty);
-        target.gather[shading as usize] = gather;
-        if gather_group.is_some() {
-            target.gather_group = gather_group;
-        }
-        Ok(())
+        let p = std::sync::Arc::new(ReceiverPipelines {
+            key,
+            pipeline,
+            lean: is_lean,
+            group_layout: empty_layout,
+            gather,
+            gather_group,
+        });
+        self.gi_receiver_pipelines.retain(|q| {
+            (q.key.0, q.key.2, &q.key.3, &q.key.4) != (p.key.0, p.key.2, &p.key.3, &p.key.4)
+        });
+        self.gi_receiver_pipelines.push(p.clone());
+        Ok(p)
     }
     /// The receiver kernel, or with the final gather its five kernels, each in its own compute
     /// pass behind a `mark` of its name, so the pass log times them apart.
@@ -603,9 +627,10 @@ impl Renderer {
         let Some(target) = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref()) else {
             return;
         };
-        let Some(pipeline) = &target.pipelines[shading as usize] else {
+        let Some(pipelines) = &target.pipelines[shading as usize] else {
             return;
         };
+        let pipeline = &pipelines.pipeline;
         if lookup_probe::on() {
             encoder.clear_buffer(&target.values.value, 0, None);
         }
@@ -616,8 +641,8 @@ impl Renderer {
         let g = state.geometry.as_ref().unwrap();
         let shade = &**bindings.shade[shading as usize].as_ref().unwrap();
         if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in)) = (
-            target.gather[shading as usize].as_ref(),
-            target.gather_group.as_ref(),
+            pipelines.gather.as_ref(),
+            pipelines.gather_group.as_ref(),
             target.requests_stand_in.as_ref(),
         ) {
             // The cache's list is replaced when its table grows, so the group follows it each frame.
@@ -662,7 +687,7 @@ impl Renderer {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, shade, &[]);
         pass.set_bind_group(1, &*g.arrays, &[]);
-        match target.empty.as_ref().filter(|_| target.lean[shading as usize]) {
+        match target.empty.as_ref().filter(|_| pipelines.lean) {
             Some(empty) => pass.set_bind_group(2, &**empty, &[]),
             None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
         }

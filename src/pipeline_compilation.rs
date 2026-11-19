@@ -42,6 +42,10 @@ struct Compilation {
     checked_shaders: std::sync::atomic::AtomicBool,
     timings: Mutex<Vec<CompilationTiming>>,
     log: Option<crate::pipeline_log::PipelineLog>,
+    /// Set when `Engine::prepare_pipelines` returns: every pipeline created after that is a
+    /// lazy first-use compile in a frame, counted in `late` and logged loudly.
+    prepared: std::sync::atomic::AtomicBool,
+    late: AtomicU64,
 }
 
 /// Internal device facade: all render paths share one driver cache, including
@@ -111,8 +115,21 @@ impl PipelineDevice {
                 checked_shaders: std::sync::atomic::AtomicBool::new(engine_shader_checks(checked)),
                 timings: Mutex::new(timings),
                 log: crate::pipeline_log::PipelineLog::from_env(),
+                prepared: std::sync::atomic::AtomicBool::new(false),
+                late: AtomicU64::new(0),
             }),
         }
+    }
+    /// Marks the scene prepared: pipelines created from here on count as compiles after
+    /// prepare. Each call restarts the count, so a later prepare (a new level, replaced
+    /// programs) measures from itself.
+    pub fn mark_prepared(&self) {
+        self.compilation.late.store(0, Ordering::Relaxed);
+        self.compilation.prepared.store(true, Ordering::Relaxed);
+    }
+    /// Pipelines created since the last `mark_prepared`; 0 when the engine was never prepared.
+    pub fn compiles_after_prepare(&self) -> u64 {
+        self.compilation.late.load(Ordering::Relaxed)
     }
     /// Custom preludes can feed any engine shading stage. Latch checks on for this
     /// device and its reload workers before compiling one; existing trusted modules
@@ -132,7 +149,7 @@ impl PipelineDevice {
     }
     pub fn log_pipeline_frame(&self, renderer: &crate::Renderer, report: &crate::FrameReport) {
         if let Some(log) = &self.compilation.log {
-            log.frame(renderer, report);
+            log.frame(renderer, report, self.compiles_after_prepare());
         }
     }
     fn timed<T>(&self, kind: &'static str, label: Option<&str>, compile: impl FnOnce() -> T) -> T {
@@ -181,6 +198,15 @@ impl PipelineDevice {
         let result = compile();
         let duration = start.elapsed();
         drop(slot);
+        if self.compilation.prepared.load(Ordering::Relaxed) {
+            // Loud by design: prepare should have created it, and a frame waited for it.
+            let late = self.compilation.late.fetch_add(1, Ordering::Relaxed) + 1;
+            eprintln!(
+                "warning: pipeline_compile_after_prepare n={late} kind={kind} label={:?} ms={:.3}",
+                label.unwrap_or(""),
+                duration.as_secs_f64() * 1e3
+            );
+        }
         if self.compilation.profile || self.compilation.log.is_some() {
             self.record(kind, label, duration);
         }

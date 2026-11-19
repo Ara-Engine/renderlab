@@ -260,16 +260,22 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     let traced=rl_cast(origin,d,epsilon);
     fg_hit=traced.record.x!=0u;
     fg_unanswered=false;
+    fg_no_value=false;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
     let cell=rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t);
-    fg_unanswered=cell.w==0.0;
+    fg_no_value=cell.w==0.0;
+    fg_unanswered=fg_no_value;
     // A ray that meets an emitting draw keeps its cell's reflected light and its emission weighted
     // against the probe's emitter samples (fg_nee, multiple importance sampling).
     let hit=primary_decode(traced.record);
     let emission=gi_triangle_emission(hit.batch,hit.placement,traced.record.y);
     if all(emission<=vec3<f32>(0.0)) {return rl_finite(cell.rgb);}
+    // The triangle's emission is known exactly from the list, so the hit counts even when its
+    // cell has no value (thin emitting strips' fine cells are often orphans that never get one);
+    // only its reflected light, small on Glint's dark emitter bases, is then missing.
+    fg_unanswered=false;
     let light=fg_light_pdf(fg_luminance(emission),traced.t,abs(dot(unit_normal(rl_cache_geometric),d)));
-    let reflected=max(cell.rgb-emission,vec3<f32>(0.0));
+    let reflected=select(vec3<f32>(0.0),max(cell.rgb-emission,vec3<f32>(0.0)),cell.w>0.0);
     return rl_finite(reflected+emission*fg_mis(FG_HEMISPHERE_PDF*f32(FG_HEMI),light*f32(FG_NEE)));
 }
 // Probe rays are uniform over the hemisphere: their density in solid angle.
@@ -296,6 +302,8 @@ fn fg_mis(own:f32,other:f32)->f32 {
 // hit found no cell value (rl_cache_missed names the cell).
 var<private> fg_hit:bool;
 var<private> fg_unanswered:bool;
+// Whether its hit's cell had no value (it is then requested, fg_request), answered or not.
+var<private> fg_no_value:bool;
 // The lighting cache's external request list (gi_cache.wgsl gi_external, GiState::
 // external_requests): a probe hit without a value asks for its cell, which the cache's next frame
 // requests a band below pixels'. The gather's own group 2 binds it (src/gi_receiver_pass.rs; the
@@ -340,7 +348,7 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
             d=fg_direction(s.normal,ray-FG_NEE,FG_HEMI,r);
             radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
             atomicAdd(&fg_rays[0],1u);
-            if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
+            if fg_hit && fg_no_value && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
             // A hit no cache level answers yet is left out of the probe's average (fg_accumulate
             // counts the answered rays in the pad float FG_ANSWERED): counted as black, it
             // darkened probes after a cut until the cells it asked for were shaded.
