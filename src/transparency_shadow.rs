@@ -61,7 +61,10 @@ pub(in crate::renderer) struct TransmissionShadow {
     /// `map` reduced to two layers per texel (shaders/transmission_reduce.wgsl); shading
     /// binds this at 27 and its record counts min(draws, 2) layers.
     pub reduced: Depth,
-    reduce: Option<(Owned<wgpu::ComputePipeline>, Owned<wgpu::BindGroup>)>,
+    /// The reduction's pipeline (built once, `tp_transmission_pipelines`) and its group over
+    /// the current `map` and `reduced`.
+    reduce_pipeline: Option<Owned<wgpu::ComputePipeline>>,
+    reduce: Option<Owned<wgpu::BindGroup>>,
     pub generation: u64,
     pub hash: [u8; 32],
     layers: Vec<Owned<wgpu::TextureView>>,
@@ -88,6 +91,7 @@ impl TransmissionShadow {
             uniform,
             map,
             reduced,
+            reduce_pipeline: None,
             reduce: None,
             generation: 0,
             hash: [0; 32],
@@ -225,6 +229,7 @@ impl Renderer {
         if count == 0 || self.lighting.transmission.key == Some(key) {
             return Ok(());
         }
+        self.tp_transmission_pipelines();
         if self.lighting.transmission.layers.len() != count {
             let map = map(&self.device, &self.ledger, SIZE, count as u32, MAP_USAGE);
             let reduced = map_like(&self.device, &self.ledger, &map, SIZE);
@@ -252,7 +257,7 @@ impl Renderer {
                 wgpu::TextureUsages::RENDER_ATTACHMENT,
                 4,
             );
-            let reduce = self.tp_reduce(&map, &reduced);
+            let reduce = self.tp_reduce_group(&map, &reduced);
             let state = &mut self.lighting.transmission;
             state.map = map;
             state.reduced = reduced;
@@ -261,6 +266,66 @@ impl Renderer {
             state.depth = Some(depth);
             state.generation += 1;
         }
+        let state = &mut self.lighting.transmission;
+        state.key = Some(key);
+        state.render = true;
+        Ok(())
+    }
+    pub(crate) fn encode_transmission(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        draws: &[Draw<'_>],
+    ) {
+        let state = &self.lighting.transmission;
+        if !state.render {
+            return;
+        }
+        for (i, draw) in draws.iter().enumerate() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TP2 coloured sun transmission"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &state.layers[i],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &state.depth.as_ref().unwrap().view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(state.pipeline.as_ref().unwrap());
+            pass.set_bind_group(0, &**state.group.as_ref().unwrap(), &[]);
+            pass.set_bind_group(1, &*draw.instances.bind, &[]);
+            pass.set_bind_group(2, &*draw.material.unwrap().bind, &[]);
+            pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+            pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+            // Draw every instance, including off-camera casters. instance_index is used
+            // directly instead of the camera's compact visible ID vertex stream.
+            pass.draw_indexed(0..draw.mesh.index_count, 0, 0..draw.instances.len() as u32);
+        }
+        // The layers reduced to two per texel, which shading reads.
+        if let (Some(pipeline), Some(group)) = (&state.reduce_pipeline, &state.reduce) {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("TP2 transmission reduce"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &**group, &[]);
+            pass.dispatch_workgroups(SIZE.div_ceil(8), SIZE.div_ceil(8), 1);
+        }
+    }
+    /// The transmission map's draw pipeline (and its uniform group) and its reduction's pipeline,
+    /// built once: frames with transparent casters and `prewarm_transparency` call it.
+    pub(super) fn tp_transmission_pipelines(&mut self) {
         if self.lighting.transmission.pipeline.is_none() {
             let bindings = self.tp_layout(
                 "TP2 transmission",
@@ -328,83 +393,29 @@ impl Renderer {
             state.pipeline = Some(pipeline);
             state.group = Some(group);
         }
-        let state = &mut self.lighting.transmission;
-        state.key = Some(key);
-        state.render = true;
-        Ok(())
-    }
-    pub(crate) fn encode_transmission(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        draws: &[Draw<'_>],
-    ) {
-        let state = &self.lighting.transmission;
-        if !state.render {
-            return;
-        }
-        for (i, draw) in draws.iter().enumerate() {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TP2 coloured sun transmission"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &state.layers[i],
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &state.depth.as_ref().unwrap().view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+        if self.lighting.transmission.reduce_pipeline.is_none() {
+            let module = self.tp_module("TP2 transmission reduce", REDUCE);
+            let pipeline = self.ledger.own(
+                self.device
+                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("TP2 transmission reduce"),
+                        layout: None,
+                        module: &module,
+                        entry_point: Some("tx_reduce"),
+                        compilation_options: Default::default(),
+                        cache: None,
                     }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-            pass.set_pipeline(state.pipeline.as_ref().unwrap());
-            pass.set_bind_group(0, &**state.group.as_ref().unwrap(), &[]);
-            pass.set_bind_group(1, &*draw.instances.bind, &[]);
-            pass.set_bind_group(2, &*draw.material.unwrap().bind, &[]);
-            pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-            pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-            // Draw every instance, including off-camera casters. instance_index is used
-            // directly instead of the camera's compact visible ID vertex stream.
-            pass.draw_indexed(0..draw.mesh.index_count, 0, 0..draw.instances.len() as u32);
-        }
-        // The layers reduced to two per texel, which shading reads.
-        if let Some((pipeline, group)) = &state.reduce {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("TP2 transmission reduce"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &**group, &[]);
-            pass.dispatch_workgroups(SIZE.div_ceil(8), SIZE.div_ceil(8), 1);
+                ResourceKind::ComputePipeline,
+            );
+            self.lighting.transmission.reduce_pipeline = Some(pipeline);
         }
     }
-    /// The reduction's pipeline and its group over `map` (read) and `reduced` (written).
-    fn tp_reduce(
-        &self,
-        map: &Depth,
-        reduced: &Depth,
-    ) -> (Owned<wgpu::ComputePipeline>, Owned<wgpu::BindGroup>) {
-        let module = self.tp_module("TP2 transmission reduce", REDUCE);
-        let pipeline = self.ledger.own(
-            self.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("TP2 transmission reduce"),
-                    layout: None,
-                    module: &module,
-                    entry_point: Some("tx_reduce"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                }),
-            ResourceKind::ComputePipeline,
-        );
-        let group = self.ledger.own(
+
+    /// The reduction's group over `map` (read) and `reduced` (written), for the pipeline
+    /// `tp_transmission_pipelines` built.
+    fn tp_reduce_group(&self, map: &Depth, reduced: &Depth) -> Owned<wgpu::BindGroup> {
+        let pipeline = self.lighting.transmission.reduce_pipeline.as_ref().unwrap();
+        self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TP2 transmission reduce"),
                 layout: &pipeline.get_bind_group_layout(0),
@@ -420,7 +431,6 @@ impl Renderer {
                 ],
             }),
             ResourceKind::BindGroup,
-        );
-        (pipeline, group)
+        )
     }
 }

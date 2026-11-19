@@ -4093,7 +4093,7 @@ impl Renderer {
             );
         }
         if let Some(t) = &mut marks {
-            t.finish(&mut encoder);
+            t.finish(&mut encoder, self.device.compile_totals());
         }
         let mapped = if timed {
             let timing = self.timing.as_ref().unwrap();

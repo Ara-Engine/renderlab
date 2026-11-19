@@ -23,6 +23,10 @@
 //! stage's encoding and any preparation the renderer does inline there; repeated names add up)
 //! and `"cpu_head"`, from the frame's `begin` to its first mark. A mark named `cpu:...` is a CPU
 //! point only (no GPU timestamp, no pass): it splits the CPU stages and nothing else.
+//! Each line also carries `"compiles"` and `"compile_ms"`: the pipelines created since the previous
+//! frame's `finish` and the time their creation took. A frame is submitted in parts, so a compile
+//! between two parts leaves the GPU waiting inside the span and the stage being encoded: its times
+//! are not GPU work, and consumers drop or flag such frames instead of averaging them in.
 //! Measurement only: `RENDERLAB_CPU_SPLIT=1` also finishes and submits the encoder at every mark,
 //! so each stage's own `CommandEncoder::finish` (wgpu's replay of its commands) is timed alone
 //! (`"finish":{...}`, by the stage the commands were recorded in). It changes when queue writes
@@ -57,6 +61,8 @@ struct Frame {
     finishes: Vec<(&'static str, std::time::Duration)>,
     mapped: Option<Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>>,
     frame: u64,
+    /// Pipelines created for this frame (since the previous frame's finish) and their nanoseconds.
+    compiles: (u64, u64),
 }
 
 impl Frame {
@@ -86,6 +92,7 @@ impl Frame {
             finishes: vec![],
             mapped: None,
             frame: 0,
+            compiles: (0, 0),
         }
     }
 }
@@ -129,6 +136,8 @@ pub(crate) struct PassTimeline {
     log: std::io::BufWriter<std::fs::File>,
     /// RENDERLAB_CPU_SPLIT: the device and queue that finish and submit at each mark.
     split: Option<(wgpu::Device, wgpu::Queue)>,
+    /// The pipeline device's compile totals at the previous frame's finish.
+    compiled: (u64, u64),
 }
 
 impl PassTimeline {
@@ -151,6 +160,7 @@ impl PassTimeline {
             log: std::io::BufWriter::new(log),
             split: (std::env::var("RENDERLAB_CPU_SPLIT").as_deref() == Ok("1"))
                 .then(|| (device.clone(), queue.clone())),
+            compiled: (0, 0),
         })
     }
 
@@ -225,9 +235,13 @@ impl PassTimeline {
         });
     }
 
-    /// Ends the frame's last stage and copies its stamps out; encode last.
-    pub(crate) fn finish(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    /// Ends the frame's last stage and copies its stamps out; encode last. `compiled` is the
+    /// pipeline device's compile totals now (`PipelineDevice::compile_totals`): the frame is
+    /// booked what was compiled since the previous frame's finish.
+    pub(crate) fn finish(&mut self, encoder: &mut wgpu::CommandEncoder, compiled: (u64, u64)) {
         let Some(i) = self.current else { return };
+        self.frames[i].compiles = (compiled.0 - self.compiled.0, compiled.1 - self.compiled.1);
+        self.compiled = compiled;
         if self.frames[i].names.is_empty() {
             let _ = write_record(
                 &mut self.log,
@@ -324,12 +338,14 @@ impl PassTimeline {
                     _ => 0.0,
                 };
                 let span = ms(stamps[0], *stamps.last().unwrap());
+                let (compiles, compile_ns) = entry.compiles;
                 let _ = write_record(
                     &mut self.log,
                     &mut self.last_emitted,
                     entry.frame,
                     &format!(
-                        "\"dropped\":false,\"span\":{span:.4},\"passes\":{{{}}},\"cpu_head\":{head:.4},\"cpu\":{{{}}},\"finish\":{{{}}}",
+                        "\"dropped\":false,\"span\":{span:.4},\"compiles\":{compiles},\"compile_ms\":{:.3},\"passes\":{{{}}},\"cpu_head\":{head:.4},\"cpu\":{{{}}},\"finish\":{{{}}}",
+                        compile_ns as f64 * 1e-6,
                         body.join(","),
                         cpu.join(","),
                         finishes.join(",")
