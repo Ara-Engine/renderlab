@@ -297,8 +297,8 @@ override VD_THICK:f32=4.0;
 // On reconstructed frames each receiver reads the map from a point of its tangent plane up to
 // this many texels of its level away (per axis, a new point every frame), so TR1 integrates a
 // texel-wide box over the map: where a texel spans several pixels, a hard shadow edge becomes a
-// ramp one texel wide instead of a staircase. 0: off, as with the covered fraction (the default,
-// virtual_shadow_gpu.rs `fraction_on`), which draws that ramp from the map itself.
+// ramp one texel wide instead of a staircase. 0: off, as with the covered fraction
+// (virtual_shadow_gpu.rs `fraction_on`), which draws that ramp from the map itself.
 override VD_JITTER:f32=0.5;
 // A texel's peel surface of another placement is a second occluder under the top one (two
 // sheets, or a sheet over a solid); false: only the top surface's column.
@@ -840,7 +840,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
 // Off (`RENDERLAB_VD=VD_RING=false`): every band whose max-mip clears its floor reads its whole
 // window (the same answers, more reads).
 override VD_RING:bool=true;
-// ---- Covered fraction (on by default, virtual_shadow.wgsl vsm_cover) ----
+// ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow.wgsl vsm_cover) ----
 override VD_FRACTION:bool=false;
 // Measurement: VD_FR_NEAR=false keeps the exact edges' reading of a partly covered texel by its top
 // (vd_near); VD_FR_WIDE in 0..1 forces the regime blend (vd_side), negative computes it.

@@ -1003,8 +1003,8 @@ pub(super) fn shader_source() -> String {
     }
     source
 }
-/// The covered fraction (on by default; `RENDERLAB_VSM_FRACTION=0` turns it off, as before it,
-/// with the receiver jitter back on, WGSL `VD_JITTER`): each silhouette texel's
+/// The covered fraction (off by default; `RENDERLAB_VSM_FRACTION=1` turns it on, with the
+/// receiver jitter off, WGSL `VD_JITTER`): each silhouette texel's
 /// near-layer coverage becomes a count of eighths and its covered side (WGSL `vsm_cover`), and
 /// the Disk lookup lets a partly covered column block that share of its directions from that
 /// side where the sun's cone there is a texel wide or more, the texel binary where it is
@@ -1019,10 +1019,10 @@ fn fraction_on() -> bool {
 fn fraction_mode() -> u8 {
     static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("RENDERLAB_VSM_FRACTION").as_deref().map(str::trim) {
-        Ok("0") | Ok("off") => 0,
+        Ok("1") => 1,
         Ok("msaa") => 2,
         Ok("line") => 3,
-        _ => 1,
+        _ => 0,
     })
 }
 /// The covered fraction's samples a texel (WGSL `VSM_SAMPLES`): the hardware raster runs on a
