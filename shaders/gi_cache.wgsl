@@ -2207,7 +2207,9 @@ fn gi_fixed_bin(slot:u32) -> u32 {
 @compute @workgroup_size(64) fn gi_fixed_rank(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     for(var slot=id.x;slot<gi_frame.offsets.x;slot+=groups.x*64u) {
         let bin=gi_fixed_bin(slot);
-        if bin==0xffffffffu { continue; }
+        // Every slot's word is written: the claim rounds leave tickets in these words, which the
+        // list pass would otherwise read as ranked cells.
+        if bin==0xffffffffu { atomicStore(&gi_work[GI_W_CLAIMS+slot],0u); continue; }
         atomicStore(&gi_work[GI_W_CLAIMS+slot],bin+1u);
         atomicAdd(&gi_work[GI_W_GATHER_HIST+bin],gi_gather_rays(slot));
     }
