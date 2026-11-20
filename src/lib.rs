@@ -7,7 +7,8 @@
 //! order, then ascending instance slot, defines equal-depth winners. Windowing belongs to
 //! the caller. Use a dedicated device and queue. External queue clones/submissions are
 //! outside accounting.
-#[cfg(test)]
+// Tests and the bench include the viewer's uploader (viewer/src/prepared.rs), which names this crate.
+#[cfg(any(test, feature = "bench"))]
 extern crate self as renderlab;
 pub mod animation;
 /// Optional ara-gpu renderer, independently constructed from the wgpu renderer.

@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 mod city;
+mod dump;
 mod fixtures;
 mod furnace;
 pub(crate) mod kit;
@@ -251,7 +252,7 @@ struct PassStats {
     medians: BTreeMap<String, f64>,
     cache_frames: Vec<Option<f64>>,
 }
-fn pass_stats(log: &Path, offset: u64, last: Option<usize>) -> (PassStats, u64) {
+fn pass_stats(log: &Path, offset: u64, last: Option<usize>, after: usize) -> (PassStats, u64) {
     let Ok(text) = std::fs::read(log) else {
         return (PassStats { medians: BTreeMap::new(), cache_frames: vec![] }, offset);
     };
@@ -282,6 +283,8 @@ fn pass_stats(log: &Path, offset: u64, last: Option<usize>) -> (PassStats, u64) 
         stages.insert("cache".to_owned(), cache);
         frames.push(Some(stages));
     }
+    // The window: the `last` frames before the final `after` ones.
+    frames.truncate(frames.len().saturating_sub(after));
     if let Some(last) = last {
         frames.drain(..frames.len().saturating_sub(last));
     }
@@ -361,8 +364,11 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
         match result {
             Ok(mut metrics) => {
                 // `frames_measured`: the pass times cover only the fixture's last frames.
-                let last = metrics.iter().position(|(k, _)| k == "frames_measured").map(|i| metrics.remove(i).1 as usize);
-                let (stats, end) = pass_stats(&rig.pass_log, rig.read_to, last);
+                let mut take = |name: &str| metrics.iter().position(|(k, _)| k == name).map(|i| metrics.remove(i).1 as usize);
+                // `frames_after`: frames after that window (a hold after a walk) are left out too.
+                let last = take("frames_measured");
+                let after = take("frames_after").unwrap_or(0);
+                let (stats, end) = pass_stats(&rig.pass_log, rig.read_to, last, after);
                 rig.read_to = end;
                 let cache: Vec<f64> = stats.cache_frames.iter().flatten().copied().collect();
                 let cache_max = cache.iter().copied().fold(0.0, f64::max);
