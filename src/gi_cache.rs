@@ -2333,6 +2333,17 @@ impl GiState {
             watch.submitted();
         }
     }
+    /// Whether the cache was emptied, the camera cut, or a lighting edit (the light key cell
+    /// shading reads) is still relighting the table, within the last RECENT_CHANGE_FRAMES frames:
+    /// readers that skip work on settled views (the final gather's stable probes) do all of it then.
+    pub(crate) fn recently_changed(&self) -> bool {
+        const RECENT_CHANGE_FRAMES: u32 = 8;
+        let p = &self.planner;
+        p.pending_clear
+            || p.since_clear.min(p.since_cut) < RECENT_CHANGE_FRAMES
+            || p.light_streak
+            || p.relight_catchup > 0
+    }
     /// The table shading binds (lighting group 3, binding 20).
     pub fn shading_table(&self) -> &wgpu::Buffer {
         self.resources.as_ref().map_or(&*self.dummy, |r| &*r.table)

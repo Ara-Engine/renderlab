@@ -447,7 +447,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     vsm_work.args[level].sw_x=min(n,65535u);
     vsm_work.args[level].sw_y=select(0u,(n+65534u)/65535u,n!=0u);
     vsm_work.args[level].sw_z=1u;
-    vsm_work.args[level].hw_vertices=select(384u,768u,VSM_FRACTION);
+    vsm_work.args[level].hw_vertices=384u;
     vsm_work.args[level].hw_first=0u;
     vsm_work.args[level].hw_first_instance=0u;
 }
@@ -467,11 +467,474 @@ fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k]
     for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
         atomicStore(&vsm_top_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
         atomicStore(&vsm_peel_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
-        if VSM_FRACTION {vsm_cover_clear(slot*VSM_PAGE*VSM_PAGE+k);}
+        if VSM_MSAA {vsm_cover_clear(slot*VSM_PAGE*VSM_PAGE+k);}
     }
 }
-// Zeroes texel i's covered-sample byte (four texels share a word).
-fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>2u],~(255u<<((i&3u)*8u)));}
+// A texel's 16 bits in vsm_cover (two texels share a word): while the multisampled raster runs,
+// its near layer's sample bits (low byte); for a partly covered texel after the fold, the line
+// of its covered part (vsm_cover_line).
+fn vsm_cover_shift(i:u32)->u32 {return (i&1u)*16u;}
+// Zeroes texel i's bits: multisampled only, as the ids' pass writes the line of each texel it
+// finds partly covered and the lookup reads no other.
+fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>1u],~(0xffffu<<vsm_cover_shift(i)));}
+// After both raster layers (multisampled; the ids' pass folds in vsm_silhouette): texel i's
+// near-layer sample count goes into its top word's low three height bits (1-7; 0 where it covers
+// none or all eight), so the Disk lookup reads it with the height it loads anyway. The height
+// moves by at most seven of its last bits (under 2^-21 of the depth range), which every other
+// reader of the word ignores.
+fn vsm_fold(i:u32) {
+    let w=atomicLoad(&vsm_top_map[i]);
+    if (w&0xfffffffflu)==0lu {return;}
+    let bits=(atomicLoad(&vsm_cover[i>>1u])>>vsm_cover_shift(i))&255u;
+    // Eighths of the texel, whatever the sample count.
+    let k=countOneBits(bits)*(8u/VSM_SAMPLES);
+    let partial=k>0u && k<8u;
+    let h=(u32(w>>32u)&~7u)|select(0u,k,partial);
+    if h!=u32(w>>32u) {atomicStore(&vsm_top_map[i],(u64(h)<<32u)|(w&0xfffffffflu));}
+    // Only a partly covered texel needs its line (the lookup reads it where k is 1-7).
+    if partial {
+        let n=vsm_centroid_side(bits);
+        vsm_cover_line(i,n,vsm_area_offset(n,f32(k)/8.0),k>=4u);
+    }
+}
+// The side of a texel's covered samples: their centroid's direction from its centre.
+fn vsm_centroid_side(covered:u32)->vec2<f32> {
+    var bits=covered;
+    var g=vec2<f32>(0.0);
+    while bits!=0u {
+        g+=vsm_sample(firstTrailingBit(bits));
+        bits&=bits-1u;
+    }
+    // A centroid at the centre (a symmetric cover) gives no side; any fixed one serves.
+    if dot(g,g)<1e-8 {return vec2<f32>(1.0,0.0);}
+    return normalize(g);
+}
+// The offset s (texels from the centre along unit n) past which the unit square holds area f:
+// its projection on n is a trapezoid, a plateau 1/u high between corner ramps of area v/2u.
+fn vsm_area_offset(n:vec2<f32>,f:f32)->f32 {
+    let u=max(abs(n.x),abs(n.y));let v=min(abs(n.x),abs(n.y));
+    let ramp=v/(2.0*u);
+    if f<ramp {return 0.5*(u+v)-sqrt(2.0*u*v*f);}
+    if f>1.0-ramp {return sqrt(2.0*u*v*(1.0-f))-0.5*(u+v);}
+    return u*(0.5-f);
+}
+// Texel i's covered part is {x : n . (x - centre) >= s} (texels; n a unit normal into it): the
+// angle of n in 256 steps (bits 0-7), s over -0.75..0.75 in 127 (bits 8-14), and whether its
+// centre is covered (bit 15: the texel's binary answer, as the map holds it without the
+// fraction; the multisampled raster takes most samples), for the Disk lookup
+// (virtual_shadow_disk.wgsl vd_side, vd_half).
+fn vsm_cover_line(i:u32,n:vec2<f32>,s:f32,centre:bool) {
+    let a=u32(round(atan2(n.y,n.x)*(256.0/6.28318531)+256.0))%256u;
+    let o=u32(round((clamp(s,-0.75,0.75)+0.75)*(127.0/1.5)));
+    let shift=vsm_cover_shift(i);
+    atomicAnd(&vsm_cover[i>>1u],~(0xffffu<<shift));
+    atomicOr(&vsm_cover[i>>1u],(a|(o<<8u)|select(0u,0x8000u,centre))<<shift);
+}
+// ---- The covered fraction from ids (RENDERLAB_VSM_FRACTION=1; off by default) ----
+// Both layers rasterize at texel centres. Then a texel whose 3x3 neighbourhood disagrees (an
+// occupied texel beside an empty one, another placement, or a pair of opposite neighbours off the
+// texel's plane by more than the peel gap: the only texels an outline can cross) takes its
+// samples' coverage from the triangles that neighbourhood's top words and its own peel word name:
+// the union over them of the samples within the peel gap of the texel's top (the near layer),
+// with the sample positions of vsm_sample. A covered part standing above the centre's surface
+// becomes the texel's top. Interior texels keep their centre's answer (fully covered or empty):
+// the cost follows the outlines' length. A caster covering no texel centre names no id and stays
+// unseen (the sliver limit; the multisampled raster sees it).
+// VSM_SIL_SCAN (measurement): the neighbourhood scan alone, no triangles; VSM_SIL_OFF: no pass.
+override VSM_SIL_SCAN:bool=false;
+override VSM_SIL_OFF:bool=false;
+// The top word of window texel t of `level` whatever this frame drew; VSM_NONE outside the window
+// or on a page that is not resident.
+fn vsm_word_at(level:u32,t:vec2<i32>)->u32 {
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    if any(t<vec2<i32>(0)) || any(t>=vec2<i32>(side)) {return VSM_NONE;}
+    let u=vec2<u32>(t);
+    if vsm_sparse() {
+        let slot=vsm_pages[vsm_section(2u)+vsm_vpage(level,u/VSM_PAGE)];
+        if slot==VSM_NONE {return VSM_NONE;}
+        return slot*VSM_PAGE*VSM_PAGE+(u.y%VSM_PAGE)*VSM_PAGE+u.x%VSM_PAGE;
+    }
+    return (level*u32(side)+u.y)*u32(side)+u.x;
+}
+// The triangle a map id names, in level texels and normalized heights as the raster places it.
+fn vsm_id_triangle(id:u32,level:u32)->array<vec3<f32>,3> {
+    let bits=vsm.misc.x;
+    let placement=(id>>bits)-1u;
+    let batch=primary_placements[placement]&0x1fffffffu;
+    let v=vsm_triangle(batch,id&((1u<<bits)-1u));
+    let m=models[placement];
+    let texel=vsm_texel(level);
+    var out:array<vec3<f32>,3>;
+    for(var k=0u;k<3u;k+=1u) {
+        let q=vsm_light((m*vec4<f32>(v[k],1.0)).xyz);
+        out[k]=vec3<f32>((q.xy-vsm.levels[level].origin.xy)/texel,(q.z-vsm.depth.x)*vsm.depth.y);
+    }
+    return out;
+}
+// A 16x16 block of texels and its one-texel apron, loaded once for the block's neighbourhood
+// scans: ids (VSM_SIL_OUT outside the window or on a page not resident) and height bits.
+const VSM_SIL_OUT:u32=0xffffffffu;
+var<workgroup> vsm_wg_sil_id:array<u32,324>;
+var<workgroup> vsm_wg_sil_h:array<f32,324>;
+var<workgroup> vsm_wg_sil_dirty:u32;
+// Loads the tile of the block whose first texel is window texel `origin` (all threads).
+fn vsm_sil_load(level:u32,origin:vec2<i32>,li:u32) {
+    for(var e=li;e<324u;e+=256u) {
+        let j=vsm_word_at(level,origin+vec2<i32>(i32(e%18u)-1,i32(e/18u)-1));
+        var id=VSM_SIL_OUT;var h=0.0;
+        if j!=VSM_NONE {
+            let o=atomicLoad(&vsm_top_map[j]);
+            id=u32(o&0xfffffffflu);h=bitcast<f32>(u32(o>>32u));
+        }
+        vsm_wg_sil_id[e]=id;vsm_wg_sil_h[e]=h;
+    }
+}
+// Texel t (map index i), at entry ce of the loaded tile.
+fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32,ce:u32) {
+    if level>VSM_SIL_MAX_LEVEL {return;}
+    let id=vsm_wg_sil_id[ce];
+    let h=vsm_wg_sil_h[ce];
+    let bits=vsm.misc.x;
+    let gap=VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z;
+    var marked=false;
+    for(var k=0u;k<9u;k+=1u) {
+        let oid=vsm_wg_sil_id[ce+k%3u+(k/3u)*18u-19u];
+        if oid!=VSM_SIL_OUT && ((oid==0u)!=(id==0u) || (oid>>bits)!=(id>>bits)) {marked=true;}
+    }
+    // The four pairs of opposite neighbours (k and 8-k): off the texel's plane by over the gap.
+    if id!=0u && !marked {
+        for(var k=0u;k<4u;k+=1u) {
+            let pa=ce+k%3u+(k/3u)*18u-19u;let pb=2u*ce-pa;
+            if vsm_wg_sil_id[pa]==VSM_SIL_OUT || vsm_wg_sil_id[pb]==VSM_SIL_OUT {continue;}
+            if abs(vsm_wg_sil_h[pa]+vsm_wg_sil_h[pb]-2.0*h)>gap {marked=true;}
+        }
+    }
+    if !marked {return;}
+    if VSM_SIL_SCAN {atomicOr(&vsm_cover[i>>1u],0u);return;}
+    // The candidates (marked texels only): the neighbours' tops, then the texel's own two words.
+    var ids:array<u32,VSM_SIL_IDS>;var n=0u;
+    for(var k=0u;k<9u;k+=1u) {
+        if k==4u {continue;}
+        let oid=vsm_wg_sil_id[ce+k%3u+(k/3u)*18u-19u];
+        var seen=oid==0u || oid==VSM_SIL_OUT;
+        for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==oid;}
+        if !seen {ids[n]=oid;n+=1u;}
+    }
+    let pid=u32(atomicLoad(&vsm_peel_map[i])&0xfffffffflu);
+    for(var e=0u;e<2u;e+=1u) {
+        let cid=select(pid,id,e==0u);
+        var seen=cid==0u;
+        for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==cid;}
+        if !seen {ids[n]=cid;n+=1u;}
+    }
+    // Per sample, the highest covering height and its triangle's reach across the samples; per
+    // triangle, the mean height of what it covers (its covered part's height) and its samples.
+    for(var s=0u;s<8u;s+=1u) {vsm_sil_z[s]=-1.0;vsm_sil_reach[s]=0.0;vsm_sil_tid[s]=0u;vsm_sil_area[s]=0.0;}
+    vsm_sil_best=select(-1.0,h,id!=0u);vsm_sil_bid=id;
+    let centre=vec2<f32>(t)+vec2<f32>(0.5);
+    var inside:array<u32,VSM_SIL_IDS>;
+    var open=0xffu;
+    for(var m=0u;m<n;m+=1u) {
+        inside[m]=vsm_sil_triangle(ids[m],level,centre);
+        open&=~inside[m];
+    }
+    // A fan or strip meeting inside the texel can hold triangles whose corners no texel centre
+    // sees: where samples are left open, the edge neighbours (the index buffer's adjacency) of
+    // the named triangles, once. The edge line (VSM_SIL_GEOM) takes them at every marked texel:
+    // an outline's outermost face (a tube's, steep) is often such a sliver.
+    let named=n;
+    let ring=VSM_SIL_GEOM || VSM_SIL_RING || (open!=0u && open!=0xffu);
+    for(var m=0u;m<select(0u,named,ring);m+=1u) {
+        let placement=ids[m]>>bits;
+        let batch=primary_placements[placement-1u]&0x1fffffffu;
+        for(var e=0u;e<3u;e+=1u) {
+            let nb=vsm_neighbour(batch,ids[m]&((1u<<bits)-1u),e);
+            if nb==VSM_MISSING || n>=VSM_SIL_IDS {continue;}
+            let nid=(placement<<bits)|nb;
+            var seen=false;
+            for(var j=0u;j<n;j+=1u) {seen=seen || ids[j]==nid;}
+            if seen {continue;}
+            ids[n]=nid;
+            inside[n]=vsm_sil_triangle(nid,level,centre);
+            n+=1u;
+        }
+    }
+    // Covered: a sample whose highest surface is in the near layer, or of the top's own mesh
+    // whatever its height (a wall's face under its top edge, a step: the caster itself, which the
+    // gap must not open; the gap parts a caster from another object under it).
+    let lowest=vsm_sil_best-gap;
+    let own=vsm_sil_bid>>bits;
+    var cover=0u;
+    for(var s=0u;s<VSM_SAMPLES;s+=1u) {
+        let near=vsm_sil_z[s]>=0.0 && vsm_sil_z[s]>=lowest-vsm_sil_reach[s];
+        var covered=near || (own!=0u && (vsm_sil_tid[s]>>bits)==own);
+        // A sample no candidate covers lies on a triangle none names (a sliver between named
+        // centres) or on nothing: the texel toward it decides, covered where its centre holds
+        // the top's mesh or a surface in the near layer. A sample over another object's named
+        // surface below, or toward an empty texel, stays open (a thin caster's sides).
+        if VSM_SIL_FILL && vsm_sil_z[s]<0.0 && own!=0u {
+            let o=vsm_sample(s);
+            let d=vec2<i32>(select(0,select(-1,1,o.x>0.0),abs(o.x)>0.25),select(0,select(-1,1,o.y>0.0),abs(o.y)>0.25));
+            let j=u32(i32(ce)+d.x+d.y*18);
+            let nid=vsm_wg_sil_id[j];
+            if nid!=VSM_SIL_OUT && nid!=0u && ((nid>>bits)==own || vsm_wg_sil_h[j]>=lowest) {covered=true;}
+        }
+        if covered {cover|=1u<<s;}
+    }
+    // Resolved geometry only: the ids name an outline's triangles where those are texel-sized or
+    // larger. Where a covered sample's triangle is smaller than VSM_SIL_MIN_AREA texels (a
+    // coarse level's detail, which the candidates name in part), the texel keeps the map's own
+    // answer, as without the fraction: no count, no promotion.
+    for(var s=0u;s<VSM_SAMPLES;s+=1u) {
+        if (cover&(1u<<s))!=0u && vsm_sil_tid[s]!=0u && vsm_sil_area[s]<VSM_SIL_MIN_AREA {return;}
+    }
+    // The silhouette map: the outline crossing this texel as a line. Of the edges of the near
+    // layer's triangles (a plane reaching the near layer at the texel) that cross the texel's
+    // square, an outline edge (its adjacency neighbour missing or facing away from the light) with
+    // no covered sample beyond it (another surface's cover there means the near layer goes on),
+    // the one nearest the centre. Its line holds wherever it crosses, whether or not a sample saw
+    // it: a corner of a full texel past the outline, or of an empty one under it, is a texel-wide
+    // error the samples cannot see. At a convex corner two edges cross: the nearer serves, the
+    // other is lost inside this texel. Where no edge crosses but the samples are split (a cut by
+    // the peel gap on a slope), their centroid side, placed by their count.
+    var best=vsm_sil_best;var bid=vsm_sil_bid;
+    var near=2.0;var ln=vec2<f32>(0.0);var ls=0.0;var lid=0u;var lz=0.0;
+    for(var m=0u;m<select(0u,n,VSM_SIL_GEOM);m+=1u) {
+        let tri=vsm_id_triangle(ids[m],level);
+        let area=vsm_cross(tri[0].xy,tri[1].xy,tri[2].xy);
+        if area==0.0 {continue;}
+        let side=sign(area);
+        let z=vec3<f32>(tri[0].z,tri[1].z,tri[2].z);
+        let placement=ids[m]>>bits;
+        let batch=primary_placements[placement-1u]&0x1fffffffu;
+        let primitive=ids[m]&((1u<<bits)-1u);
+        for(var e=0u;e<3u;e+=1u) {
+            let a=tri[e].xy;let d=tri[(e+1u)%3u].xy-a;
+            let len=length(d);
+            if len==0.0 {continue;}
+            let nn=vec2<f32>(-d.y,d.x)*(side/len);
+            let off=-dot(centre-a,nn);
+            // Crossing the square: the line within its half-diagonal along nn, and the segment
+            // over the square's extent along the edge.
+            let hr=0.5*(abs(nn.x)+abs(nn.y));
+            if abs(off)>=hr || abs(off)>=near {continue;}
+            let du=d/len;
+            let pc=dot(centre-a,du);let hw=0.5*(abs(du.x)+abs(du.y));
+            if pc+hw<0.0 || pc-hw>len {continue;}
+            // No covered sample beyond the line.
+            var beyond=0u;
+            for(var q=0u;q<8u;q+=1u) {
+                if dot(centre+vsm_sample(q)-a,nn)<0.0 {beyond|=1u<<q;}
+            }
+            if (cover&beyond)!=0u {continue;}
+            // The texel's own occluder: the top's mesh (an outline sits on the mesh's steepest faces,
+            // below its top by up to its thickness: a rail's tube outlines at mid-height), or any
+            // mesh where the texel holds none.
+            if bid!=0u && placement!=(bid>>bits) {continue;}
+            // The triangle's plane at the middle of the part inside the square.
+            let pm=centre+nn*(0.5*(off+hr));
+            let wb=vec3<f32>(vsm_cross(tri[1].xy,tri[2].xy,pm),vsm_cross(tri[2].xy,tri[0].xy,pm),vsm_cross(tri[0].xy,tri[1].xy,pm))/area;
+            // (Within the triangle's own heights: a steep face's plane runs off past its extent.)
+            let zp=clamp(dot(wb,z),min(z.x,min(z.y,z.z)),max(z.x,max(z.y,z.z)));
+            // An outline edge.
+            let nb=vsm_neighbour(batch,primitive,e);
+            if nb!=VSM_MISSING {
+                let other=vsm_id_triangle((placement<<bits)|nb,level);
+                if sign(vsm_cross(other[0].xy,other[1].xy,other[2].xy))==side {continue;}
+            }
+            // The edge's own height where it passes nearest the centre (VSM_LINE_EDGE_TOP).
+            let ze=mix(tri[e].z,tri[(e+1u)%3u].z,clamp(pc/len,0.0,1.0));
+            near=abs(off);ln=nn;ls=off;lid=ids[m];lz=select(zp,ze,VSM_LINE_EDGE_TOP);
+        }
+    }
+    var k=countOneBits(cover);
+    var partial=k>0u && k<8u;
+    if near<2.0 {
+        // The line's part is the covered one: its triangle becomes the top where it stands above
+        // the texel's own (or the texel had none), and the count is its area's.
+        if VSM_LINE_EDGE_TOP {best=lz;bid=lid;} else if lid!=bid && lz>best {best=lz;bid=lid;}
+        k=clamp(u32(round(vsm_area_beyond(ln,ls)*8.0)),1u,7u);
+        partial=true;
+    } else {
+        // A promotion keeps the map's own answer reachable: with no near sample it is undone,
+        // and over all eight the texel counts as partial (7) so its centre's flag is stored.
+        if bid!=id && k==0u {best=h;bid=id;}
+        // Measurement (VSM_SIL_CROSS=false): a texel whose centre holds another mesh keeps it,
+        // with the map's own answer.
+        if !VSM_SIL_CROSS && id!=0u && (bid>>bits)!=(id>>bits) {best=h;bid=id;k=0u;partial=false;}
+        if bid!=id && k==8u {k=7u;partial=true;}
+        if partial {
+            ln=vsm_centroid_side(cover);
+            ls=vsm_area_offset(ln,f32(k)/8.0);
+        }
+    }
+    // The fold (vsm_fold) here, as no other pass writes this texel's samples: the count in the
+    // top word's low height bits (the raster cleared them) with any promotion, and the line.
+    // A promotion within the centre's own mesh raises the height only: the word keeps the triangle
+    // under the centre, which the Disk lookup's exact hard edges name (vd_edge_triangles; with a
+    // neighbouring triangle of the caster named instead, pixels whose cone that triangle misses
+    // came out fully lit inside Showcase's shadows).
+    let word_id=select(bid,id,id!=0u && (bid>>bits)==(id>>bits));
+    if bid!=id || partial {
+        atomicStore(&vsm_top_map[i],(u64((bitcast<u32>(best)&~7u)|select(0u,k,partial))<<32u)|u64(word_id));
+    }
+    // The texel's binary answer (vd_side, vd_near): its centre's own surface is in the near
+    // layer of the final top or of its mesh (a promotion within one caster keeps it).
+    if partial {vsm_cover_line(i,ln,ls,id!=0u && (h>=best-gap || (id>>bits)==(bid>>bits)));}
+    // The open samples' own surface: another object under the top (the floor, or a second
+    // caster the top hides). The rank shares open those directions, so that surface goes where
+    // the lookup reads a second surface, the peel word (VD_PEEL2), when it stands above the
+    // centre's: its column then blocks them at its own height.
+    if partial && VSM_SIL_UNDER {
+        var low=-1.0;var lid=0u;
+        for(var s=0u;s<VSM_SAMPLES;s+=1u) {
+            if (cover&(1u<<s))==0u && vsm_sil_z[s]>low {low=vsm_sil_z[s];lid=vsm_sil_tid[s];}
+        }
+        let pw=atomicLoad(&vsm_peel_map[i]);
+        if lid!=0u && (u32(pw&0xfffffffflu)==0u || low>bitcast<f32>(u32(pw>>32u))) {
+            atomicStore(&vsm_peel_map[i],(u64(bitcast<u32>(low))<<32u)|u64(lid));
+        }
+    }
+}
+// The share of the unit square past offset s along unit n (vsm_area_offset's inverse).
+fn vsm_area_beyond(n:vec2<f32>,s:f32)->f32 {
+    let u=max(abs(n.x),abs(n.y));let v=min(abs(n.x),abs(n.y));
+    let h=0.5*(u+v);
+    if s>=h {return 0.0;}
+    if s<=-h {return 1.0;}
+    let r=0.5*(u-v);
+    if s>r {return (h-s)*(h-s)/(2.0*u*v);}
+    if s< -r {return 1.0-(h+s)*(h+s)/(2.0*u*v);}
+    return 0.5-s/u;
+}
+// A line texel's column top: its outline edge's height where the edge passes nearest the centre.
+// Along a straight outline that height is steady; the surface's own height at the texel (its
+// samples' or centre's) moves with where the outline crosses each texel, a texel-periodic
+// sawtooth in the shadow's edge wherever the occluder slopes (a rail's tube). But the edge can
+// sit far under the texel's top (a tube's mid-height), leaving a column too short for the part
+// above it: off by default (the texel's own top, raised to the edge's part where that stands
+// higher). Measurement: `RENDERLAB_VSM=VSM_LINE_EDGE_TOP=true`.
+override VSM_LINE_EDGE_TOP:bool=false;
+// The edge line (`RENDERLAB_VSM_FRACTION=line`, virtual_shadow_gpu.rs `fraction_mode`; parked: it
+// failed Glint's rail with a one-texel sawtooth, leaked at contacts and cost 3 ms): lines at every
+// texel an outline edge crosses. Off (the covered fraction): lines only where the samples split,
+// their centroid side placed by their count, for the rank shares (vd_side).
+override VSM_SIL_GEOM:bool=false;
+override VSM_SIL_CROSS:bool=true;
+// Measurement (`RENDERLAB_VSM=VSM_SIL_RING=true`): the adjacency ring at every marked texel.
+override VSM_SIL_RING:bool=false;
+// Samples no candidate covers take the texel toward them (vsm_silhouette); off: measurement.
+override VSM_SIL_FILL:bool=true;
+// The open samples' surface into the peel word (vsm_silhouette); off: measurement.
+override VSM_SIL_UNDER:bool=true;
+// The least triangle area (texels) whose outline the ids resolve (vsm_silhouette).
+override VSM_SIL_MIN_AREA:f32=1.0;
+// The coarsest level (index) the silhouette pass serves: the fraction's premise, one caster
+// outline crossing a texel, holds where texels are small against the geometry they hold. From
+// level 4 (3 cm texels and up) a texel holds much of a caster's detail, and on Glint's goal view a
+// tower under an overhead structure 90 m up read 5 of 8 samples covered where the structure
+// covers all of them (rank shares then opened 3/8 of its directions inside a deep shadow).
+// Coarser levels keep the map's own answer, as without the fraction. Measurement:
+// `RENDERLAB_VSM=VSM_SIL_MAX_LEVEL=<n>u`.
+override VSM_SIL_MAX_LEVEL:u32=3u;
+// Candidate triangles a silhouette texel can hold: 8 neighbours, its own two words, adjacency.
+const VSM_SIL_IDS:u32=32u;
+// One silhouette texel's per-sample state (vsm_sil_triangle): the highest covering height and
+// its triangle's reach, and the highest covered part's mean height and triangle.
+var<private> vsm_sil_z:array<f32,8>;
+var<private> vsm_sil_reach:array<f32,8>;
+// Each sample's highest covering triangle (its map id; 0: none) and its area in texels.
+var<private> vsm_sil_tid:array<u32,8>;
+var<private> vsm_sil_area:array<f32,8>;
+var<private> vsm_sil_best:f32;
+var<private> vsm_sil_bid:u32;
+// Triangle `tid` against the texel's samples: updates the per-sample state; its inside mask.
+fn vsm_sil_triangle(tid:u32,level:u32,centre:vec2<f32>)->u32 {
+    let tri=vsm_id_triangle(tid,level);
+    let a=tri[0].xy;let b=tri[1].xy;let c=tri[2].xy;
+    let area=vsm_cross(a,b,c);
+    if area==0.0 {return 0u;}
+    let e1=b-a;let e2=c-a;
+    let z=vec3<f32>(tri[0].z,tri[1].z,tri[2].z);
+    let g=vec2<f32>((z.y-z.x)*e2.y-(z.z-z.x)*e1.y,(z.z-z.x)*e1.x-(z.y-z.x)*e2.x)/area;
+    let reach=0.875*(abs(g.x)+abs(g.y));
+    var sum=0.0;var mask=0u;
+    for(var s=0u;s<VSM_SAMPLES;s+=1u) {
+        let p=centre+vsm_sample(s);
+        let wb=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p))/area;
+        if any(wb<vec3<f32>(0.0)) {continue;}
+        let zs=dot(wb,z);
+        if zs>vsm_sil_z[s] {vsm_sil_z[s]=zs;vsm_sil_reach[s]=reach;vsm_sil_tid[s]=tid;vsm_sil_area[s]=0.5*abs(area);}
+        sum+=zs;mask|=1u<<s;
+    }
+    let count=countOneBits(mask);
+    if count!=0u && sum/f32(count)>vsm_sil_best {vsm_sil_best=sum/f32(count);vsm_sil_bid=tid;}
+    return mask;
+}
+// The pass over each drawn page's texels, a 16x16 block at a time: dense, one workgroup per page
+// slot (its dirty rectangle).
+@compute @workgroup_size(256) fn vsm_silhouette_dense(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=group.x;
+    if VSM_SIL_OFF {return;}
+    if li==0u {vsm_wg_sil_dirty=vsm_render[slot];}
+    let w=workgroupUniformLoad(&vsm_wg_sil_dirty);
+    if w==0u {return;}
+    let pages=vsm.counts.y;let per=pages*pages;
+    let level=slot/per;let local=slot%per;
+    let side=pages*VSM_PAGE;
+    let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
+    let lo=vsm_dirty_lo(w)/16u;let hi=vsm_dirty_hi(w)/16u;
+    for(var by=lo.y;by<=hi.y;by+=1u) {
+        for(var bx=lo.x;bx<=hi.x;bx+=1u) {
+            let q0=vec2<u32>(bx,by)*16u;
+            vsm_sil_load(level,vec2<i32>(corner+q0),li);
+            workgroupBarrier();
+            let q=q0+vec2<u32>(li%16u,li/16u);
+            if vsm_dirty_has(w,q) {
+                let t=corner+q;
+                vsm_silhouette(level,t,(level*side+t.y)*side+t.x,(li/16u+1u)*18u+li%16u+1u);
+            }
+            workgroupBarrier();
+        }
+    }
+}
+// Sparse: one workgroup per page drawn this frame.
+@compute @workgroup_size(256) fn vsm_silhouette_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    if VSM_SIL_OFF {return;}
+    let v=vsm_rendered(group.x);
+    let n=vsm.counts.y;let level=v/(n*n);
+    let slot=vsm_pages[vsm_section(2u)+v];
+    let corner=vsm_entry_page(level,v)*VSM_PAGE;
+    for(var b=0u;b<(VSM_PAGE/16u)*(VSM_PAGE/16u);b+=1u) {
+        let q0=vec2<u32>(b%(VSM_PAGE/16u),b/(VSM_PAGE/16u))*16u;
+        vsm_sil_load(level,vec2<i32>(corner+q0),li);
+        workgroupBarrier();
+        let q=q0+vec2<u32>(li%16u,li/16u);
+        vsm_silhouette(level,corner+q,slot*VSM_PAGE*VSM_PAGE+q.y*VSM_PAGE+q.x,(li/16u+1u)*18u+li%16u+1u);
+        workgroupBarrier();
+    }
+}
+// The fold over the texels each page drew this frame: sparse, one workgroup per rasterized page.
+@compute @workgroup_size(256) fn vsm_fold_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
+    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {vsm_fold(slot*VSM_PAGE*VSM_PAGE+k);}
+}
+// Dense: one workgroup per page slot, the flagged slots' dirty rectangles (as vsm_clear).
+@compute @workgroup_size(256) fn vsm_fold_dense(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=group.x;
+    let w=vsm_render[slot];
+    if w==0u {return;}
+    let pages=vsm.counts.y;let per=pages*pages;
+    let level=slot/per;let local=slot%per;
+    let side=pages*VSM_PAGE;
+    let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
+    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
+        let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        if !vsm_dirty_has(w,q) {continue;}
+        let t=corner+q;
+        vsm_fold((level*side+t.y)*side+t.x);
+    }
+}
 // Zeroes both layers of every page flagged for this frame: one workgroup per page slot.
 @compute @workgroup_size(256) fn vsm_clear(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let slot=group.x;
@@ -488,7 +951,7 @@ fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>2u],~(255u<<((i&3u)*8u)));}
         let i=(level*side+t.y)*side+t.x;
         atomicStore(&vsm_top_map[i],0lu);
         atomicStore(&vsm_peel_map[i],0lu);
-        if VSM_FRACTION {vsm_cover_clear(i);}
+        if VSM_MSAA {vsm_cover_clear(i);}
     }
 }
 // The map word of one caster fragment at texel t of `level` (normalized height in [0,1]).
@@ -503,7 +966,9 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     if vsm_sparse() {
         i=vsm_pages[vsm_section(2u)+v]*VSM_PAGE*VSM_PAGE+(t.y%VSM_PAGE)*VSM_PAGE+t.x%VSM_PAGE;
     }
-    let value=(u64(bitcast<u32>(clamp(height,0.0,1.0)))<<32u)|u64(id);
+    // Under VSM_FRACTION the low three height bits are the covered count's (vsm_fold), zero here.
+    let hb=bitcast<u32>(clamp(height,0.0,1.0));
+    let value=(u64(select(hb,hb&~7u,VSM_FRACTION))<<32u)|u64(id);
     if VSM_PEEL_PASS {
         // Only one triangle of a watertight surface covers a texel centre, so this is the
         // next surface down.
@@ -521,16 +986,44 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
 }
 // ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow_gpu.rs `fraction_on`) ----
 // The raster samples each texel at the eight positions of the 8x multisample pattern instead of
-// its centre. The top layer keeps the highest surface over those samples (the nearest covered
-// one where a caster covers part of the texel; where none does, the surface under the samples, as
-// today). The peel pass, which runs after the top one, keeps the peel layer at the centre as
-// today and marks in vsm_cover (a byte a texel at the top map's index) every sample whose covering
-// surface lies within the peel gap of that top: the near layer, the union of its triangles. The
-// Disk lookup lets a top column block that share of the directions it would block.
+// its centre. The top layer keeps the highest surface over those samples, each at its plane's
+// height at the texel centre (a caster covering part of the texel wins over the surface under it;
+// where none does, the surface under the samples, as today). The peel pass, which runs after the
+// top one, keeps the peel layer at the centre as today and marks in vsm_cover (a byte a texel at the
+// top map's index, the raster's scratch) every sample whose covering surface lies within the peel
+// gap of that top (widened by the surface's own slope): the near layer, the union of its
+// triangles. vsm_fold then moves the count into the top word, and the Disk lookup lets a top
+// column block that share of the directions it would block.
 override VSM_FRACTION:bool=false;
+// The multisampled raster (RENDERLAB_VSM_FRACTION=msaa): the comparison for the default, which
+// rasterizes at texel centres and takes silhouette texels' samples from the map's ids
+// (vsm_silhouette).
+override VSM_MSAA:bool=false;
+// Samples a texel (virtual_shadow_gpu.rs `fraction_samples`): the hardware raster's attachment
+// count, 8 where the device takes it, else 4, with that count's standard positions.
+override VSM_SAMPLES:u32=8u;
+// Measurement screens of the fraction raster's cost (`RENDERLAB_VSM=NAME=value`): the peel
+// pass's sample bits (VSM_FR_BITS), and the hardware or the software raster on its 1x path
+// (VSM_FR_HW1X, VSM_FR_SW1X).
+override VSM_FR_BITS:bool=true;
+// VSM_FR_DISCARD: the multisampled raster with fragments that do nothing (its coverage cost alone).
+override VSM_FR_DISCARD:bool=false;
+override VSM_FR_HW1X:bool=false;
+override VSM_FR_SW1X:bool=false;
 @group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
 // Sample k's offset from the texel centre, in sixteenths of a texel (the D3D 8x pattern).
 fn vsm_sample(k:u32)->vec2<f32> {
+    if VSM_SAMPLES==4u {
+        // The standard 4x pattern.
+        var o=vec2<f32>(2.0,6.0);
+        switch k {
+            case 0u {o=vec2<f32>(-2.0,-6.0);}
+            case 1u {o=vec2<f32>(6.0,-2.0);}
+            case 2u {o=vec2<f32>(-6.0,2.0);}
+            default {}
+        }
+        return o/16.0;
+    }
     var o=vec2<f32>(7.0,-7.0);
     switch k {
         case 0u {o=vec2<f32>(1.0,-3.0);}
@@ -556,21 +1049,28 @@ fn vsm_texel_index(level:u32,t:vec2<u32>)->u32 {
 }
 fn vsm_cross(a:vec2<f32>,b:vec2<f32>,p:vec2<f32>)->f32 {return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);}
 // One triangle (vertices a, b, c in level texels, counter-clockwise, normalized heights z) at
-// texel t under VSM_FRACTION: the top pass writes its highest covered sample; the peel pass
-// writes its centre into the peel layer as vsm_write does and marks its near-layer samples.
+// texel t under VSM_FRACTION. The top pass writes, where any sample of the texel is covered, the
+// triangle's plane at the texel centre clamped to its height range: where the centre is covered
+// that is the height the centre-sampled raster stores, so a surface steep in light space (ground
+// under a low sun) does not rise by its height change across the texel and shadow itself. The peel
+// pass writes its centre into the peel layer as vsm_write does and marks its near-layer samples:
+// those within the peel gap of the top, widened by this triangle's own height change across the
+// samples, so a steep surface's lower samples stay in its near layer.
 fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,z:vec3<f32>,id:u32) {
     let area=vsm_cross(a,b,c);
     if area<=0.0 {return;}
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
+    // The plane's gradient, normalized height per texel.
+    let e1=b-a;let e2=c-a;
+    let g=vec2<f32>((z.y-z.x)*e2.y-(z.z-z.x)*e1.y,(z.z-z.x)*e1.x-(z.y-z.x)*e2.x)/area;
     if !VSM_PEEL_PASS {
-        var zmax=-1.0;
-        for(var k=0u;k<8u;k+=1u) {
+        for(var k=0u;k<VSM_SAMPLES;k+=1u) {
             let p=centre+vsm_sample(k);
-            let w=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p));
-            if any(w<vec3<f32>(0.0)) {continue;}
-            zmax=max(zmax,dot(w,z)/area);
+            if min(min(vsm_cross(b,c,p),vsm_cross(c,a,p)),vsm_cross(a,b,p))<0.0 {continue;}
+            let zc=clamp(z.x+dot(g,centre-a),min(min(z.x,z.y),z.z),max(max(z.x,z.y),z.z));
+            vsm_write(level,t,zc,id);
+            return;
         }
-        if zmax>=0.0 {vsm_write(level,t,zmax,id);}
         return;
     }
     let wc=vec3<f32>(vsm_cross(b,c,centre),vsm_cross(c,a,centre),vsm_cross(a,b,centre));
@@ -578,15 +1078,47 @@ fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,
     let i=vsm_texel_index(level,t);
     if i==VSM_NONE {return;}
     let top=bitcast<f32>(u32(atomicLoad(&vsm_top_map[i])>>32u));
-    let gap=VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z;
+    // The samples lie within 7/16 of a texel of the centre on each axis.
+    let lowest=top-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z-0.875*(abs(g.x)+abs(g.y));
     var bits=0u;
-    for(var k=0u;k<8u;k+=1u) {
+    for(var k=0u;k<VSM_SAMPLES;k+=1u) {
         let p=centre+vsm_sample(k);
         let w=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p));
         if any(w<vec3<f32>(0.0)) {continue;}
-        if dot(w,z)/area>=top-gap {bits|=1u<<k;}
+        if dot(w,z)/area>=lowest {bits|=1u<<k;}
     }
-    if bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
+    if VSM_FR_BITS && bits!=0u {atomicOr(&vsm_cover[i>>1u],bits<<vsm_cover_shift(i));}
+}
+// The hardware raster's fragment under VSM_FRACTION: `mask` is the samples of texel t the
+// rasterizer found inside the triangle, `centre` its plane's height at the texel centre
+// (extrapolated where the centre is outside), `inside` its height at a covered point, `g` its
+// gradient and `covered` whether it covers the centre. The top pass writes the covered point's
+// height (the centre's where the texel is inside); the peel pass writes the centre into the peel
+// layer as vsm_write does and marks the covered samples within the peel gap of the top, widened by
+// the triangle's slope.
+fn vsm_fraction_hw(level:u32,t:vec2<u32>,centre:f32,inside:f32,covered:bool,g:vec2<f32>,id:u32,mask:u32) {
+    if mask==0u {return;}
+    if !VSM_PEEL_PASS {
+        vsm_write(level,t,inside,id);
+        return;
+    }
+    if covered {vsm_write(level,t,centre,id);}
+    let i=vsm_texel_index(level,t);
+    if i==VSM_NONE {return;}
+    let top=bitcast<f32>(u32(atomicLoad(&vsm_top_map[i])>>32u));
+    let reach=abs(g.x)+abs(g.y);
+    let lowest=top-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z-0.875*reach;
+    var bits=0u;
+    var m=mask&((1u<<VSM_SAMPLES)-1u);
+    // No sample lies more than 7/16 of a texel from the centre on either axis: where the plane
+    // there, less that reach, clears the floor, every covered sample is near (a texel inside).
+    if centre-0.4375*reach>=lowest {bits=m;m=0u;}
+    while m!=0u {
+        let k=firstTrailingBit(m);
+        m&=m-1u;
+        if centre+dot(g,vsm_sample(k))>=lowest {bits|=1u<<k;}
+    }
+    if VSM_FR_BITS && bits!=0u {atomicOr(&vsm_cover[i>>1u],bits<<vsm_cover_shift(i));}
 }
 // Placement + 1 and primitive, so the lookup can recognize the receiver's own 1-ring.
 fn vsm_cluster_id(c:VsmCluster,batch:u32,local:u32)->u32 {
@@ -632,13 +1164,13 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     let side=i32(vsm.counts.y*VSM_PAGE);
     // Texel centres are at 256x+128 subpixels; the covered fraction's samples reach half a
     // texel from them.
-    let grow=select(0,128,VSM_FRACTION);
+    let grow=select(0,128,VSM_MSAA && !VSM_FR_SW1X);
     let lo=max(min(a,min(b,d))-vec2<i32>(grow),vec2<i32>(0));
     let hi=min(max(a,max(b,d))+vec2<i32>(grow),vec2<i32>(side*256-1));
     let first=(lo-vec2<i32>(128)+vec2<i32>(255))>>vec2<u32>(8u);
     let last=(hi-vec2<i32>(128))>>vec2<u32>(8u);
     let id=vsm_cluster_id(c,batch,li);
-    if VSM_FRACTION {
+    if VSM_MSAA && !VSM_FR_SW1X {
         for(var y=first.y;y<=last.y;y+=1) {
             for(var x=first.x;x<=last.x;x+=1) {
                 vsm_fraction_texel(level,vec2<u32>(u32(x),u32(y)),s0.xy,s1.xy,s2.xy,vec3<f32>(s0.z,s1.z,s2.z),id);
@@ -660,8 +1192,9 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
 // slots collapse to a point. The attachment only sizes the raster area.
 struct VsmHw {
     @builtin(position) position:vec4<f32>,@location(0) @interpolate(flat) id:u32,@location(1) height:f32,
-    // VSM_FRACTION: the triangle in window texels (counter-clockwise) and its heights.
-    @location(2) @interpolate(flat) a:vec4<f32>,@location(3) @interpolate(flat) c:vec2<f32>,@location(4) @interpolate(flat) z:vec3<f32>,
+    // VSM_FRACTION: the height at a covered point of the texel (centroid sampling: the centre
+    // where all samples are covered), and the vertex weights at the centre (all >= 0 inside).
+    @location(2) @interpolate(perspective,centroid) inside:f32,@location(3) weights:vec3<f32>,
 };
 @vertex fn vs_vsm_cluster(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->VsmHw {
     let level=vsm_pass.level;
@@ -672,27 +1205,6 @@ struct VsmHw {
     var out:VsmHw;
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
-    if VSM_FRACTION {
-        // Six vertices a triangle slot: its box grown by half a texel (two triangles), so every
-        // texel a sample of it can fall in gets a fragment; the fragment tests the samples.
-        let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/6u;let k=vertex%6u;
-        if local>=(c.counts&255u) {return out;}
-        let batch=primary_placements[c.placement]&0x1fffffffu;
-        let t=vsm_cluster_data[batch].data[c.triangles+local];
-        let s0=vsm_cluster_vertex(c,batch,t&255u,level);
-        var s1=vsm_cluster_vertex(c,batch,(t>>8u)&255u,level);
-        var s2=vsm_cluster_vertex(c,batch,(t>>16u)&255u,level);
-        if vsm_cross(s0.xy,s1.xy,s2.xy)<0.0 {let q=s1;s1=s2;s2=q;}
-        let lo=min(min(s0.xy,s1.xy),s2.xy)-vec2<f32>(0.5);let hi=max(max(s0.xy,s1.xy),s2.xy)+vec2<f32>(0.5);
-        let far=k==1u || k==2u || k==4u;let high=k==2u || k==4u || k==5u;
-        let q=vec2<f32>(select(lo.x,hi.x,far),select(lo.y,hi.y,high));
-        let size=f32(vsm_area());
-        let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*size;
-        out.position=vec4<f32>((q.x-o.x)/size*2.0-1.0,1.0-(q.y-o.y)/size*2.0,0.5,1.0);
-        out.a=vec4<f32>(s0.xy,s1.xy);out.c=s2.xy;out.z=vec3<f32>(s0.z,s1.z,s2.z);
-        out.id=vsm_cluster_id(c,batch,local);
-        return out;
-    }
     let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/3u;
     if local<(c.counts&255u) {
         let batch=primary_placements[c.placement]&0x1fffffffu;
@@ -702,16 +1214,22 @@ struct VsmHw {
         let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*area;
         out.position=vec4<f32>((s.x-o.x)/area*2.0-1.0,1.0-(s.y-o.y)/area*2.0,0.5,1.0);
         out.height=s.z;
+        out.inside=s.z;
+        out.weights=vec3<f32>(f32(vertex%3u==0u),f32(vertex%3u==1u),f32(vertex%3u==2u));
         out.id=vsm_cluster_id(c,batch,local);
     }
     return out;
 }
-@fragment fn fs_vsm_cluster(input:VsmHw) {
+@fragment fn fs_vsm_cluster(input:VsmHw,@builtin(sample_mask) mask:u32) {
+    // The plane's gradient, normalized height per texel (a pixel is a texel, the projection is
+    // orthographic): taken before any branch, as derivatives must be.
+    let g=vec2<f32>(dpdx(input.height),dpdy(input.height));
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
     let t=vec2<u32>(input.position.xy)+o;
-    if VSM_FRACTION {
-        vsm_fraction_texel(vsm_pass.level,t,input.a.xy,input.a.zw,input.c,input.z,input.id);
+    if VSM_MSAA && VSM_FR_DISCARD {return;}
+    if VSM_MSAA && !VSM_FR_HW1X {
+        vsm_fraction_hw(vsm_pass.level,t,input.height,input.inside,all(input.weights>=vec3<f32>(0.0)),g,input.id,mask);
         return;
     }
     vsm_write(vsm_pass.level,t,input.height,input.id);

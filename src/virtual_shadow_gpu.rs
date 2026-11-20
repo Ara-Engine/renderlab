@@ -525,6 +525,11 @@ struct Pipelines {
     mip_sparse: Owned<wgpu::ComputePipeline>,
     /// The Disk lookup's outline bits per drawn page (vsm_outline_dense, vsm_outline_sparse).
     outline: [Owned<wgpu::ComputePipeline>; 2],
+    /// The covered fraction's count into the top words of the drawn texels (vsm_fold_dense,
+    /// vsm_fold_sparse; `fraction_on`).
+    fold: [Owned<wgpu::ComputePipeline>; 2],
+    /// The covered fraction's silhouette texels from ids (vsm_silhouette_dense, _sparse).
+    silhouette: [Owned<wgpu::ComputePipeline>; 2],
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -644,9 +649,12 @@ struct Resources {
     reach: Owned<wgpu::Buffer>,
     /// The Disk lookup's edge pixel counts (WGSL `vd_edge_count`).
     edges: Owned<wgpu::Buffer>,
-    /// The covered fraction (`fraction_on`): a byte a texel, the top map's index; four bytes
-    /// when off.
+    /// The covered fraction's lines (`fraction_on`), 16 bits a texel at the top map's index: a
+    /// partly covered texel's covered part as a line (WGSL `vsm_cover_line`), and while the
+    /// multisampled raster runs its sample bits; four bytes when off.
     cover: Owned<wgpu::Buffer>,
+    /// The covered fraction's side table (`side_table`, WGSL `vd_sides`), written once.
+    sides: Owned<wgpu::Buffer>,
     /// The Disk lookup's per-pixel answer history, two halves ping-ponged by frame (WGSL
     /// `vd_history`), and the previous frame's world-to-clip matrix and half.
     history: Owned<wgpu::Buffer>,
@@ -838,6 +846,30 @@ fn disk_quantile(u: f64) -> f64 {
     }
     0.5 * (lo + hi)
 }
+/// The covered fraction's side table (WGSL `vd_sides`): for each of `SIDE_ANGLES` directions n
+/// of a texel's covered side, the masks of the r disk samples furthest along n, r in 0..=64
+/// (two u32s each). Sample s sits at the disk quantiles of its x rank s and y rank
+/// `DISK_Y_RANK[s]`, as in `disk_pattern`.
+const SIDE_ANGLES: usize = 32;
+fn side_table() -> Vec<u8> {
+    let quantile = |rank: usize| disk_quantile((rank as f64 + 0.5) / 64.0);
+    let mut bytes = Vec::with_capacity(SIDE_ANGLES * 65 * 8);
+    for a in 0..SIDE_ANGLES {
+        let angle = a as f64 * std::f64::consts::TAU / SIDE_ANGLES as f64;
+        let along = |s: usize| angle.cos() * quantile(s) + angle.sin() * quantile(usize::from(DISK_Y_RANK[s]));
+        let mut order: Vec<usize> = (0..64).collect();
+        order.sort_by(|&x, &y| along(y).total_cmp(&along(x)));
+        let mut mask = 0u64;
+        for r in 0..=64 {
+            if r > 0 {
+                mask |= 1 << order[r - 1];
+            }
+            bytes.extend_from_slice(&(mask as u32).to_ne_bytes());
+            bytes.extend_from_slice(&((mask >> 32) as u32).to_ne_bytes());
+        }
+    }
+    bytes
+}
 /// `VdFrame`'s constant tail: per k in 0..=64 the mask of the samples whose y rank is at least
 /// k (two u32s each, padded to 33 vec4s), then the 64 sample positions.
 fn disk_pattern() -> Vec<u8> {
@@ -931,7 +963,7 @@ pub(super) fn shader_source() -> String {
     #[cfg(not(test))]
     let variant: Option<String> = None;
     // P-RELIT: the restart-zone tests over VsmFrame's copy (vsm_prepare's batches).
-    format!(
+    let source = format!(
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}\n{}",
         crate::TRACED_DRAWS,
         variant
@@ -944,14 +976,73 @@ pub(super) fn shader_source() -> String {
         &format!("override VSM_FRACTION:bool={};", fraction_on()),
         1,
     )
+    .replacen(
+        "override VSM_MSAA:bool=false;",
+        &format!("override VSM_MSAA:bool={};", fraction_mode() == 2),
+        1,
+    )
+    .replacen(
+        "override VSM_SIL_GEOM:bool=false;",
+        &format!("override VSM_SIL_GEOM:bool={};", fraction_mode() == 3),
+        1,
+    );
+    // Measurement: `RENDERLAB_VSM=NAME=value,...` sets the page module's overrides.
+    let mut source: String = source;
+    for (name, value) in std::env::var("RENDERLAB_VSM")
+        .iter()
+        .flat_map(|list| list.split(','))
+        .filter_map(|item| item.split_once('='))
+    {
+        let declaration = format!("override {name}:");
+        let Some(at) = source.find(&declaration) else {
+            panic!("RENDERLAB_VSM: no override named {name}");
+        };
+        let equals = at + source[at..].find('=').unwrap() + 1;
+        let end = equals + source[equals..].find(';').unwrap();
+        source.replace_range(equals..end, value);
+    }
+    source
 }
-/// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): the page raster samples
-/// each texel at eight positions and marks the near layer's covered samples in a byte plane
-/// (WGSL `vsm_cover`); the Disk lookup lets a top column block that share of its directions.
+/// The covered fraction (off by default; `RENDERLAB_VSM_FRACTION=1` turns it on, with the
+/// receiver jitter off, WGSL `VD_JITTER`): each silhouette texel's
+/// near-layer coverage becomes a count of eighths and its covered side (WGSL `vsm_cover`), and
+/// the Disk lookup lets a partly covered column block that share of its directions from that
+/// side where the sun's cone there is a texel wide or more, the texel binary where it is
+/// narrower (WGSL `vd_side`). `=1` takes them from the map's ids after a raster at texel centres
+/// (WGSL `vsm_silhouette`); `=msaa` from a multisampled raster, the comparison; `=line` the
+/// parked edge-line form.
 fn fraction_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_FRACTION").is_ok_and(|v| v.trim() == "1"))
+    fraction_mode() != 0
 }
+/// 0 off, 1 from ids, 2 multisampled, 3 from ids as edge lines (`=line`, parked: WGSL
+/// `VSM_SIL_GEOM`, `VD_SIDE_LINE`) (`fraction_on`).
+fn fraction_mode() -> u8 {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("RENDERLAB_VSM_FRACTION").as_deref().map(str::trim) {
+        Ok("1") => 1,
+        Ok("msaa") => 2,
+        Ok("line") => 3,
+        _ => 0,
+    })
+}
+/// The covered fraction's samples a texel (WGSL `VSM_SAMPLES`): the hardware raster runs on a
+/// multisampled attachment of this count and reads each fragment's sample mask. 8 where the device
+/// takes more than 4 samples (TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES), else 4; 1 when off.
+fn fraction_samples(device: &wgpu::Device) -> u32 {
+    // Measurement: `RENDERLAB_VSM_FRACTION_SAMPLES=4` takes the 4x attachment on any device.
+    let forced = std::env::var("RENDERLAB_VSM_FRACTION_SAMPLES").ok().and_then(|v| v.trim().parse().ok());
+    if fraction_mode() != 2 {
+        1
+    } else if let Some(samples) = forced {
+        samples
+    } else if device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+        8
+    } else {
+        4
+    }
+}
+/// The multisampled attachment's format: one byte a sample, never written.
+const FRACTION_AREA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
 /// The walk-record build module (N8g): the shared draw-slot count, then
 /// shaders/virtual_shadow_records.wgsl.
@@ -1027,6 +1118,28 @@ pub(super) fn disk_source() -> String {
         "override VD_EDGES:bool=false;",
         &format!("override VD_EDGES:bool={};", edges_on()),
     );
+    // Exact hard edges (`RENDERLAB_VD_HARD_EDGES=0` keeps the map's texels there).
+    let edges = "override VD_HARD_EDGES:bool=true;";
+    assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
+    source = source
+        .replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
+        .replacen(
+            "override VD_FRACTION:bool=false;",
+            &format!("override VD_FRACTION:bool={};", fraction_on()),
+            1,
+        )
+        .replacen(
+            "override VD_SIDE_LINE:bool=false;",
+            &format!("override VD_SIDE_LINE:bool={};", fraction_mode() == 3),
+            1,
+        )
+        // The fraction smooths the staircase the receiver jitter dithered: off with it.
+        .replacen(
+            "override VD_JITTER:f32=0.5;",
+            if fraction_on() { "override VD_JITTER:f32=0.0;" } else { "override VD_JITTER:f32=0.5;" },
+            1,
+        );
+    // Last, so a measurement can set the switches above as well.
     for (name, value) in std::env::var("RENDERLAB_VD")
         .iter()
         .flat_map(|list| list.split(','))
@@ -1040,16 +1153,7 @@ pub(super) fn disk_source() -> String {
         let end = equals + source[equals..].find(';').unwrap();
         source.replace_range(equals..end, value);
     }
-    // Exact hard edges (`RENDERLAB_VD_HARD_EDGES=0` keeps the map's texels there).
-    let edges = "override VD_HARD_EDGES:bool=true;";
-    assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
     source
-        .replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
-        .replacen(
-            "override VD_FRACTION:bool=false;",
-            &format!("override VD_FRACTION:bool={};", fraction_on()),
-            1,
-        )
 }
 /// Merges moved casters' light-space rectangles, and their screen rectangles alike, the pair
 /// whose union adds the least area first, until at most `max` remain: many movers invalidate the
@@ -1320,7 +1424,7 @@ impl Renderer {
             dump_texture(&self.device, encoder, &fresh.world.texture, dir.join(format!("world-{frame}-{w}x{h}.bin")), frame);
             dump_texture(&self.device, encoder, &fresh.normal.texture, dir.join(format!("normal-{frame}-{w}x{h}.bin")), frame);
             // The clipmap's top layer (dense: levels x side x side words of (id, height bits)),
-            // and with the covered fraction its sample bytes (a byte a texel, the same index).
+            // and with the covered fraction its lines (16 bits a texel, the same index).
             let resources = self.view.virtual_shadows.as_ref().and_then(|s| s.resources.as_ref());
             let planes = resources.into_iter().flat_map(|r| {
                 [Some((&r.top, "top")), fraction_on().then_some((&r.cover, "cover"))].into_iter().flatten()
@@ -1593,8 +1697,17 @@ impl VirtualState {
                     storage(62, false, S::COMPUTE),
                     // Held views: the per-pixel answer history.
                     storage(63, false, S::COMPUTE),
-                    // The covered fraction's sample bits (`fraction_on`).
+                    // The covered fraction: the raster's sample bits and the side table.
                     storage(66, true, S::COMPUTE),
+                    layout_entry(
+                        68,
+                        S::COMPUTE,
+                        wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new((SIDE_ANGLES * 65 * 8) as u64),
+                        },
+                    ),
                 ],
             ),
         };
@@ -1697,6 +1810,10 @@ impl VirtualState {
             }),
             ResourceKind::ShaderModule,
         );
+        // The covered fraction's samples a texel: the attachment's when multisampled, else the 8x
+        // pattern (WGSL VSM_SAMPLES, on every entry of the page module).
+        let samples = fraction_samples(device);
+        let samples_constant = ("VSM_SAMPLES", f64::from(if samples > 1 { samples } else { 8 }));
         // Every pipeline, created at once (each takes one of the process's compile slots: prepare
         // holds four, frames one). Order matters: they are taken back in this order below.
         enum Job<'a> {
@@ -1708,7 +1825,12 @@ impl VirtualState {
             Compute(Owned<wgpu::ComputePipeline>),
             Render(Owned<wgpu::RenderPipeline>),
         }
-        let peel = |p: f64| vec![("VSM_PEEL_PASS", p)];
+        // The page module's constants: its own and the samples a texel.
+        let vsm = |mut c: Vec<(&'static str, f64)>| {
+            c.push(samples_constant);
+            c
+        };
+        let peel = |p: f64| vsm(vec![("VSM_PEEL_PASS", p)]);
         let jobs = vec![
             Job::Compute(&map_module, "vmap_resolve", &resolve_layout, vec![]),
             Job::Compute(&map_module, "vmap_mip_dispatch", &mip_dispatch_layout, vec![]),
@@ -1718,25 +1840,37 @@ impl VirtualState {
             Job::Compute(&disk_module, "vd_mark", &mark_layout, vec![]),
             Job::Compute(&disk_module, "vd_lookup", &disk_layout, vec![]),
             Job::Compute(&record_module, "vsm_record", &horizon_layout, vec![]),
-            Job::Compute(&module, "vsm_mark", &mark_layout, vec![]),
-            Job::Compute(&module, "vsm_compact", &compact_layout, vec![]),
-            Job::Compute(&module, "vsm_clear", &clear_layout, vec![]),
-            Job::Compute(&module, "vsm_cull", &cull_layout, vec![]),
-            Job::Compute(&module, "vsm_finish", &cull_layout, vec![]),
-            Job::Compute(&module, "vsm_mip", &mip_layout, vec![]),
+            Job::Compute(&module, "vsm_mark", &mark_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_compact", &compact_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_clear", &clear_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_cull", &cull_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_finish", &cull_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_mip", &mip_layout, vsm(vec![])),
             Job::Compute(&module, "vsm_raster", &raster_layout, peel(0.0)),
             Job::Compute(&module, "vsm_raster", &raster_layout, peel(1.0)),
             Job::Hardware("N8c hardware page casters", 0.0),
             Job::Hardware("N8c hardware page peel", 1.0),
-            Job::Compute(&module, "vsm_lookup", &lookup_layout, vec![]),
-            Job::Compute(&module, "vsm_horizon", &horizon_layout, vec![]),
-            Job::Compute(&module, "vsm_release", &compact_layout, vec![]),
-            Job::Compute(&module, "vsm_allocate", &allocate_layout, vec![]),
-            Job::Compute(&module, "vsm_clear_sparse", &clear_layout, vec![]),
-            Job::Compute(&module, "vsm_mip_sparse", &mip_layout, vec![]),
-            Job::Compute(&module, "vsm_outline_dense", &outline_layout, vec![]),
-            Job::Compute(&module, "vsm_outline_sparse", &outline_layout, vec![]),
+            Job::Compute(&module, "vsm_lookup", &lookup_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_horizon", &horizon_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_release", &compact_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_allocate", &allocate_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_clear_sparse", &clear_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_mip_sparse", &mip_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_outline_dense", &outline_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_outline_sparse", &outline_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_fold_dense", &clear_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_fold_sparse", &clear_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_silhouette_dense", &raster_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_silhouette_sparse", &raster_layout, vsm(vec![])),
         ];
+        // The covered fraction's multisampled raster: a colour attachment that is never written,
+        // whose samples give each fragment its mask (FRACTION_AREA_FORMAT); otherwise the depth
+        // attachment only sizes the raster area.
+        let targets = [Some(wgpu::ColorTargetState {
+            format: FRACTION_AREA_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::empty(),
+        })];
         let build = |job: &Job<'_>| match job {
             Job::Compute(module, entry, layout, constants) => Built::Compute(ledger.own(
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -1745,7 +1879,7 @@ impl VirtualState {
                     module,
                     entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions {
-                        constants,
+                        constants: &constants,
                         ..Default::default()
                     },
                     cache: None,
@@ -1753,7 +1887,7 @@ impl VirtualState {
                 ResourceKind::ComputePipeline,
             )),
             Job::Hardware(label, peel) => {
-                let constants = [("VSM_PEEL_PASS", *peel)];
+                let constants = [("VSM_PEEL_PASS", *peel), samples_constant];
                 Built::Render(ledger.own(
                     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                         label: Some(label),
@@ -1771,21 +1905,24 @@ impl VirtualState {
                                 constants: &constants,
                                 ..Default::default()
                             },
-                            targets: &[],
+                            targets: if samples > 1 { &targets } else { &[] },
                         }),
                         primitive: wgpu::PrimitiveState {
                             cull_mode: None,
                             ..Default::default()
                         },
                         // The 64-bit max decides; the attachment only sizes the raster area.
-                        depth_stencil: Some(wgpu::DepthStencilState {
+                        depth_stencil: (samples == 1).then_some(wgpu::DepthStencilState {
                             format: AREA_FORMAT,
                             depth_write_enabled: Some(false),
                             depth_compare: Some(wgpu::CompareFunction::Always),
                             stencil: Default::default(),
                             bias: Default::default(),
                         }),
-                        multisample: Default::default(),
+                        multisample: wgpu::MultisampleState {
+                            count: samples,
+                            ..Default::default()
+                        },
                         multiview_mask: None,
                         cache: None,
                     }),
@@ -1848,6 +1985,8 @@ impl VirtualState {
             clear_sparse: compute(),
             mip_sparse: compute(),
             outline: [compute(), compute()],
+            fold: [compute(), compute()],
+            silhouette: [compute(), compute()],
         };
         Self {
             settings: VirtualShadowSettings::default(),
@@ -2026,9 +2165,9 @@ impl VirtualState {
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count: fraction_samples(device),
                 dimension: wgpu::TextureDimension::D2,
-                format: AREA_FORMAT,
+                format: if fraction_samples(device) > 1 { FRACTION_AREA_FORMAT } else { AREA_FORMAT },
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             }),
@@ -2197,9 +2336,14 @@ impl VirtualState {
             edges: buffer("Disk lookup edge pixels", 32, B::STORAGE | B::COPY_SRC),
             cover: buffer(
                 "Clipmap covered samples",
-                if fraction_on() { (map_bytes / 8).next_multiple_of(4) } else { 4 },
+                if fraction_on() { (map_bytes / 4).next_multiple_of(4) } else { 4 },
                 B::STORAGE | B::COPY_SRC,
             ),
+            sides: {
+                let sides = buffer("Covered fraction side table", (SIDE_ANGLES * 65 * 8) as u64, B::UNIFORM | B::COPY_DST);
+                queue.write_buffer(&sides, 0, &side_table());
+                sides
+            },
             history: buffer(
                 "Disk lookup answer history",
                 (u64::from(size[0]) * u64::from(size[1]) * 8).max(8),
@@ -2512,7 +2656,7 @@ impl Renderer {
                     .create(true)
                     .append(true)
                     .open(path)
-                    .and_then(|mut f| writeln!(f, "{} {} {} {}", word(0), word(1), word(2), word(3)));
+                    .and_then(|mut f| writeln!(f, "{} {} {} {} fraction columns {} partial {} thinned {}", word(0), word(1), word(2), word(3), word(5), word(6), word(7)));
             }
         }
         // The newest mark-pass counters mapped since the last frame (the ladder's finest level
@@ -3758,6 +3902,7 @@ impl Renderer {
                         buffer(62, &r.edges),
                         buffer(63, &r.history),
                         buffer(66, &r.cover),
+                        buffer(68, &r.sides),
                     ],
                 ),
                 queued: group(
@@ -4205,10 +4350,27 @@ impl Renderer {
                     pass.dispatch_workgroups_indirect(&casters.work, level as u64 * ARGS_BYTES);
                 }
             }
+            // The covered fraction rasterizes on the multisampled colour attachment (never
+            // written), otherwise on the depth one; either only sizes the raster area.
+            let multisampled = fraction_samples(&self.device) > 1;
+            let color = [Some(wgpu::RenderPassColorAttachment {
+                view: &r.area,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Measurement: `RENDERLAB_VSM_FRACTION_LOAD=1` loads instead of clearing.
+                    load: if std::env::var_os("RENDERLAB_VSM_FRACTION_LOAD").is_some() {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    },
+                    store: wgpu::StoreOp::Discard,
+                },
+            })];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("N8c hardware page raster"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                color_attachments: if multisampled { &color } else { &[] },
+                depth_stencil_attachment: (!multisampled).then_some(wgpu::RenderPassDepthStencilAttachment {
                     view: &r.area,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
@@ -4237,6 +4399,31 @@ impl Renderer {
             label: Some("N8c clipmap max-mips"),
             timestamp_writes: None,
         });
+        // The covered fraction, before the mips read the top words: the silhouette texels' samples
+        // from ids, folded as they are found; or, multisampled, the count of the raster's samples.
+        if matches!(fraction_mode(), 1 | 3) {
+            pass.set_bind_group(0, &*g.raster, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, &*casters.data, &[]);
+            pass.set_bind_group(3, &*g.pass, &[0]);
+            if r.sparse {
+                pass.set_pipeline(&p.silhouette[1]);
+                pass.dispatch_workgroups_indirect(&r.pool, 0);
+            } else {
+                pass.set_pipeline(&p.silhouette[0]);
+                pass.dispatch_workgroups(slots as u32, 1, 1);
+            }
+        }
+        if fraction_mode() == 2 {
+            pass.set_bind_group(0, &*g.raster, &[]);
+            if r.sparse {
+                pass.set_pipeline(&p.fold[1]);
+                pass.dispatch_workgroups_indirect(&r.pool, 0);
+            } else {
+                pass.set_pipeline(&p.fold[0]);
+                pass.dispatch_workgroups(slots as u32, 1, 1);
+            }
+        }
         // The Disk lookup's outline lines of the pages drawn this frame (edges on only).
         if state.settings.lookup == VirtualLookup::Disk && edges_on() {
             pass.set_bind_group(0, &*g.mip, &[]);
