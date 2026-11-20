@@ -492,25 +492,33 @@ fn fg_irradiance(sh:array<vec4<f32>,10>,n:vec3<f32>)->f32 {
 // FG_CHANGE_MIN. Probes without FG_HALF_MIN frames of history only learn their usual change.
 // On Glint's settled views 2.5 times the usual change flagged 4-6% of updates, nearly all noise,
 // which kept three probes in four at the half rate through their neighbours; 4 times flags 1%.
+// Returns whether this update is a change.
 const FG_CHANGE:f32=4.0;
 const FG_CHANGE_MIN:f32=0.15;
-fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:vec3<f32>) {
+fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:vec3<f32>)->bool {
     let at=fg_state_at(index);
-    if at+1u>=arrayLength(&fg_state) {return;}
+    if at+1u>=arrayLength(&fg_state) {return false;}
     let word=fg_state[at];
     var usual=bitcast<f32>(fg_state[at+1u]);
-    if count<=1.0 {fg_state[at]=word&0xffffff00u;fg_state[at+1u]=bitcast<u32>(0.25);return;}
+    if count<=1.0 {fg_state[at]=word&0xffffff00u;fg_state[at+1u]=bitcast<u32>(0.25);return false;}
     let e_new=fg_irradiance(fresh,n);
     let e_old=fg_irradiance(old.sh,n);
     let r=abs(e_new-e_old)/max(max(e_new,e_old),1e-30);
     if old.point.w>=FG_HALF_MIN && r>max(FG_CHANGE*usual,FG_CHANGE_MIN) {
         fg_state[at]=(fg_frame()&0xffffffu)<<8u;
-        return;
+        return true;
     }
     usual=mix(usual,r,0.125);
     fg_state[at]=(word&0xffffff00u)|min((word&0xffu)+1u,255u);
     fg_state[at+1u]=bitcast<u32>(usual);
+    return false;
 }
+// The history a probe keeps through its own change (fg_note_change; a lighting edit's word 0 only
+// sets the rate: it is on through whole relight spreads, where restarting every probe would add
+// noise everywhere): FG_RESTART updates, so the new light takes over in a few updates instead of
+// blending in at 1/FG_HISTORY an update (a light switched on under settled probes reached 0.75
+// of its light 48 frames later), and the probe does not turn stable while far from it.
+const FG_RESTART:f32=4.0;
 // Folds the lanes from `first` (summed into that row by fg_reduce) into probe `index`, now at s:
 // history while the new point stays on the old probe's plane.
 fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
@@ -531,14 +539,12 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     if old.point.w>0.0 && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*footprint {
         count=min(old.point.w+1.0,FG_HISTORY);
     }
+    var fresh:array<vec4<f32>,10>;
+    for(var v=0u;v<FG_SH_VECS;v+=1u) {fresh[v]=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);}
+    if fg_note_change(index,fresh,old,count,s.normal) {count=min(count,FG_RESTART);}
     let blend=1.0/count;
     var out:FgProbe;
-    var fresh:array<vec4<f32>,10>;
-    for(var v=0u;v<FG_SH_VECS;v+=1u) {
-        fresh[v]=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);
-        out.sh[v]=select(fresh[v],mix(old.sh[v],fresh[v],blend),count>1.0);
-    }
-    fg_note_change(index,fresh,old,count,s.normal);
+    for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=select(fresh[v],mix(old.sh[v],fresh[v],blend),count>1.0);}
     out.point=vec4<f32>(s.world,count);
     out.normal=vec4<f32>(s.normal,footprint);
     fg_store(index,size,out);
