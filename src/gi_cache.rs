@@ -1126,6 +1126,8 @@ struct Packed {
     near: Vec<Vec<u32>>,
     near_bytes: u64,
     head: Vec<u32>,
+    /// PROTOTYPE: the distance clipmap's first word (src/gi_sdf.rs), 0 without one.
+    sdf_base: u32,
     buffer: Owned<wgpu::Buffer>,
     bytes: u64,
     _allocation: Allocation,
@@ -4014,6 +4016,30 @@ impl Renderer {
                     words.extend([*base, draw_identity(ids, d, i)]);
                 }
             }
+            // PROTOTYPE (RENDERLAB_GI_SDF=1): the distance clipmap over every placed triangle.
+            let mut sdf_base = 0;
+            if crate::gi_sdf::enabled() {
+                let mut triangles = vec![];
+                for (d, blas) in draws.iter().zip(&blases) {
+                    for model in &d.instances.state.models {
+                        for t in blas.bvh.indices.chunks_exact(3) {
+                            triangles.push([t[0], t[1], t[2]].map(|i| {
+                                let p = blas.bvh.positions[i as usize];
+                                model.transform_point3(Vec3::new(p[0], p[1], p[2])).to_array()
+                            }));
+                        }
+                    }
+                }
+                let (sdf, seconds) = crate::gi_sdf::build(&triangles);
+                sdf_base = words.len() as u32;
+                eprintln!(
+                    "gi_sdf: {} triangles, {} cascades, {:.2} MiB, built in {seconds:.2} s",
+                    triangles.len(),
+                    sdf[0],
+                    (sdf.len() * 4) as f64 / (1 << 20) as f64
+                );
+                words.extend(sdf);
+            }
             let bytes = (words.len() * 4) as u64;
             let near_bytes = refs
                 .iter()
@@ -4042,6 +4068,7 @@ impl Renderer {
                 near,
                 near_bytes,
                 head: vec![],
+                sdf_base,
                 buffer,
                 bytes,
                 _allocation: self.ledger.allocate(AllocationKind::Light, bytes),
@@ -4093,6 +4120,7 @@ impl Renderer {
         }
         self.gi.stats.near_instances = records.iter().filter(|r| r.3 != 0).count() as u32;
         let mut head = gi_bvh::instance_words(&records)?;
+        head[5] = p.sdf_base;
         for (i, words) in identities.iter().enumerate() {
             let r = gi_bvh::HEADER_WORDS + i * gi_bvh::INSTANCE_WORDS + 24;
             head[r..r + 4].copy_from_slice(words);

@@ -104,7 +104,7 @@ var<workgroup> gi_drain_base:u32;
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
                 if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
-                let h=gi_closest(origin,d,0.0,1e20);
+                let h=gi_closest_far(origin,d,0.0,1e20);
                 let through=gi_hit_transmission;
                 rays+=1u;
                 // A direction blocked only by panes (gi_visible) sees the sky behind them, at

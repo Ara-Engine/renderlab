@@ -31,6 +31,11 @@ fn gi_fresnel(n:f32, c:f32) -> f32 {
     let f0=((n-1.0)/(n+1.0))*((n-1.0)/(n+1.0));
     return f0+(1.0-f0)*pow(1.0-clamp(c,0.0,1.0),5.0);
 }
+// The software path's field-beyond-triangles gather trace (gi_rays_software.wgsl); hardware
+// rays trace triangles all the way.
+fn gi_closest_far(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
+    return gi_closest(origin,direction,tmin,tmax);
+}
 fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
     var query:ray_query<vertex_return>;
     gi_hit_transmission=vec3<f32>(1.0);

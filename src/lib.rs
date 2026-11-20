@@ -23,6 +23,7 @@ mod environment;
 mod decal;
 mod environment_lobes;
 mod gi_bvh;
+mod gi_sdf;
 mod hardware_shadows;
 mod group_cache;
 mod instance_bvh;

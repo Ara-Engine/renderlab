@@ -316,12 +316,108 @@ fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHi
     gi_hit_transmission=vec3<f32>(1.0);
     return gi_traverse(origin,direction,tmin,tmax,false);
 }
+// PROTOTYPE (price check, RENDERLAB_GI_SDF=1): the conservative distance clipmap of
+// src/gi_sdf.rs, its first word at header word 5 (0: none). A voxel any triangle touches holds 0,
+// every other its distance in voxels to the nearest touched one (8 bits). Gather and visibility
+// rays trace triangles for their first stretch (gi_sdf_near) and march the field beyond it: a
+// jump of the distance less 1.75 voxels away from geometry, voxel by voxel near it, never across
+// a cascade's border; a touched voxel is a hit, its normal the field's gradient.
+const GI_SDF_NEAR:f32=0.5;
+fn gi_sdf_q(base:u32, c:u32, v:vec3<i32>) -> u32 {
+    let h=base+1u+8u*c;
+    let n=i32(gi_geometry[h+4u]);
+    if any(v<vec3<i32>(0)) || any(v>=vec3<i32>(n)) { return 255u; }
+    let i=u32((v.z*n+v.y)*n+v.x);
+    return (gi_geometry[base+gi_geometry[h+5u]+i/4u]>>(8u*(i%4u)))&255u;
+}
+// The finest cascade whose interior (a voxel inside its faces) holds p, or 0xffffffff.
+fn gi_sdf_cascade(base:u32, p:vec3<f32>) -> u32 {
+    let count=gi_geometry[base];
+    for(var c=0u;c<count;c+=1u) {
+        let h=base+1u+8u*c;
+        let l=(p-gi_gv(h))/gi_gf(h+3u);
+        let n=f32(gi_geometry[h+4u]);
+        if all(l>=vec3<f32>(1.0)) && all(l<vec3<f32>(n-1.0)) { return c; }
+    }
+    return 0xffffffffu;
+}
+fn gi_sdf_edge(base:u32, p:vec3<f32>) -> f32 {
+    let c=gi_sdf_cascade(base,p);
+    if c==0xffffffffu { return 0.0; }
+    return gi_gf(base+1u+8u*c+3u);
+}
+// Where a ray from p leaves the triangles for the field: GI_SDF_NEAR, or two voxels of the
+// cascade at p when that is longer (a coarse voxel of the ray's own surface must not block it).
+fn gi_sdf_near(base:u32, p:vec3<f32>) -> f32 {
+    return max(GI_SDF_NEAR,2.0*gi_sdf_edge(base,p));
+}
+fn gi_sdf_march(o:vec3<f32>, d:vec3<f32>, t0:f32, tmax:f32) -> GiHit {
+    let base=gi_geometry[5];
+    let miss=GiHit(false,tmax,vec3<f32>(0.0),0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
+    let inv=gi_safe_inverse(d);
+    var t=t0;
+    for(var k=0u;k<512u;k+=1u) {
+        if t>=tmax { break; }
+        let p=fma(d,vec3<f32>(t),o);
+        let c=gi_sdf_cascade(base,p);
+        if c==0xffffffffu { break; }
+        let h=base+1u+8u*c;
+        let corner=gi_gv(h);let edge=gi_gf(h+3u);let n=f32(gi_geometry[h+4u]);
+        let l=(p-corner)/edge;
+        let v=vec3<i32>(floor(l));
+        let q=gi_sdf_q(base,c,v);
+        if q==0u {
+            let g=vec3<f32>(f32(gi_sdf_q(base,c,v+vec3<i32>(1,0,0)))-f32(gi_sdf_q(base,c,v-vec3<i32>(1,0,0))),
+                f32(gi_sdf_q(base,c,v+vec3<i32>(0,1,0)))-f32(gi_sdf_q(base,c,v-vec3<i32>(0,1,0))),
+                f32(gi_sdf_q(base,c,v+vec3<i32>(0,0,1)))-f32(gi_sdf_q(base,c,v-vec3<i32>(0,0,1))));
+            var normal=-d;
+            if dot(g,g)>0.0 { normal=normalize(g); }
+            return GiHit(true,t,normal,0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
+        }
+        // The cascade's interior exit along d: no jump crosses it.
+        let lo=corner+vec3<f32>(edge);let hi=corner+vec3<f32>((n-1.0)*edge);
+        let a=(lo-p)*inv;let b=(hi-p)*inv;
+        let exit=min(min(max(a.x,b.x),max(a.y,b.y)),max(a.z,b.z));
+        var dt:f32;
+        if q>2u {
+            dt=(f32(q)-1.75)*edge;
+        } else {
+            let face=(vec3<f32>(v)+select(vec3<f32>(0.0),vec3<f32>(1.0),d>vec3<f32>(0.0)))*edge+corner;
+            let f=(face-p)*inv;
+            dt=min(min(f.x,f.y),f.z);
+        }
+        t+=max(min(dt,exit+1e-3*edge),1e-3*edge);
+    }
+    return miss;
+}
+// Closest hit for the cache's gather rays: triangles to gi_sdf_near, the field beyond.
+fn gi_closest_far(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
+    let base=gi_geometry[5];
+    if base==0u { return gi_closest(origin,direction,tmin,tmax); }
+    let near=gi_sdf_near(base,origin);
+    let h=gi_closest(origin,direction,tmin,min(tmax,near));
+    if h.hit || tmax<=near { return h; }
+    return gi_sdf_march(origin,direction,near,tmax);
+}
+// Visibility within tmax through the field: the march stops two voxels short of its end, where
+// the target's own surface (an emitter's triangle) is fattened into the field.
+fn gi_sdf_visible_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32) -> bool {
+    let base=gi_geometry[5];
+    let near=gi_sdf_near(base,origin);
+    if gi_traverse(origin,direction,0.0,min(tmax,near),true).hit { return false; }
+    if tmax<=near { return true; }
+    var end=tmax;
+    if tmax<1e19 { end=tmax-2.0*gi_sdf_edge(base,fma(direction,vec3<f32>(tmax),origin)); }
+    return end<=near || !gi_sdf_march(origin,direction,near,end).hit;
+}
 // Sky visibility along an unbounded ray: any hit blocks it.
 fn gi_visible(origin:vec3<f32>, direction:vec3<f32>) -> bool {
+    if gi_geometry[5]!=0u { return gi_sdf_visible_within(origin,direction,1e20); }
     return !gi_traverse(origin,direction,0.0,1e20,true).hit;
 }
 // Visibility within tmax (a light's distance): any hit blocks it.
 fn gi_visible_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32) -> bool {
+    if gi_geometry[5]!=0u { return gi_sdf_visible_within(origin,direction,tmax); }
     return !gi_traverse(origin,direction,0.0,tmax,true).hit;
 }
 // A hit's material identity + 1 (G2), from instance word 24 (src/gi_bvh.rs instance_words);
