@@ -26,7 +26,8 @@
 //!   half the floor's median luminance: the camera agreement check, near 0 (only outlines).
 //!
 //! Frames: LIGHTBENCH_SHADOW_FRAMES (default 8) per run with temporal reconstruction on, as the
-//! engine renders; the unshadowed frame is captured once at load.
+//! engine renders, each run from a cut (no history, empty pages); the unshadowed frame is
+//! captured once at load.
 use super::{BenchPath, Fixture, RefImage, kit};
 use crate::renderer::Renderer;
 use crate::{
@@ -232,6 +233,10 @@ impl Fixture for ShadowEdges {
     fn run(&mut self, r: &mut Renderer, _path: BenchPath, _reference: Option<&RefImage>) -> Result<Vec<(String, f64)>, Error> {
         let l = self.loaded.as_mut().ok_or(Error::InvalidInput("shadow-edges fixture not loaded"))?;
         let camera = camera()?;
+        // Every run from the same start: no temporal history and (without ray hardware) an empty
+        // page cache, as after a cut. Otherwise the metrics drift round to round on one process.
+        r.cut_reconstruction();
+        r.reset_virtual_shadow_cache();
         let n = frames();
         for _ in 0..n {
             kit::frame(r, &l.target, &camera, &mut l.parts)?;
