@@ -3531,10 +3531,41 @@ impl Renderer {
         }
         let streamed = state.requests;
         let software = self.hardware_shadows.is_none() || self.gi.settings.force_software;
+        let mut wanted = vec![];
         for &id in ids {
-            self.gi_shade_entry(id, software, streamed, false)?;
-            if ids.len() > 1 {
-                self.gi_shade_entry(id, software, streamed, true)?;
+            if !self.program_slot(id).traits.reflects {
+                continue;
+            }
+            let key = self.gi_shade_key(id, software, streamed);
+            for mixed in [false, true].into_iter().take(if ids.len() > 1 { 2 } else { 1 }) {
+                if !self.gi.shading.iter().any(|p| p.key == key && p.mixed == mixed) {
+                    wanted.push((id, key, mixed));
+                }
+            }
+        }
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let parts = wanted
+            .iter()
+            .map(|&(id, _, mixed)| self.gi_shade_parts(id, mixed))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (device, ledger) = (&self.device, &self.ledger);
+        let built = super::program_gpu::in_parallel(
+            device,
+            parts.iter().map(|(module, layout)| move || shade_cells_pipeline(device, ledger, module, layout)),
+        );
+        for ((_, key, mixed), (pipeline, error)) in wanted.into_iter().zip(built) {
+            if let Some(error) = error {
+                return Err(Error::Shader(error.to_string()));
+            }
+            let entry = ShadePipeline { key, mixed, pipeline };
+            // As gi_shade_entry: an edited program's old entry for this variant is replaced.
+            match self.gi.shading.iter().position(|p| {
+                p.mixed == mixed && (p.key.0, p.key.2, p.key.3) == (key.0, key.2, key.3)
+            }) {
+                Some(i) => self.gi.shading[i] = entry,
+                None => self.gi.shading.push(entry),
             }
         }
         Ok(())
@@ -3558,6 +3589,23 @@ impl Renderer {
         key: (u64, [u8; 32], bool, bool),
         mixed: bool,
     ) -> Result<ShadePipeline, Error> {
+        let (module, layout) = self.gi_shade_parts(id, mixed)?;
+        let scopes = OperationScopes::new(&self.device);
+        let pipeline = shade_cells_pipeline(&self.device, &self.ledger, &module, &layout);
+        if let Some(error) = scopes.finish() {
+            return Err(Error::Shader(error.to_string()));
+        }
+        Ok(ShadePipeline { key, mixed, pipeline })
+    }
+
+    /// Program `id`'s cell shading module (with `mixed`, the entry that shades only its own
+    /// draws' cells) and its pipeline layout: everything of the pipeline but the driver's
+    /// compile (`shade_cells_pipeline`).
+    fn gi_shade_parts(
+        &mut self,
+        id: u64,
+        mixed: bool,
+    ) -> Result<(Owned<wgpu::ShaderModule>, Owned<wgpu::PipelineLayout>), Error> {
         let source = self.program_slot(id).source.clone();
         self.ensure_gi_layouts();
         let heads = if self.hardware_shadows.is_some() {
@@ -3571,7 +3619,6 @@ impl Renderer {
             self.gi.settings.directions,
             mixed.then_some(id),
         );
-        let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device
                 // It composes program text: checked, as every program module (P-SPLIT).
@@ -3596,22 +3643,7 @@ impl Renderer {
                 }),
             ResourceKind::PipelineLayout,
         );
-        let pipeline = self.ledger.own(
-            self.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("gi_shade_cells"),
-                    layout: Some(&layout),
-                    module: &module,
-                    entry_point: Some("gi_shade_cells"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                }),
-            ResourceKind::ComputePipeline,
-        );
-        if let Some(error) = scopes.finish() {
-            return Err(Error::Shader(error.to_string()));
-        }
-        Ok(ShadePipeline { key, mixed, pipeline })
+        Ok((module, layout))
     }
 
     fn ensure_gi_layouts(&mut self) {
@@ -4984,6 +5016,26 @@ impl GiState {
             watch.record(encoder, &r.work);
         }
     }
+}
+
+/// The cell shading pipeline over `module` and `layout` (`gi_shade_parts`): the driver's compile.
+fn shade_cells_pipeline(
+    device: &PipelineDevice,
+    ledger: &Ledger,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+) -> Owned<wgpu::ComputePipeline> {
+    ledger.own(
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("gi_shade_cells"),
+            layout: Some(layout),
+            module,
+            entry_point: Some("gi_shade_cells"),
+            compilation_options: Default::default(),
+            cache: None,
+        }),
+        ResourceKind::ComputePipeline,
+    )
 }
 
 #[cfg(test)]

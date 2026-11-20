@@ -133,6 +133,26 @@ impl PipelineDevice {
         self.compilation.late.store(0, Ordering::Relaxed);
         self.compilation.prepared.store(true, Ordering::Relaxed);
     }
+    /// Saves the disk cache now if it holds pipelines not yet on disk, waiting for a save in
+    /// progress. Prepare calls it when it ends: compiles save only once their unsaved time
+    /// reaches 20x the last save's cost (about 6 s for Ara's 6 MB cache), so a process
+    /// stopped after a load lost the load's pipelines (19 Nov: Outpost's world prepare
+    /// recompiled 6 s with the Renderlab cache alone).
+    pub fn save_cache(&self) {
+        let compilation = &self.compilation;
+        if compilation.path.is_none() || compilation.unsaved.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut save = compilation.save.lock().unwrap();
+        let unsaved = compilation.unsaved.load(Ordering::Relaxed);
+        compilation.unsaved.fetch_sub(unsaved, Ordering::Relaxed);
+        let started = Instant::now();
+        let wrote = compilation.persist(&mut save.1);
+        save.0 = started.elapsed();
+        if compilation.profile {
+            eprintln!("pipeline_cache_saved_at_prepare ms={:.3} wrote={wrote}", save.0.as_secs_f64() * 1e3);
+        }
+    }
     /// Pipelines created since the last `mark_prepared`; 0 when the engine was never prepared.
     pub fn compiles_after_prepare(&self) -> u64 {
         self.compilation.late.load(Ordering::Relaxed)
