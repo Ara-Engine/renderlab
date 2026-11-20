@@ -7,6 +7,9 @@
 //! - `orange`: the same box with albedo (0.9, 0.4, 0.1), so per channel L = Le / (1 - rho)
 //!   = (5, 0.833, 0.556). The red channel needs about 30 bounces to reach 95% of its sum, so a
 //!   truncated bounce series shows here first.
+//! - `many`: the grey box with every face cut into 40 x 40 quads, 19,200 emitting triangles, more
+//!   than the emitter list's starting capacity (8192): the list must grow to hold them all (the
+//!   emitter guard below) and the answer stays L = 1.
 //! - `slab-lit` / `slab-dark`: a thin slab (3 x 0.02 x 3 m, albedo 0.5) under a uniform sky of
 //!   1 cd/m^2, with a 1.5 m emitter 0.4 m below it (20 cd/m^2 in `slab-lit`, 0 in
 //!   `slab-dark`). The top face sees only the sky: L = rho * sky = 0.5 in both. Light from
@@ -30,7 +33,7 @@
 //! Run (one GPU lease, every case on one path):
 //!   RENDERLAB_FURNACE_PATH=rt|nort (default nort; rt needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK)
 //!   RENDERLAB_FURNACE_OUT=<dir>   furnace.json and one PFM per case (optional)
-//!   RENDERLAB_FURNACE_CASES=grey,orange,slab-lit,slab-dark,slab-roof (default all)
+//!   RENDERLAB_FURNACE_CASES=grey,many,orange,slab-lit,slab-dark,slab-roof (default all)
 //!   RENDERLAB_FURNACE_FRAMES=300  frames per view; the report also samples frames 1, 4, 16, 64
 //!   RENDERLAB_FURNACE_COUNTERS=1  adds the cache's counters for each view's last frame;
 //!                                 =frames also records a few of them on every frame up to 64
@@ -65,6 +68,22 @@ fn quad(centre: Vec3, n: Vec3, u: Vec3, half_v: f32) -> ([Vec3; 4], Vec3) {
         [centre - u - v, centre + u - v, centre + u + v, centre - u + v],
         n,
     )
+}
+/// `faces`, each cut into n x n quads.
+fn subdivided(faces: Vec<([Vec3; 4], Vec3)>, n: usize) -> Vec<([Vec3; 4], Vec3)> {
+    let mut out = Vec::with_capacity(faces.len() * n * n);
+    for (c, normal) in faces {
+        let at = |i: usize, j: usize| {
+            let (u, v) = (i as f32 / n as f32, j as f32 / n as f32);
+            c[0] + (c[1] - c[0]) * u + (c[3] - c[0]) * v
+        };
+        for i in 0..n {
+            for j in 0..n {
+                out.push(([at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)], normal));
+            }
+        }
+    }
+    out
 }
 /// The six faces of an axis-aligned box of half-extents `h`, facing out (or in).
 fn box_faces(centre: Vec3, h: Vec3, inward: bool) -> Vec<([Vec3; 4], Vec3)> {
@@ -186,6 +205,11 @@ fn cases() -> Vec<Case> {
         Case {
             name: "grey",
             ..room([0.5; 3])
+        },
+        {
+            let mut c = room([0.5; 3]);
+            c.parts[0].faces = subdivided(std::mem::take(&mut c.parts[0].faces), 40);
+            Case { name: "many", ..c }
         },
         Case {
             name: "orange",

@@ -31,6 +31,10 @@ const GI_W_EMITTERS:u32=200u;
 const GI_W_EMITTER_DRAWS:u32=201u;
 const GI_W_EMITTER_RAYS:u32=202u;
 const GI_W_EMITTERS_DROPPED:u32=203u;
+// Listed triangles whose mean cell shading had not evaluated (the draw's probe stands in), and
+// listed triangles whose radiance is zero although their draw's probe emits.
+const GI_W_EMITTERS_UNEVALUATED:u32=208u;
+const GI_W_EMITTERS_ZERO:u32=209u;
 
 fn gi_emitter_draws_at() -> u32 { return gi_word(GI_H_EMITTERS)+gi_word(GI_H_EMITTERS_MAX)*GI_EMITTER_WORDS; }
 // After the draws: per listed triangle, the running sum of the triangles' power up to and
@@ -88,6 +92,8 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
             gi_table[r+6u]=bitcast<u32>(e2.x);gi_table[r+7u]=bitcast<u32>(e2.y);gi_table[r+8u]=bitcast<u32>(e2.z);
             let mean=gi_outgoing[gi_emitter_mean_at(k)];
             let radiance=select(e,mean.rgb,mean.w>0.0);
+            if !(mean.w>0.0) { atomicAdd(&gi_work[GI_W_EMITTERS_UNEVALUATED],1u); }
+            if !(max(radiance.x,max(radiance.y,radiance.z))>0.0) { atomicAdd(&gi_work[GI_W_EMITTERS_ZERO],1u); }
             gi_table[r+9u]=bitcast<u32>(radiance.x);gi_table[r+10u]=bitcast<u32>(radiance.y);gi_table[r+11u]=bitcast<u32>(radiance.z);
             gi_table[r+12u]=b;gi_table[r+13u]=p;gi_table[r+14u]=t;
         }
