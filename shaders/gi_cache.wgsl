@@ -2197,7 +2197,8 @@ fn gi_fixed_bin(slot:u32) -> u32 {
     if (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))!=GI_TRACED || (state&GI_QUEUED)!=0u { return 0xffffffffu; }
     let frame=gi_word(GI_H_FRAME);
     if frame-gi_table[cold+GI_C_SEEN]>1u { return 0xffffffffu; }
-    if !(gi_outgoing[slot].w>0.0) { return GI_FIXED_NONE; }
+    // Never gathered: the bounce scale word is 0 until the first gather (gi_cells.wgsl GI_HOT_BOUNCE).
+    if gi_table[gi_hot(slot)+GI_HOT_BOUNCE]==0u { return GI_FIXED_NONE; }
     if (state&GI_DIRTY)!=0u { return GI_FIXED_DIRTY; }
     return min((frame-(state>>GI_STAMP_SHIFT))&0xfffu,GI_FIXED_AGES);
 }
