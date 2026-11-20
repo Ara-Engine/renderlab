@@ -16,10 +16,15 @@ impl PipelineLog {
         }
     }
 
+    /// A finished compile: its kind, label and time, the wall clock when it ended
+    /// (`end_unix_ms`, to lay compiles against an embedder's own timeline) and the thread
+    /// that ran it (its name, or its id when it has none).
     pub fn compile(&self, kind: &str, label: &str, duration: Duration) {
+        let thread = std::thread::current();
+        let thread = thread.name().map_or_else(|| format!("{:?}", thread.id()), str::to_owned);
         self.line(&format!(
-            "{{\"event\":\"compile\",\"kind\":{},\"label\":{},\"ms\":{:.6}}}",
-            json_string(kind), json_string(label), duration.as_secs_f64() * 1e3,
+            "{{\"event\":\"compile\",\"kind\":{},\"label\":{},\"ms\":{:.6},\"end_unix_ms\":{:.1},\"thread\":{}}}",
+            json_string(kind), json_string(label), duration.as_secs_f64() * 1e3, unix_ms(), json_string(&thread),
         ));
     }
 
@@ -31,7 +36,7 @@ impl PipelineLog {
         let owned = &stats.ownership;
         let hw = renderer.hardware_shadow_stats();
         self.line(&format!(
-            "{{\"event\":\"frame\",\"frame\":{},\"render_created\":{},\"compute_created\":{},\"shader_created\":{},\"blas_created\":{},\"tlas_created\":{},\"blas_builds\":{},\"blas_updates\":{},\"tlas_builds\":{},\"target_bytes\":{},\"shadow_bytes\":{},\"visible_instances\":{},\"compiles_after_prepare\":{}}}",
+            "{{\"event\":\"frame\",\"frame\":{},\"render_created\":{},\"compute_created\":{},\"shader_created\":{},\"blas_created\":{},\"tlas_created\":{},\"blas_builds\":{},\"blas_updates\":{},\"tlas_builds\":{},\"target_bytes\":{},\"shadow_bytes\":{},\"visible_instances\":{},\"compiles_after_prepare\":{},\"unix_ms\":{:.1}}}",
             report.frame.0,
             owned.get(ResourceKind::RenderPipeline).created,
             owned.get(ResourceKind::ComputePipeline).created,
@@ -45,6 +50,7 @@ impl PipelineLog {
             owned.shadow_bytes.live,
             report.scene.visible_instances,
             late,
+            unix_ms(),
         ));
     }
 
@@ -52,6 +58,13 @@ impl PipelineLog {
         // Diagnostic I/O must never reject a frame.
         let _ = writeln!(self.0.lock().unwrap(), "{line}");
     }
+}
+
+/// Milliseconds since the Unix epoch: the log's clock, shared with an embedder's own stamps.
+fn unix_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64() * 1e3)
 }
 
 /// JSON escaping without making serde_json a required renderer dependency.
