@@ -162,7 +162,10 @@ pub(crate) fn request_device(
             | wgpu::Features::PIPELINE_CACHE
             | wgpu::Features::PRIMITIVE_INDEX
             | wgpu::Features::TEXTURE_COMPRESSION_BC
-            | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY);
+            | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY
+            // The sun clipmap's covered fraction rasterizes at 8 samples where it is held
+            // (virtual_shadow_gpu.rs `fraction_samples`).
+            | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
     let (features, required_limits, experimental_features) = match path {
         RenderPath::HardwareRt => (
             // RENDERLAB_RT_PRIMARY (measurement): the visibility buffer's 64-bit raster atomics.

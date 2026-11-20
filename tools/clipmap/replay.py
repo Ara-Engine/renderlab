@@ -44,7 +44,13 @@ bias_texel = texel
 top = np.fromfile(f"{raw}/top-{frame}.bin", dtype=np.uint32).reshape(-1, 2)
 words = top[level * side * side:(level + 1) * side * side].reshape(side, side, 2)
 occupied = words[..., 0] != 0
-height = np.where(occupied, words[..., 1].view(np.float32).astype(np.float64) * rng + low, -np.inf)
+# COVER=1 (a RENDERLAB_VSM_FRACTION dump): the top word's low three height bits are the covered
+# fraction in eighths (WGSL vsm_fold; 0 for none or all); a column with k of them transmits
+# 1 - k/8 of a ray crossing it, the expectation of the lookup's thinning over the disk's directions.
+COVER = os.environ.get("COVER") == "1"
+eighths = (words[..., 1] & 7).astype(np.float64)
+bits = words[..., 1] & ~np.uint32(7) if COVER else words[..., 1]
+height = np.where(occupied, bits.view(np.float32).astype(np.float64) * rng + low, -np.inf)
 
 # Optional refinement: REFINE=k rebuilds the heightfield k times finer near the occluder's straight
 # outline (fitted to the level's staircase), each fine texel taking the occluder's height or the
@@ -218,6 +224,11 @@ for py in range(y0, y1):
                         cpt = np.stack([cx_, cy_, zt], 1)
                         ok = (zt - p[2] >= h0) & (zt - p[2] - THICK * bias_texel <= h1) & (((cpt - point) @ nl) > margin)
                         trans[si[ok]] *= 1.0 - cover[iy[si[ok]], ix[si[ok]]]
+            if COVER:
+                k = eighths[iy[li], ix[li]]
+                part = hit & (k > 0)
+                trans[li[part]] *= 1.0 - k[part] / 8.0
+                hit &= ~part
             blocked[li[hit]] = True
             live[li[hit]] = False
             trans[li[hit]] = 0.0
