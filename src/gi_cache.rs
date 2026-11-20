@@ -5321,3 +5321,32 @@ mod tests {
 #[cfg(test)]
 #[path = "gi_cache_tests.rs"]
 mod gpu_tests;
+
+/// The bench's reload (src/bench, feature `bench`, docs/bench.md): the lighting cache's kernels
+/// and every program's cell shading, rebuilt from the current shader text (`program::gi_shader`).
+/// Each part keeps its old pipelines when its new text fails, and the error returns.
+#[cfg(feature = "bench")]
+impl Renderer {
+    pub(super) fn bench_reload_gi(&mut self) -> Result<(), Error> {
+        if let Some(old) = self.gi.pipelines.take() {
+            let software = old.software;
+            if let Err(error) = self.ensure_gi_pipelines(software) {
+                self.gi.pipelines = Some(old);
+                return Err(error);
+            }
+        }
+        let old = std::mem::take(&mut self.gi.shading);
+        let mut fresh = Vec::with_capacity(old.len());
+        for entry in &old {
+            match self.gi_shade_pipeline(entry.key.0, entry.key, entry.mixed) {
+                Ok(pipeline) => fresh.push(pipeline),
+                Err(error) => {
+                    self.gi.shading = old;
+                    return Err(error);
+                }
+            }
+        }
+        self.gi.shading = fresh;
+        Ok(())
+    }
+}

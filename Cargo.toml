@@ -11,6 +11,8 @@ backend-ara = ["dep:ara-gpu", "dep:anyhow", "dep:half", "dep:bytemuck", "dep:ser
 selection-oracle = ["renderlab-asset/selection-oracle"]
 selection-shadow = ["selection-oracle"]
 selection-profile = ["renderlab-asset/selection-profile"]
+# The test bench binary (`lightbench`, docs/bench.md); no default behaviour changes.
+bench = []
 
 [workspace]
 resolver = "3"
@@ -78,6 +80,11 @@ opt-level = 2
 
 [target.'cfg(target_os = "macos")'.dependencies]
 ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "475759d5f4a550f333d06fe9a2f1da989aa67fc0", optional = true }
+
+[[bin]]
+name = "lightbench"
+path = "src/bin/lightbench.rs"
+required-features = ["bench"]
 
 [[example]]
 name = "ara_post"
