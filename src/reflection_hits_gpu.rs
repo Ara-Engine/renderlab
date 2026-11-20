@@ -67,6 +67,15 @@ impl Renderer {
             return Ok(());
         }
         let shading = shading as usize;
+        // Each missing program's source, module and (with the sun map) layout, made in turn.
+        struct Job {
+            id: u64,
+            label: String,
+            composed: program::Composed,
+            module: std::sync::Arc<Owned<wgpu::ShaderModule>>,
+            sun_layout: Option<Owned<wgpu::PipelineLayout>>,
+        }
+        let mut jobs = vec![];
         for &id in ids {
             let pipelines = &self.program_slot(id).pipelines;
             if pipelines.hits[usize::from(mixed)][shading].is_some()
@@ -114,38 +123,55 @@ impl Renderer {
                     ResourceKind::PipelineLayout,
                 ));
             }
-            let sun = sun_layout.is_some();
             let abi = self.program_abi();
-            let scopes = OperationScopes::new(&self.device);
             let module = super::program_gpu::module(&abi, &slot.label, &composed);
-            let state = self.view.primary.as_ref().unwrap();
-            let layout = if let Some(layout) = sun_layout.as_deref() {
-                layout
-            } else if mixed {
-                state.list_layout(shading)
-            } else {
-                &state.shade_layouts[shading]
-            };
-            let pipeline = self.ledger.own(
-                self.device
-                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some("reflection hits"),
-                        layout: Some(layout),
-                        module: &module,
-                        entry_point: Some("reflection_hits"),
-                        compilation_options: Default::default(),
-                        cache: abi.cache,
-                    }),
-                ResourceKind::ComputePipeline,
-            );
-            if let Some(error) = scopes.finish() {
+            jobs.push(Job { id, label: slot.label.clone(), composed, module, sun_layout });
+        }
+        if jobs.is_empty() {
+            return Ok(());
+        }
+        // The pipelines, compiled concurrently (as many at once as the compile slots allow).
+        let abi = self.program_abi();
+        let state = self.view.primary.as_ref().unwrap();
+        let built = super::program_gpu::in_parallel(
+            &self.device,
+            jobs.iter().map(|job| {
+                let layout = if let Some(layout) = job.sun_layout.as_deref() {
+                    layout
+                } else if mixed {
+                    state.list_layout(shading)
+                } else {
+                    &state.shade_layouts[shading]
+                };
+                let (device, ledger, cache, module) = (&self.device, &self.ledger, abi.cache, &**job.module);
+                move || {
+                    ledger.own(
+                        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some("reflection hits"),
+                            layout: Some(layout),
+                            module,
+                            entry_point: Some("reflection_hits"),
+                            compilation_options: Default::default(),
+                            cache,
+                        }),
+                        ResourceKind::ComputePipeline,
+                    )
+                }
+            }),
+        );
+        let mut stored = vec![];
+        for (job, (pipeline, error)) in jobs.into_iter().zip(built) {
+            if let Some(error) = error {
                 return Err(
-                    match super::program_gpu::scope_error(&slot.label, error, &[composed]) {
+                    match super::program_gpu::scope_error(&job.label, error, &[job.composed]) {
                         Error::Fault(Fault(message)) => self.fail(message),
                         other => other,
                     },
                 );
             }
+            stored.push((job.id, pipeline, job.sun_layout.is_some()));
+        }
+        for (id, pipeline, sun) in stored {
             self.pipelines.created += 1;
             let slot = self.programs.iter_mut().find(|s| s.id == id).unwrap();
             slot.pipelines.hits[usize::from(mixed)][shading] = Some(pipeline);
