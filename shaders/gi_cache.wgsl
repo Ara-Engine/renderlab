@@ -2170,24 +2170,26 @@ var<workgroup> gi_wg_hits:atomic<u32>;
 var<workgroup> gi_wg_valued:atomic<u32>;
 // The gather period P for `count` queued cells (1 without a cap).
 // ---- fixed update budget (RENDERLAB_GI_FIXED) ----
-// A fixed number of cell updates (gathers) a frame, GI_H_FIXED_CELLS, the same whether the camera
-// walks, cuts or stands, as shipping surface caches budget their updates. Each frame one pass
+// A fixed amount of cell updates (gathers) a frame, GI_H_FIXED_RAYS estimated gather rays
+// (gi_gather_rays: a cell's open directions plus aimed rays at the lamps in range, so a cell near
+// lamps costs two to three times another), the same whether the camera walks, cuts or stands, as
+// shipping surface caches budget their updates. Each frame one pass
 // ranks every live cell its readers used this frame or the last (the probe's and the gathers'
 // seen stamps) into a bin: no value yet first, then cells an event marked (GI_DIRTY), then by
 // frames since their last update (the stamp in the state's top bits). One thread then cuts the
-// bins from the top at the budget (the crossing bin admits the share that fits, by a per-frame
+// bins' rays from the top at the budget (the crossing bin admits the share that fits, by a per-frame
 // hash), and a second pass lists the admitted cells as this frame's gather queue. Nothing waits
 // in a queue: a cell that does not fit keeps its rank for next frame, one bin older. Events
 // (gi_schedule) only mark cells; a gather stamps its cell and schedules nothing (gi_gather_done).
 // Convergence comes from the age order: every used cell is gathered again in turn, each gather
 // reading the others' last values (the bounce series' next term).
-const GI_H_FIXED_CELLS:u32=45u;
+const GI_H_FIXED_RAYS:u32=45u;
 const GI_FIXED_NONE:u32=95u;
 const GI_FIXED_DIRTY:u32=94u;
 const GI_FIXED_AGES:u32=93u;
 const GI_W_FIXED_CUT:u32=352u;
 const GI_W_FIXED_SHARE:u32=353u;
-fn gi_fixed_on() -> bool { return gi_word(GI_H_FIXED_CELLS)!=0u; }
+fn gi_fixed_on() -> bool { return gi_word(GI_H_FIXED_RAYS)!=0u; }
 // A slot's bin, or 0xffffffff for a cell not ranked this frame (empty, not traced, an orphan,
 // queued for tracing, or not read this frame or the last).
 fn gi_fixed_bin(slot:u32) -> u32 {
@@ -2207,11 +2209,11 @@ fn gi_fixed_bin(slot:u32) -> u32 {
         let bin=gi_fixed_bin(slot);
         if bin==0xffffffffu { continue; }
         atomicStore(&gi_work[GI_W_CLAIMS+slot],bin+1u);
-        atomicAdd(&gi_work[GI_W_GATHER_HIST+bin],1u);
+        atomicAdd(&gi_work[GI_W_GATHER_HIST+bin],gi_gather_rays(slot));
     }
 }
 @compute @workgroup_size(1) fn gi_fixed_select() {
-    let budget=gi_word(GI_H_FIXED_CELLS);
+    let budget=gi_word(GI_H_FIXED_RAYS);
     atomicStore(&gi_work[gi_frame.bounce.x],0u);
     var total=0u;
     for(var k=0u;k<=GI_FIXED_NONE;k+=1u) {

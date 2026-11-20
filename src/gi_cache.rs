@@ -171,11 +171,12 @@ fn stale_periods() -> [u32; 2] {
 const STALE_READ: u32 = 1;
 const STALE_SWEEP: u32 = 16;
 /// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
-/// RENDERLAB_GI_FIXED=N: the cache updates a fixed number of cells a frame, chosen by priority
-/// (shaders/gi_cache.wgsl gi_fixed_rank): N with software rays, 4N with hardware rays (a gather
-/// costs about a quarter there: GATHERS_PER_MS_*). Unset or 0 keeps the event-driven gather queue.
+/// RENDERLAB_GI_FIXED=N: the cache spends a fixed N estimated gather rays a frame on cell updates,
+/// cells chosen by priority (shaders/gi_cache.wgsl gi_fixed_rank), on both paths (the bench's city
+/// and terrain price a hardware ray only 1.2-1.6x below a software one). Unset or 0 keeps the
+/// event-driven gather queue.
 /// The ara-gpu port does not encode the ranking passes: leave it unset there.
-pub(crate) fn fixed_cells() -> u32 {
+pub(crate) fn fixed_rays() -> u32 {
     static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *N.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
 }
@@ -1640,9 +1641,9 @@ impl Planner {
         };
         header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
         header[54] = u32::from(fill && since_fill == 0);
-        header[53] = if ray_budget && fixed_cells() == 0 { GATHER_RAYS_SOFTWARE } else { 0 };
-        // The fixed update budget (shaders/gi_cache.wgsl GI_H_FIXED_CELLS); 0 keeps the event queue.
-        header[45] = if software { fixed_cells() } else { fixed_cells().saturating_mul(4) };
+        header[53] = if ray_budget && fixed_rays() == 0 { GATHER_RAYS_SOFTWARE } else { 0 };
+        // The fixed update budget (shaders/gi_cache.wgsl GI_H_FIXED_RAYS, estimated gather rays a frame); 0 keeps the event queue.
+        header[45] = fixed_rays();
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
@@ -1828,7 +1829,7 @@ impl Planner {
         // A reader outside the cache with unanswered requests (the final gather's probes) keeps
         // the cache running: idle means nobody waits on a cell.
         // The fixed update budget works every frame, standing or walking.
-        let busy = (bounce && (self.bounce_busy > 0 || fixed_cells() != 0)) || self.external_pending > 0;
+        let busy = (bounce && (self.bounce_busy > 0 || fixed_rays() != 0)) || self.external_pending > 0;
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
                 s.gathers + 2
@@ -4756,7 +4757,7 @@ impl GiState {
         }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
-            if fixed_cells() != 0 {
+            if fixed_rays() != 0 {
                 // The fixed update budget: rank every slot, cut, list this frame's gathers.
                 let slots = plan.bounce.then_some([r.slots.div_ceil(64).min(65535), 1]);
                 mark(encoder, "gi_fixed");

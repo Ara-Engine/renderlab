@@ -202,7 +202,7 @@ const GI_GATHER_MASK:u32=0x7000u;
 const GI_RETRY:u32=512u;
 // Made for a secondary cell's gather: requests nothing (GI_SECONDARY is set too).
 const GI_TERTIARY:u32=1024u;
-// Fixed update budget (gi_cache.wgsl GI_H_FIXED_CELLS): an event asked for the cell's update
+// Fixed update budget (gi_cache.wgsl GI_H_FIXED_RAYS): an event asked for the cell's update
 // (it is ranked above age), and the frame of its last update (mod 4096) in the top 12 bits.
 const GI_DIRTY:u32=0x40000u;
 const GI_STAMP_SHIFT:u32=20u;
