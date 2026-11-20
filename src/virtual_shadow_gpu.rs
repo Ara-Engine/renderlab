@@ -4666,8 +4666,10 @@ mod tests {
 
 /// The bench's reload of the virtual sun shadows (src/bench, feature `bench`, docs/bench.md).
 /// The composed modules are checked with naga first: `VirtualState::new`'s threads push no error
-/// scope, so a module that fails would fault the renderer instead of returning. Then the view's
-/// state is rebuilt under prepare's compile slots; its page cache starts empty.
+/// scope, so a module that fails would fault the renderer instead of returning. Then a new state
+/// is built under prepare's compile slots and only its pipelines move into the view's state, which
+/// keeps its pages, buffers and bind groups (replacing the whole state left frames rebuilding
+/// their dependents: the city fixture's rounds went from 0.65 s to 7.8 s).
 #[cfg(feature = "bench")]
 impl Renderer {
     pub(super) fn bench_reload_vsm(&mut self) -> Result<(), Error> {
@@ -4681,10 +4683,16 @@ impl Renderer {
                 .map_err(|e| Error::Shader(e.emit_to_string(&source)))?;
         }
         let slots = crate::pipeline_compilation::prepare_compile_slots();
-        crate::pipeline_compilation::with_compile_slots(slots, || {
-            self.view.virtual_shadows = None;
-            self.prepare_virtual_pipelines();
+        let primary = self.view.primary.as_ref().unwrap();
+        let fresh = crate::pipeline_compilation::with_compile_slots(slots, || {
+            VirtualState::new(&self.device, &self.ledger, primary.array_layout(), &self.lighting.bindings)
         });
+        let state = self.view.virtual_shadows.as_mut().unwrap();
+        let had_order = state.pipelines.order.is_some();
+        state.pipelines = fresh.pipelines;
+        if had_order {
+            state.pipelines.order = Some(order_pipelines(&self.device, &self.ledger, state));
+        }
         Ok(())
     }
 }

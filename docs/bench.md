@@ -77,6 +77,14 @@ Environment:
 | pass | files | rebuild |
 |---|---|---|
 | `gi` | gi_cache, gi_cells, gi_near, gi_emitters, gi_gather_software, gi_rays_software, gi_rays_hardware, gi_shade_entry (`.wgsl`) | the lighting cache's kernels and every program's cell shading (`Renderer::bench_reload_gi`) |
+| `vsm` | virtual_shadow, virtual_shadow_records, virtual_shadow_hybrid, virtual_shadow_lookup, virtual_shadow_disk (`.wgsl`) | the virtual sun shadows' pipelines (`Renderer::bench_reload_vsm`). The composed modules are checked with naga first, then a new set of pipelines replaces the old one; the view keeps its pages and bind groups. |
+
+**Measured (20 Nov, release bench, cold edits).**
+
+| pass | save to numbers | reload | fixtures | fixtures run |
+|---|---:|---:|---:|---|
+| `vsm` | 1.36-1.55 s | 0.62-0.70 s | 0.59-0.85 s | `shadow-edges`, `city` |
+| `gi` | 0.5-1.5 s | 0.1-0.9 s | 0.3-0.5 s | `walk`, `grey`, `orange` |
 
 **Not yet reloadable.** An edit to any other file prints `<file> changed; no bench pass reloads it yet`.
 
@@ -84,11 +92,15 @@ These files reach their kernels through compile-time constants (`include_str!`):
 - the program shading sets;
 - the reflection passes;
 - TR1;
-- the shadows;
 - `gi_cells.wgsl` and `gi_api.wgsl` as composed into program shading. Note that `gi_cells.wgsl` does reload, but only into the cache's own kernels.
 
+**Program shading: tried and taken out (20 Nov).** The attempt routed the traced templates (`program_traced.wgsl`, `program_traced_entry.wgsl`, `program_api.wgsl`) through the text hook and called `Renderer::reload_program` for each fixture program.
+- That reload recompiles only the program's hot sets: two background pipelines.
+- The frames' traced shading kernel never recompiled after a template edit.
+- So the pass would print numbers from unchanged kernels. A real program pass must rebuild the slot's installed variants, and the lists and hit shading that read the same templates.
+
 **Adding a pass** takes two pieces:
-1. **Override.** Route the pass's sources through `program::gi_shader` (or a function like it), which composes the bench's text when the feature is on.
+1. **Override.** Route the pass's sources through `program::engine_shader` (or `gi_shader`), which composes the bench's text when the feature is on.
 2. **Rebuild.** Write a `bench_reload_*` that rebuilds the pass's pipelines and keeps the old ones on an error, then add a row to `PASSES` in `src/bench/mod.rs`.
 
 ## Adding a fixture
@@ -132,6 +144,9 @@ A fixture is a child of the `renderer` module, so crate-internal renderer state 
 | fixture | owner | scene | metrics |
 |---|---|---|---|
 | `walk` | gicut | the grey box, a camera walking 0.02 m per frame for 48 frames after 64 still | `energy`, `err`, `off5` on the last frame; cache ms per walking frame |
+| `walk-wrap` | gicut | `walk` with the cache's frame stamp started so the walk crosses frame 4096 (a 12-bit stamp's wrap) 24 frames in | as `walk` |
+| `city` (named only) | gicut, shade (src/bench/city.rs) | a closed furnace room (exact L = 1) holding 3,000 instanced boxes and 150 instanced 320-triangle rocks (85,548 triangles, 3,153 placements), two skinned columns swung each frame, a 1 lux sun the room occludes (`LIGHTBENCH_CITY_SUN_LUX`); camera walking 0.05 m per frame for 64 frames after 32 still | `energy`, `err`, `off5`; `geometry_bytes` (the cache's software geometry); `triangles`, `placements`; per walking frame `gather_rays`, `light_rays`, `aimed_rays` (series); cache ms per walking frame |
+| `terrain` (named only) | gicut, shade | the same room over one 320 x 320 heightfield (204,800 triangles in one mesh) | as `city` |
 | `grey`, `orange` | gicut (src/gi_furnace_tests.rs) | closed emitting box, exact L = Le / (1 - rho) | `energy`, `err`, `off5` |
 | `slab` (named only) | gicut | thin slab over an emitter under a sky; the top reads 0.5 | `energy`, `err`, `off5` |
 | `slab-roof` (named only) | gicut | the slab under a roof and a black sky; top and roof read 0 | `top.mean`, `top.leak_max`, `roof.*` |
