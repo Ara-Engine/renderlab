@@ -55,7 +55,7 @@ RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK lightben
 |---|---|
 | `--once` | run every fixture once and exit (scripts, CI) |
 | `--paths nort,rt` | which paths (default `nort`: the walking-cost goal's path) |
-| `--fixtures walk,grey` | which fixtures (default all but the named-only slab cases) |
+| `--fixtures walk,grey` | which fixtures (default all but the named-only real-size scenes `city` and `terrain`) |
 | `--shaders <dir>` | the shader directory to watch |
 
 Environment:
@@ -148,10 +148,10 @@ A fixture is a child of the `renderer` module, so crate-internal renderer state 
 | `city` (named only) | gicut, shade (src/bench/city.rs) | a closed furnace room (exact L = 1) holding 3,000 instanced boxes and 150 instanced 320-triangle rocks (85,548 triangles, 3,153 placements), two skinned columns swung each frame, a 1 lux sun the room occludes (`LIGHTBENCH_CITY_SUN_LUX`); camera walking 0.05 m per frame for 64 frames after 32 still | `energy`, `err`, `off5`; `geometry_bytes` (the cache's software geometry); `triangles`, `placements`; per walking frame `gather_rays`, `light_rays`, `aimed_rays` (series); cache ms per walking frame |
 | `terrain` (named only) | gicut, shade | the same room over one 320 x 320 heightfield (204,800 triangles in one mesh) | as `city` |
 | `grey`, `orange` | gicut (src/gi_furnace_tests.rs) | closed emitting box, exact L = Le / (1 - rho) | `energy`, `err`, `off5` |
-| `slab` (named only) | gicut | thin slab over an emitter under a sky; the top reads 0.5 | `energy`, `err`, `off5` |
-| `slab-roof` (named only) | gicut | the slab under a roof and a black sky; top and roof read 0 | `top.mean`, `top.leak_max`, `roof.*` |
+| `slab` | gicut | thin slab over an emitter under a sky; the top reads 0.5 | `energy`, `err`, `off5` |
+| `slab-roof` | gicut | the slab under a roof and a black sky; top and roof read 0 | `top.mean`, `top.leak_max`, `roof.*` |
 | `shadow-edges` | clipmap (src/bench/shadow_edges.rs) | a grey floor under a soft sun (0.02 rad), the sun only: a 3 m rail 0.9 m up turned against the map's grid, a 0.3 m block resting on the floor, a 5 mm wire; 256x256, `LIGHTBENCH_SHADOW_FRAMES` frames (default 8) with TR1 | against the exact answer (the sun's disk cast on the CPU from each floor pixel, once at load): `err` over the edge band, `lit_in_shadow`, `rail_wobble_px`, `contact_gap_px`, `thin_missing`; `mask_mismatch` checks the camera |
 
-**Known bug.** The slab cases read black on the bench, where the furnace test reads 0.5 on the top face. So they run only when `--fixtures` names them.
+**Atmosphere.** The furnace and real-size fixtures turn the atmosphere off, as lib tests start (`Atmosphere::off`). The default physical sky, which every non-test build gets, is black without a sun, and it puts height and volumetric fog into the rooms. Under it the slab's top read 0 instead of 0.5, and the boxes read about 0.4% darker.
 
 The furnace fixtures start each run from an empty lighting cache (`reset_indirect`) and render `LIGHTBENCH_FURNACE_FRAMES` frames per view. The default is 64 against the GPU test's 300, so their numbers are the bench's, not the test's.

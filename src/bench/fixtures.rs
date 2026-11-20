@@ -16,7 +16,6 @@ pub(crate) fn fixtures() -> Vec<Box<dyn Fixture>> {
     ]
 }
 
-/// Fixtures that run only when `--fixtures` names them. The slab cases read black on the bench
-/// where the furnace test reads 0.5 on the top face (a bench bug not yet found); the real-size
-/// scenes take about a second a round each, outside the default loop's budget.
-pub(crate) const NAMED_ONLY: &[&str] = &["slab", "slab-roof", "city", "terrain"];
+/// Fixtures that run only when `--fixtures` names them: the real-size scenes take about a
+/// second a round each, outside the default loop's budget.
+pub(crate) const NAMED_ONLY: &[&str] = &["city", "terrain"];

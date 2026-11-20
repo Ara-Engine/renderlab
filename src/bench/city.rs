@@ -234,6 +234,8 @@ impl Fixture for City {
             requests: vec![ShadowRequest::Directional { split_ends: vec![4.0, 12.0, 40.0] }],
             ..Default::default()
         };
+        // No fog in the furnace room, as in the furnace fixtures (`Atmosphere::off`).
+        r.set_atmosphere(crate::Atmosphere::off())?;
         r.set_lighting_and_shadows(&Lighting {
             lights: vec![Light::Directional {
                 travel: Vec3::new(0.3, -1.0, 0.2).normalize(),

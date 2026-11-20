@@ -133,7 +133,11 @@ impl Furnace {
             name: "slab",
             sky: 1.0,
             shapes: Self::slab_shapes(),
-            views: vec![View { name: "top", eye: Vec3::new(0.0, 1.2, 0.0), target: Vec3::ZERO, up: Vec3::Z, expected: [0.5; 3], walk: None }],
+            views: vec![
+                View { name: "top", eye: Vec3::new(0.0, 1.2, 0.0), target: Vec3::ZERO, up: Vec3::Z, expected: [0.5; 3], walk: None },
+                // The emitter seen directly from below the slab: no exact answer (`mean` only).
+                View { name: "underside", eye: Vec3::new(0.0, -0.25, 0.0), target: Vec3::ZERO, up: Vec3::Z, expected: [-1.0; 3], walk: None },
+            ],
             loaded: None,
             start_frame: None,
         }
@@ -169,6 +173,10 @@ impl Fixture for Furnace {
         self.name
     }
     fn load(&mut self, r: &mut Renderer, _path: BenchPath) -> Result<(), Error> {
+        // As the furnace test runs (lib tests start with the atmosphere off): the uniform sky is
+        // the environment, and no fog sits in the box. The default physical sky without a sun is
+        // black, which read the slab's top as 0 instead of 0.5.
+        r.set_atmosphere(crate::Atmosphere::off())?;
         r.set_lighting(&Lighting { lights: vec![], environment: [self.sky; 3], exposure_stops: 0.0 })?;
         // Single-sample frames: the estimator's own answer, not TR1's history of it.
         r.set_reconstruction(Reconstruction::off())?;
@@ -215,7 +223,9 @@ impl Fixture for Furnace {
             let answer = f64::from(kit::luminance(view.expected));
             let mean = lum.iter().sum::<f64>() / n;
             metrics.push((name("mean"), mean));
-            if answer > 0.0 {
+            if view.expected[0] < 0.0 {
+                // No exact answer for this view.
+            } else if answer > 0.0 {
                 metrics.push((name("energy"), mean / answer));
                 metrics.push((name("err"), lum.iter().map(|l| (l / answer - 1.0).abs()).sum::<f64>() / n));
                 metrics.push((name("off5"), lum.iter().filter(|l| (*l / answer - 1.0).abs() > 0.05).count() as f64 / n));
