@@ -383,13 +383,23 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
                 }
                 let pass_text: Vec<String> =
                     stats.medians.iter().filter(|(k, _)| *k != "cache" && *k != "span").map(|(k, v)| format!("{k}={v:.2}")).collect();
+                // The cache's cost by the walking-cost budget's three parts: new-cell tracing (update,
+                // claim, probe), gather and integrate; the rest is cell shading and the receivers.
+                let m = |k: &str| stats.medians.get(k).copied().unwrap_or(0.0);
+                let trace = m("gi_update") + m("gi_claim") + m("gi_probe");
+                let split = format!(
+                    "trace {trace:.2} gather {:.2} integrate {:.2} other {:.2}",
+                    m("gi_gather"),
+                    m("gi_integrate"),
+                    m("cache") - trace - m("gi_gather") - m("gi_integrate")
+                );
                 println!(
-                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames, span {:.2} | ms {} | {seconds:.2} s{contended}",
+                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames ({split}), span {:.2} | ms {} | {seconds:.2} s{contended}",
                     rig.path.name(),
                     shown.join(" "),
-                    stats.medians.get("cache").copied().unwrap_or(0.0),
+                    m("cache"),
                     cache.len(),
-                    stats.medians.get("span").copied().unwrap_or(0.0),
+                    m("span"),
                     pass_text.join(" ")
                 );
                 let passes: Vec<(String, f64)> = stats.medians.into_iter().collect();

@@ -13,7 +13,7 @@
 //!   cache as walking left it;
 //! - `hold_energy`, `hold_err`: the last held frame;
 //! - `converge_frames`: held frames until the marked region (the view's central 20%) is within
-//!   2% of the reference there, -1 if never.
+//!   2% of the reference there, -1 if never; `arrive_region` and `hold_region` are its ratio.
 //!
 //! The bench's per-frame cache milliseconds cover the walking frames (`frames_measured`).
 //!
@@ -349,6 +349,7 @@ impl Fixture for Dump {
                         let tag = if k == 0 { "arrive" } else { "hold" };
                         metrics.push((format!("{tag}_energy"), energy));
                         metrics.push((format!("{tag}_err"), err));
+                        metrics.push((format!("{tag}_region"), region(&pixels) / region(&reference.rgb)));
                     }
                 }
             }
