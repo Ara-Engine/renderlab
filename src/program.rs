@@ -786,7 +786,8 @@ fn with_old_child_order(bvh4: &str) -> String {
 
 /// A world radiance cache shader's source (`name` under shaders/). Test builds read the
 /// same-named file from RENDERLAB_GI_SHADERS when it exists, so a lease can screen
-/// shader variants on one binary, one process per variant (docs/m7-g1b.md).
+/// shader variants on one binary, one process per variant (docs/m7-g1b.md). The bench
+/// (feature `bench`, docs/bench.md) supplies the text it read from disk instead.
 pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'static, str> {
     #[cfg(test)]
     if let Some(text) = std::env::var_os("RENDERLAB_GI_SHADERS")
@@ -794,17 +795,25 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     {
         return text.into();
     }
+    #[cfg(feature = "bench")]
+    if let Some(text) = crate::renderer::bench::shader_text(name) {
+        return gi_shader_variant(name, &text).into_owned().into();
+    }
+    gi_shader_variant(name, builtin)
+}
+/// `gi_shader`'s switches, applied to the built-in text or the bench's.
+fn gi_shader_variant<'a>(name: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
     // RENDERLAB_GI_BUCKET=0: the cache's table searches walk a bucket one key word at a time.
     if name == "gi_cells.wgsl" && bucket_walk() {
         let from = "const GI_FIND_WHOLE:bool=true;";
-        assert_eq!(builtin.matches(from).count(), 1, "RENDERLAB_GI_BUCKET seam");
-        return builtin.replacen(from, "const GI_FIND_WHOLE:bool=false;", 1).into();
+        assert_eq!(text.matches(from).count(), 1, "RENDERLAB_GI_BUCKET seam");
+        return text.replacen(from, "const GI_FIND_WHOLE:bool=false;", 1).into();
     }
     // The software rays' top level (src/instance_bvh.rs) selects its traversal here.
     if name == "gi_rays_software.wgsl" {
-        return crate::instance_bvh::shader_text(builtin).into();
+        return crate::instance_bvh::shader_text(text).into();
     }
-    builtin.into()
+    text.into()
 }
 /// `RENDERLAB_GI_BUCKET=0`: a cache lookup past its key's first two slots walks the bucket one
 /// key word at a time (gi_api.wgsl GI_BUCKET_WHOLE), and so do the kernels' finds past their
