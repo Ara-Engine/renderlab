@@ -13,6 +13,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod city;
 mod dump;
+pub(crate) mod edits;
+mod reload;
 mod fixtures;
 mod furnace;
 pub(crate) mod kit;
@@ -74,14 +76,20 @@ pub(crate) fn shader_text(name: &str) -> Option<String> {
     TEXT.lock().unwrap().get(name).cloned()
 }
 
-/// A pass the bench can rebuild: the shader files it composes and its rebuild.
+/// A pass the bench can rebuild: the shader files it composes, its rebuild, and the fixtures
+/// whose numbers read it (empty: every fixture). `edits`: its files' new text reaches modules
+/// through `edits` (every module the process creates) instead of `shader_text`.
 struct Pass {
     name: &'static str,
     files: &'static [&'static str],
     reload: fn(&mut Renderer) -> Result<(), Error>,
+    fixtures: &'static [&'static str],
+    edits: bool,
 }
-/// Files whose text reaches the program shading kernels through compile-time constants
-/// (program.rs) are not here yet: editing them prints that the bench cannot reload them.
+/// After a reload, only the pass's fixtures rebuild and run; the others rebuild before they next
+/// run (`Rig::stale`). The prelude passes share one rebuild (src/bench/reload.rs): their kernels
+/// all compose the traced heads, and a file of one (a reflection or TR1 view file) can compose
+/// into another's kernels too.
 const PASSES: &[Pass] = &[Pass {
     name: "gi",
     files: &[
@@ -95,6 +103,8 @@ const PASSES: &[Pass] = &[Pass {
         "gi_shade_entry.wgsl",
     ],
     reload: Renderer::bench_reload_gi,
+    fixtures: &[],
+    edits: false,
 }, Pass {
     name: "vsm",
     files: &[
@@ -105,6 +115,91 @@ const PASSES: &[Pass] = &[Pass {
         "virtual_shadow_disk.wgsl",
     ],
     reload: Renderer::bench_reload_vsm,
+    fixtures: &[],
+    edits: false,
+}, Pass {
+    name: "shading",
+    files: &[
+        "scene.wgsl",
+        "program_api.wgsl",
+        "program_traced.wgsl",
+        "program_traced_entry.wgsl",
+        "program_traced_list.wgsl",
+        "program_traced_residency.wgsl",
+        "program_view.wgsl",
+        "program_bins.wgsl",
+        "programs/standard.wgsl",
+        "programs/toon.wgsl",
+        "light_cluster_api.wgsl",
+        "light_vis_pass.wgsl",
+        "decals.wgsl",
+        "environment_lobes.wgsl",
+        "specular_filter.wgsl",
+        "shadow_visibility_filter.wgsl",
+        "gi_api.wgsl",
+    ],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["grey", "orange", "shadow-edges", "reflect"],
+    edits: true,
+}, Pass {
+    name: "reflections",
+    files: &[
+        "reflections.wgsl",
+        "reflections_composite.wgsl",
+        "reflections_deferred.wgsl",
+        "reflections_history.wgsl",
+        "reflections_lobe.wgsl",
+        "reflections_resolve.wgsl",
+        "reflections_software.wgsl",
+        "reflections_software_bvh4.wgsl",
+        "reflections_trace.wgsl",
+        "reflection_cache_hits.wgsl",
+        "reflection_hit_bins.wgsl",
+        "reflection_hit_sun.wgsl",
+        "reflection_hits.wgsl",
+    ],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["reflect"],
+    edits: true,
+}, Pass {
+    name: "transparency",
+    files: &["transparency.wgsl", "transparency_shadow.wgsl", "id_glass.wgsl", "pane_pixels.wgsl", "transmission_reduce.wgsl"],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["glass"],
+    edits: true,
+}, Pass {
+    name: "gi_receiver",
+    files: &["gi_receiver_pass.wgsl"],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["walk", "grey"],
+    edits: true,
+}, Pass {
+    name: "tr1",
+    files: &["temporal_resolve.wgsl", "temporal_zones.wgsl", "temporal_coverage_cycle.wgsl", "temporal_coverage_pack.wgsl", "temporal_view.wgsl"],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["tr1-edge"],
+    edits: true,
+}, Pass {
+    name: "visibility",
+    files: &[
+        "primary_rays.wgsl",
+        "primary_trace.wgsl",
+        "primary_interactive.wgsl",
+        "primary_edge_check.wgsl",
+        "primary_edge_queue.wgsl",
+        "visibility_buffer.wgsl",
+        "visibility_buffer_attachment.wgsl",
+        "visibility_buffer_attachment_hzb.wgsl",
+        "visibility_buffer_cull.wgsl",
+        "visibility_buffer_hzb.wgsl",
+        "visibility_buffer_raster.wgsl",
+        "visibility_buffer_reset.wgsl",
+        "visibility_buffer_resolve.wgsl",
+        "visibility_buffer_sw.wgsl",
+    ],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["shadow-edges", "tr1-edge"],
+    edits: true,
 }];
 
 struct Options {
@@ -157,15 +252,22 @@ fn options() -> Result<Options, String> {
 /// A fixture on one path: its renderer (recreated after a fault) and cached reference.
 struct Rig {
     path: BenchPath,
-    device: (wgpu::Device, wgpu::Queue),
+    device: (crate::pipeline_compilation::PipelineDevice, wgpu::Queue),
     fixture: Box<dyn Fixture>,
     r: Option<Renderer>,
     reference: Option<RefImage>,
     /// This rig's own pass log (each renderer truncates the file it opens) and how far it was read.
     pass_log: PathBuf,
     read_to: u64,
+    /// Passes reloaded since this rig's renderer last rebuilt them: it rebuilds them before it
+    /// next runs.
+    stale: Vec<&'static Pass>,
 }
 impl Rig {
+    /// Whether a reload of `pass` runs this rig's fixture.
+    fn reads(&self, pass: &Pass) -> bool {
+        pass.fixtures.is_empty() || pass.fixtures.contains(&self.fixture.name())
+    }
     fn build(&mut self, refs: &Path) -> Result<(), Error> {
         // SAFETY: the bench's threads never read the environment; renderers read it as they are created.
         unsafe { std::env::set_var("RENDERLAB_PASS_LOG", &self.pass_log) };
@@ -339,15 +441,22 @@ fn json_map(items: &[(String, f64)]) -> String {
     format!("{{{}}}", body.join(","))
 }
 
-/// Runs every rig once and prints its lines. Returns the seconds the fixtures took.
-fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
+/// Runs the rigs `run` picks once and prints their lines, first rebuilding the passes they are
+/// stale in. Returns the seconds the fixtures took.
+fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bool) -> f64 {
     wait_quiet(&o.hold);
     let started = Instant::now();
-    for rig in rigs.iter_mut() {
+    for rig in rigs.iter_mut().filter(|rig| run(rig)) {
         if rig.r.is_none() {
             if let Err(error) = rig.build(&o.refs) {
                 println!("bench {} {} error: could not build the fixture: {error}", rig.fixture.name(), rig.path.name());
                 continue;
+            }
+            rig.stale.clear();
+        }
+        for pass in std::mem::take(&mut rig.stale) {
+            if let Err(error) = (pass.reload)(rig.r.as_mut().unwrap()) {
+                println!("bench {} {} error: rebuilding {}: {error}", rig.fixture.name(), rig.path.name(), pass.name);
             }
         }
         let r = rig.r.as_mut().unwrap();
@@ -474,10 +583,18 @@ pub fn main() -> i32 {
     // The passes' sources as they are on disk now, not as this binary was built.
     {
         let mut text = TEXT.lock().unwrap();
-        for file in PASSES.iter().flat_map(|p| p.files) {
+        for file in PASSES.iter().filter(|p| !p.edits).flat_map(|p| p.files) {
             if let Ok(source) = std::fs::read_to_string(o.shaders.join(file)) {
                 text.insert((*file).to_owned(), source);
             }
+        }
+    }
+    // The edits passes' files as the bench starts: their hunks are taken against this text,
+    // which the binary's own (`include_str!`) is assumed to match.
+    let mut base: BTreeMap<String, String> = BTreeMap::new();
+    for file in PASSES.iter().filter(|p| p.edits).flat_map(|p| p.files) {
+        if let Ok(source) = std::fs::read_to_string(o.shaders.join(file)) {
+            base.insert((*file).to_owned(), source);
         }
     }
     wait_quiet(&o.hold);
@@ -497,7 +614,7 @@ pub fn main() -> i32 {
                 continue;
             }
             let pass_log = o.runs.join(format!("passes-{pid}-{}-{}.jsonl", fixture.name(), path.name()));
-            rigs.push(Rig { path, device: device.clone(), fixture, r: None, reference: None, pass_log, read_to: 0 });
+            rigs.push(Rig { path, device: device.clone(), fixture, r: None, reference: None, pass_log, read_to: 0, stale: vec![] });
         }
     }
     for rig in &mut rigs {
@@ -508,8 +625,11 @@ pub fn main() -> i32 {
     let (built, mut compiled_to) = compiles(&compile_log, 0);
     println!("lightbench: {} fixtures on {} paths built in {:.1} s ({built}); watching {}", rigs.len() / o.paths.len().max(1), o.paths.len(), started.elapsed().as_secs_f64(), o.shaders.display());
     let mut round = 0;
-    let seconds = run_round(&mut rigs, &o, round);
+    let seconds = run_round(&mut rigs, &o, round, |_| true);
     println!("lightbench: round {round}: fixtures {seconds:.2} s");
+    // The paths' pipeline caches on disk (each facade is shared, so once per path).
+    let save = |rigs: &[Rig]| rigs.iter().for_each(|rig| rig.device.0.save_cache());
+    save(&rigs);
     if o.once {
         return 0;
     }
@@ -526,16 +646,23 @@ pub fn main() -> i32 {
         let saved = changed.iter().map(|(_, t)| *t).min().unwrap();
         // Editors write a file in more than one step: read it once it has stopped changing.
         std::thread::sleep(Duration::from_millis(20));
-        let mut reload: Vec<&Pass> = vec![];
+        let mut reload: Vec<&'static Pass> = vec![];
         let mut previous: Vec<(String, Option<String>)> = vec![];
+        let mut edited: Vec<String> = vec![];
         for (file, _) in &changed {
             let Some(pass) = PASSES.iter().find(|p| p.files.contains(&file.as_str())) else {
                 println!("lightbench: {file} changed; no bench pass reloads it yet (docs/bench.md)");
                 continue;
             };
             let Ok(source) = std::fs::read_to_string(o.shaders.join(file)) else { continue };
-            let old = TEXT.lock().unwrap().insert(file.clone(), source);
-            previous.push((file.clone(), old));
+            if pass.edits {
+                if edits::set(file, base.get(file).map_or("", String::as_str), &source) {
+                    edited.push(file.clone());
+                }
+            } else {
+                let old = TEXT.lock().unwrap().insert(file.clone(), source);
+                previous.push((file.clone(), old));
+            }
             if !reload.iter().any(|p| p.name == pass.name) {
                 reload.push(pass);
             }
@@ -546,41 +673,80 @@ pub fn main() -> i32 {
         wait_quiet(&o.hold);
         round += 1;
         let t = Instant::now();
-        for pass in &reload {
-            let mut failed = None;
-            for rig in rigs.iter_mut() {
-                if let Some(r) = rig.r.as_mut() {
-                    if let Err(error) = (pass.reload)(r) {
-                        failed = Some((rig.path, error));
-                        break;
+        edits::reset_counts();
+        for &pass in &reload {
+            for rig in rigs.iter_mut().filter(|rig| rig.r.is_some()) {
+                if !rig.reads(pass) {
+                    if !rig.stale.iter().any(|p| p.name == pass.name) {
+                        rig.stale.push(pass);
                     }
+                } else {
+                    rig.stale.retain(|p| p.name != pass.name);
                 }
             }
+            // The rigs' renderers rebuild at once, each on its own thread (prepare's compile
+            // slots add up), so the kernels of both paths compile together.
+            let failed = std::thread::scope(|s| {
+                let jobs: Vec<_> = rigs
+                    .iter_mut()
+                    .filter(|rig| rig.reads(pass))
+                    .filter_map(|rig| {
+                        let path = rig.path.name();
+                        rig.r.as_mut().map(|r| s.spawn(move || (path, (pass.reload)(r))))
+                    })
+                    .collect();
+                jobs.into_iter().map(|j| j.join().unwrap()).find_map(|(path, result)| result.err().map(|e| (path, e)))
+            });
+            // An edits pass's module that fails naga was created from the last working text.
+            let failed = failed.or_else(|| if pass.edits { edits::take_error().map(|e| ("naga", Error::Shader(e))) } else { None });
             if let Some((path, error)) = failed {
-                println!("lightbench: {} on {}: shader error; keeping the last working pipelines:\n{error}", pass.name, path.name());
-                let mut text = TEXT.lock().unwrap();
-                for (file, old) in previous.iter().filter(|(f, _)| pass.files.contains(&f.as_str())) {
-                    match old {
-                        Some(old) => text.insert(file.clone(), old.clone()),
-                        None => text.remove(file),
-                    };
+                println!("lightbench: {} on {path}: shader error; keeping the last working pipelines:
+{error}", pass.name);
+                if pass.edits {
+                    edits::settle(false);
+                } else {
+                    let mut text = TEXT.lock().unwrap();
+                    for (file, old) in previous.iter().filter(|(f, _)| pass.files.contains(&f.as_str())) {
+                        match old {
+                            Some(old) => text.insert(file.clone(), old.clone()),
+                            None => text.remove(file),
+                        };
+                    }
                 }
-                drop(text);
                 // Renderers rebuilt before the failing one go back to the working text.
-                for rig in rigs.iter_mut() {
+                for rig in rigs.iter_mut().filter(|rig| rig.reads(pass)) {
                     if let Some(r) = rig.r.as_mut() {
                         let _ = (pass.reload)(r);
                     }
                 }
+            } else if pass.edits {
+                edits::settle(true);
             }
         }
         let reload_s = t.elapsed().as_secs_f64();
         let (summary, end) = compiles(&compile_log, compiled_to);
         compiled_to = end;
-        println!("lightbench: reloaded in {reload_s:.2} s: {summary}");
-        let fixtures_s = run_round(&mut rigs, &o, round);
+        let reached: Vec<String> = edited.iter().map(|f| format!("{f} reached {} modules", edits::reached(f))).collect();
+        let reached = if reached.is_empty() { String::new() } else { format!("; {}", reached.join(", ")) };
+        println!("lightbench: reloaded in {reload_s:.2} s: {summary}{reached}");
+        for file in edited.iter().filter(|f| edits::reached(f) == 0) {
+            println!("lightbench: warning: the edit to {file} reached no module: its numbers are the old kernels' (docs/bench.md)");
+        }
+        let fixtures_s = run_round(&mut rigs, &o, round, |rig| reload.iter().any(|p| rig.reads(p)));
+        // A module the fixtures' frames compiled (built on first use) failed: its pipelines used
+        // the last working text; the rigs rebuild that text before they next run.
+        if let Some(error) = edits::take_error() {
+            println!("lightbench: shader error in a module built during the round; its pipelines kept the last working text:
+{error}");
+            edits::settle(false);
+            for rig in rigs.iter_mut() {
+                let stale: Vec<&'static Pass> = reload.iter().copied().filter(|p| p.edits && rig.reads(p)).collect();
+                rig.stale.extend(stale);
+            }
+        }
         let total = SystemTime::now().duration_since(saved).map_or(0.0, |d| d.as_secs_f64());
         let names: Vec<&str> = reload.iter().map(|p| p.name).collect();
         println!("lightbench: round {round}: save to numbers {total:.2} s (reload {} {reload_s:.2} s, fixtures {fixtures_s:.2} s)", names.join(","));
+        save(&rigs);
     }
 }

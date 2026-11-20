@@ -1,6 +1,7 @@
 //! What fixtures share: the bench's devices and renderers, meshes from quads, a frame that
 //! waits for admission, and the HDR read back as radiance.
 use super::BenchPath;
+use crate::pipeline_compilation::PipelineDevice;
 use crate::renderer::Renderer;
 use crate::{
     Camera, Draw, Error, HardwareShadowOptions, Instances, Limits, Material, MaterialDescriptor, Mat4, Mesh,
@@ -14,14 +15,18 @@ pub(crate) const SOURCE: &str = include_str!("../../shaders/scene.wgsl");
 pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// One headless Vulkan device per path: with ray queries (`Rt`, which needs
-/// RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK as every RT test does) or without them.
-pub(crate) fn device(path: BenchPath) -> Result<(wgpu::Device, wgpu::Queue), String> {
+/// RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK as every RT test does) or without them. Its facade holds
+/// one pipeline cache for every renderer on the path, as the engine's does, saved under
+/// `LIGHTBENCH_CACHE` (default D:/Coding/renderlab-work/bench-cache): a revert, an A/B toggle or a
+/// restart is a cache hit, and a rig compiles nothing another rig on its path already compiled.
+pub(crate) fn device(path: BenchPath) -> Result<(PipelineDevice, wgpu::Queue), String> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).map_err(|e| e.to_string())?;
-    let descriptor = match path {
+    let cache = adapter.features() & wgpu::Features::PIPELINE_CACHE;
+    let mut descriptor = match path {
         BenchPath::Rt => {
             if std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref() != Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK") {
                 return Err("the RT path needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK".into());
@@ -68,25 +73,26 @@ pub(crate) fn device(path: BenchPath) -> Result<(wgpu::Device, wgpu::Queue), Str
             ..Default::default()
         },
     };
-    pollster::block_on(adapter.request_device(&descriptor)).map_err(|e| e.to_string())
+    descriptor.required_features |= cache;
+    let (device, queue) = pollster::block_on(adapter.request_device(&descriptor)).map_err(|e| e.to_string())?;
+    let directory = std::path::PathBuf::from(std::env::var("LIGHTBENCH_CACHE").unwrap_or_else(|_| "D:/Coding/renderlab-work/bench-cache".into()));
+    let _ = std::fs::create_dir_all(&directory);
+    let info = adapter.get_info();
+    Ok((PipelineDevice::new(device, Some((&directory, &info))), queue))
 }
 
 /// A renderer on `device` for `path`, single-sampled; the RT one traces its primaries. Up to
 /// 8192 instances per upload (the real-size fixtures).
-pub(crate) fn renderer(device: &(wgpu::Device, wgpu::Queue), path: BenchPath) -> Result<Renderer, Error> {
+pub(crate) fn renderer(device: &(PipelineDevice, wgpu::Queue), path: BenchPath) -> Result<Renderer, Error> {
     let (device, queue) = device.clone();
     let options = RendererOptions { samples: SampleCount::One, ..Default::default() };
     let limits = Limits { max_instances: 8192, ..Limits::default() };
-    Ok(match path {
-        BenchPath::Rt => {
-            let mut r = Renderer::new_with_hardware_shadows(
-                device, queue, FORMAT, limits, options, HardwareShadowOptions::default(), SOURCE,
-            )?;
-            r.set_primary_visibility(PrimaryVisibility::Traced)?;
-            r
-        }
-        BenchPath::NoRt => Renderer::new_with_options(device, queue, FORMAT, limits, options, SOURCE)?,
-    })
+    let hardware = (path == BenchPath::Rt).then(HardwareShadowOptions::default);
+    let mut r = Renderer::new_configured(device, queue, FORMAT, limits, options, hardware, SOURCE)?;
+    if path == BenchPath::Rt {
+        r.set_primary_visibility(PrimaryVisibility::Traced)?;
+    }
+    Ok(r)
 }
 
 /// Waits for the renderer's submitted work and collects it (frame slots, readbacks and the
