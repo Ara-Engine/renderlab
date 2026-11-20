@@ -77,12 +77,13 @@ pub(crate) fn renderer(device: &(wgpu::Device, wgpu::Queue), path: BenchPath) ->
     })
 }
 
-/// Waits for the renderer's submitted work and collects it (frame slots, readbacks).
+/// Waits for the renderer's submitted work and collects it (frame slots, readbacks and the
+/// pass log's lines, which only `poll` writes).
 pub(crate) fn drain(r: &mut Renderer) -> Result<(), Error> {
     r.device
         .poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(20)) })
         .map_err(Error::Poll)?;
-    r.collect().map(drop)
+    r.poll().map(drop)
 }
 
 /// Retries `attempt` (an admission that returns `None` while the renderer is busy), draining

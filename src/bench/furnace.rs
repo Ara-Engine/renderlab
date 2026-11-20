@@ -12,7 +12,8 @@
 //!
 //! Metrics per view (`<view>.` prefix where a case has several): `energy`, the mean luminance
 //! over the exact answer's; `err`, the mean per-pixel |luminance / answer - 1|; `off5`, the share
-//! of pixels more than 5% off. Where the answer is black: `leak_mean` and `leak_max` luminance.
+//! of pixels more than 5% off; `mean`, the mean luminance. Where the answer is black, `mean` is the
+//! leak and `leak_max` the brightest pixel's luminance.
 //! Frames per view: LIGHTBENCH_FURNACE_FRAMES (default 64); the cache starts empty each run.
 use super::{BenchPath, Fixture, RefImage, kit};
 use crate::renderer::Renderer;
@@ -165,13 +166,13 @@ impl Fixture for Furnace {
             let lum: Vec<f64> = pixels.iter().map(|&p| f64::from(kit::luminance(p))).collect();
             let n = lum.len() as f64;
             let answer = f64::from(kit::luminance(view.expected));
+            let mean = lum.iter().sum::<f64>() / n;
+            metrics.push((name("mean"), mean));
             if answer > 0.0 {
-                let mean = lum.iter().sum::<f64>() / n;
                 metrics.push((name("energy"), mean / answer));
                 metrics.push((name("err"), lum.iter().map(|l| (l / answer - 1.0).abs()).sum::<f64>() / n));
                 metrics.push((name("off5"), lum.iter().filter(|l| (*l / answer - 1.0).abs() > 0.05).count() as f64 / n));
             } else {
-                metrics.push((name("leak_mean"), lum.iter().sum::<f64>() / n));
                 metrics.push((name("leak_max"), lum.iter().copied().fold(0.0, f64::max)));
             }
         }

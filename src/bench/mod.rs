@@ -140,9 +140,15 @@ struct Rig {
     fixture: Box<dyn Fixture>,
     r: Option<Renderer>,
     reference: Option<RefImage>,
+    /// This rig's own pass log (each renderer truncates the file it opens) and how far it was read.
+    pass_log: PathBuf,
+    read_to: u64,
 }
 impl Rig {
     fn build(&mut self, refs: &Path) -> Result<(), Error> {
+        // SAFETY: the bench's threads never read the environment; renderers read it as they are created.
+        unsafe { std::env::set_var("RENDERLAB_PASS_LOG", &self.pass_log) };
+        self.read_to = 0;
         let mut r = kit::renderer(&self.device, self.path)?;
         self.fixture.load(&mut r, self.path)?;
         if self.reference.is_none() {
@@ -236,6 +242,25 @@ fn field(line: &str, key: &str) -> Option<f64> {
     rest[..rest.find([',', '}'])?].trim().parse().ok()
 }
 
+/// The pipeline compiles logged from `offset` on (the renderers' pipeline log): their count,
+/// seconds and the longest, and the end of the log.
+fn compiles(log: &Path, offset: u64) -> (String, u64) {
+    let Ok(text) = std::fs::read(log) else { return (String::new(), offset) };
+    let end = text.len() as u64;
+    let text = String::from_utf8_lossy(&text[(offset.min(end)) as usize..]).into_owned();
+    let (mut n, mut total, mut longest) = (0, 0.0, (0.0, String::new()));
+    for line in text.lines().filter(|l| l.contains("\"event\":\"compile\"") && !l.contains("\"kind\":\"module\"")) {
+        let ms = field(line, "\"ms\":").unwrap_or(0.0);
+        n += 1;
+        total += ms;
+        if ms > longest.0 {
+            let label = line.split("\"label\":\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or("");
+            longest = (ms, label.to_owned());
+        }
+    }
+    (format!("{n} pipelines in {:.2} s, longest {} {:.2} s", total / 1e3, longest.1, longest.0 / 1e3), end)
+}
+
 fn json_string(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
@@ -248,10 +273,9 @@ fn json_map(items: &[(String, f64)]) -> String {
 }
 
 /// Runs every rig once and prints its lines. Returns the seconds the fixtures took.
-fn run_round(rigs: &mut [Rig], o: &Options, log: &Path, round: u32) -> f64 {
+fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
     wait_quiet(&o.hold);
     let started = Instant::now();
-    let mut offset = std::fs::metadata(log).map_or(0, |m| m.len());
     for rig in rigs.iter_mut() {
         if rig.r.is_none() {
             if let Err(error) = rig.build(&o.refs) {
@@ -264,8 +288,8 @@ fn run_round(rigs: &mut [Rig], o: &Options, log: &Path, round: u32) -> f64 {
         let result = rig.fixture.run(r, rig.path, rig.reference.as_ref());
         let _ = kit::drain(r);
         let seconds = t.elapsed().as_secs_f64();
-        let (passes, end) = pass_medians(log, offset);
-        offset = end;
+        let (passes, end) = pass_medians(&rig.pass_log, rig.read_to);
+        rig.read_to = end;
         let name = rig.fixture.name().to_owned();
         match result {
             Ok(metrics) => {
@@ -323,12 +347,14 @@ pub fn main() -> i32 {
         eprintln!("lightbench: {}: {error}", o.runs.display());
         return 1;
     }
-    // Per-pass GPU times come from the renderers' own pass log (src/pass_timeline.rs), which
-    // each renderer opens when it is created.
-    let log = o.runs.join(format!("passes-{}.jsonl", std::process::id()));
-    let _ = std::fs::remove_file(&log);
+    // Per-pass GPU times come from the renderers' own pass logs (src/pass_timeline.rs), one
+    // per rig, which each renderer opens when it is created.
+    let pid = std::process::id();
+    // Each compile's label and time, for the summaries after start-up and each reload.
+    let compile_log = o.runs.join(format!("pipelines-{pid}.jsonl"));
+    let _ = std::fs::remove_file(&compile_log);
     // SAFETY: set before any thread starts; nothing else reads the environment concurrently.
-    unsafe { std::env::set_var("RENDERLAB_PASS_LOG", &log) };
+    unsafe { std::env::set_var("RENDERLAB_PIPELINE_LOG", &compile_log) };
     // The passes' sources as they are on disk now, not as this binary was built.
     {
         let mut text = TEXT.lock().unwrap();
@@ -353,7 +379,8 @@ pub fn main() -> i32 {
             if o.only.as_ref().is_some_and(|only| !only.iter().any(|n| n == fixture.name())) {
                 continue;
             }
-            rigs.push(Rig { path, device: device.clone(), fixture, r: None, reference: None });
+            let pass_log = o.runs.join(format!("passes-{pid}-{}-{}.jsonl", fixture.name(), path.name()));
+            rigs.push(Rig { path, device: device.clone(), fixture, r: None, reference: None, pass_log, read_to: 0 });
         }
     }
     for rig in &mut rigs {
@@ -361,9 +388,10 @@ pub fn main() -> i32 {
             println!("bench {} {} error: could not build the fixture: {error}", rig.fixture.name(), rig.path.name());
         }
     }
-    println!("lightbench: {} fixtures on {} paths built in {:.1} s; watching {}", rigs.len() / o.paths.len().max(1), o.paths.len(), started.elapsed().as_secs_f64(), o.shaders.display());
+    let (built, mut compiled_to) = compiles(&compile_log, 0);
+    println!("lightbench: {} fixtures on {} paths built in {:.1} s ({built}); watching {}", rigs.len() / o.paths.len().max(1), o.paths.len(), started.elapsed().as_secs_f64(), o.shaders.display());
     let mut round = 0;
-    let seconds = run_round(&mut rigs, &o, &log, round);
+    let seconds = run_round(&mut rigs, &o, round);
     println!("lightbench: round {round}: fixtures {seconds:.2} s");
     if o.once {
         return 0;
@@ -430,7 +458,10 @@ pub fn main() -> i32 {
             }
         }
         let reload_s = t.elapsed().as_secs_f64();
-        let fixtures_s = run_round(&mut rigs, &o, &log, round);
+        let (summary, end) = compiles(&compile_log, compiled_to);
+        compiled_to = end;
+        println!("lightbench: reloaded in {reload_s:.2} s: {summary}");
+        let fixtures_s = run_round(&mut rigs, &o, round);
         let total = SystemTime::now().duration_since(saved).map_or(0.0, |d| d.as_secs_f64());
         let names: Vec<&str> = reload.iter().map(|p| p.name).collect();
         println!("lightbench: round {round}: save to numbers {total:.2} s (reload {} {reload_s:.2} s, fixtures {fixtures_s:.2} s)", names.join(","));
