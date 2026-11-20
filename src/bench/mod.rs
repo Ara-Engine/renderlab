@@ -102,7 +102,8 @@ fn options() -> Result<Options, String> {
     let env = |k: &str, default: &str| PathBuf::from(std::env::var(k).unwrap_or_else(|_| default.to_owned()));
     let mut o = Options {
         once: false,
-        paths: vec![BenchPath::NoRt, BenchPath::Rt],
+        // Without ray hardware by default: the walking-cost goal's path. `--paths nort,rt` adds RT.
+        paths: vec![BenchPath::NoRt],
         only: None,
         shaders: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders"),
         hold: env("LIGHTBENCH_HOLD", "D:/Coding/renderlab-work/timing-hold"),
@@ -202,30 +203,52 @@ fn wait_quiet(hold: &Path) {
     println!("lightbench: the timing-hold is gone, resuming");
 }
 
-/// Each pass's median GPU milliseconds over the pass-log lines from `offset` on (frames that
-/// compiled or were dropped left out), and the end of the log.
-fn pass_medians(log: &Path, offset: u64) -> (BTreeMap<String, f64>, u64) {
-    let Ok(text) = std::fs::read(log) else { return (BTreeMap::new(), offset) };
+/// The pass log's frames from `offset` on (the last `last` of them when given): each pass's
+/// median GPU milliseconds over the frames that did not compile, with `span` (the frame) and
+/// `cache` (every `gi_*` stage: the lighting cache's whole cost); each frame's cache
+/// milliseconds in order (None where it compiled or was dropped); and the end of the log.
+struct PassStats {
+    medians: BTreeMap<String, f64>,
+    cache_frames: Vec<Option<f64>>,
+}
+fn pass_stats(log: &Path, offset: u64, last: Option<usize>) -> (PassStats, u64) {
+    let Ok(text) = std::fs::read(log) else {
+        return (PassStats { medians: BTreeMap::new(), cache_frames: vec![] }, offset);
+    };
     let end = text.len() as u64;
     let text = String::from_utf8_lossy(&text[(offset.min(end)) as usize..]).into_owned();
-    let mut samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-    for line in text.lines() {
-        if line.contains("\"dropped\":true") || !line.contains("\"compiles\":0,") && line.contains("\"compiles\":") {
+    let mut frames: Vec<Option<BTreeMap<String, f64>>> = vec![];
+    for line in text.lines().filter(|l| l.starts_with('{')) {
+        let compiled = !line.contains("\"compiles\":0,") && line.contains("\"compiles\":");
+        if line.contains("\"dropped\":true") || compiled {
+            frames.push(None);
             continue;
         }
-        let mut add = |key: &str, value: f64| samples.entry(key.to_owned()).or_default().push(value);
+        let mut stages = BTreeMap::new();
         if let Some(span) = field(line, "\"span\":") {
-            add("span", span);
+            stages.insert("span".to_owned(), span);
         }
-        let Some(start) = line.find("\"passes\":{") else { continue };
-        let body = &line[start + 10..];
-        let Some(close) = body.find('}') else { continue };
-        for item in body[..close].split(',') {
-            if let Some((k, v)) = item.split_once(':') {
-                if let Ok(v) = v.trim().parse::<f64>() {
-                    add(k.trim().trim_matches('"'), v);
+        if let Some(start) = line.find("\"passes\":{") {
+            let body = &line[start + 10..];
+            for item in body[..body.find('}').unwrap_or(0)].split(',') {
+                if let Some((k, v)) = item.split_once(':') {
+                    if let Ok(v) = v.trim().parse::<f64>() {
+                        stages.insert(k.trim().trim_matches('"').to_owned(), v);
+                    }
                 }
             }
+        }
+        let cache: f64 = stages.iter().filter(|(k, _)| k.starts_with("gi_")).map(|(_, v)| v).sum();
+        stages.insert("cache".to_owned(), cache);
+        frames.push(Some(stages));
+    }
+    if let Some(last) = last {
+        frames.drain(..frames.len().saturating_sub(last));
+    }
+    let mut samples: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for stages in frames.iter().flatten() {
+        for (k, v) in stages {
+            samples.entry(k.clone()).or_default().push(*v);
         }
     }
     let medians = samples
@@ -235,7 +258,8 @@ fn pass_medians(log: &Path, offset: u64) -> (BTreeMap<String, f64>, u64) {
             (k, v[v.len() / 2])
         })
         .collect();
-    (medians, end)
+    let cache_frames = frames.iter().map(|f| f.as_ref().map(|s| s["cache"])).collect();
+    (PassStats { medians, cache_frames }, end)
 }
 fn field(line: &str, key: &str) -> Option<f64> {
     let rest = &line[line.find(key)? + key.len()..];
@@ -288,24 +312,41 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
         let result = rig.fixture.run(r, rig.path, rig.reference.as_ref());
         let _ = kit::drain(r);
         let seconds = t.elapsed().as_secs_f64();
-        let (passes, end) = pass_medians(&rig.pass_log, rig.read_to);
-        rig.read_to = end;
         let name = rig.fixture.name().to_owned();
         match result {
-            Ok(metrics) => {
+            Ok(mut metrics) => {
+                // `frames_measured`: the pass times cover only the fixture's last frames.
+                let last = metrics.iter().position(|(k, _)| k == "frames_measured").map(|i| metrics.remove(i).1 as usize);
+                let (stats, end) = pass_stats(&rig.pass_log, rig.read_to, last);
+                rig.read_to = end;
+                let cache: Vec<f64> = stats.cache_frames.iter().flatten().copied().collect();
+                let cache_max = cache.iter().copied().fold(0.0, f64::max);
                 let shown: Vec<String> = metrics.iter().map(|(k, v)| format!("{k}={v:.4}")).collect();
-                let pass_text: Vec<String> = passes.iter().map(|(k, v)| format!("{k}={v:.2}")).collect();
-                println!("bench {name} {} {} | ms {} | {seconds:.2} s", rig.path.name(), shown.join(" "), pass_text.join(" "));
-                let passes: Vec<(String, f64)> = passes.into_iter().collect();
+                let pass_text: Vec<String> =
+                    stats.medians.iter().filter(|(k, _)| *k != "cache" && *k != "span").map(|(k, v)| format!("{k}={v:.2}")).collect();
                 println!(
-                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"run_s\":{seconds:.3}}}",
+                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames, span {:.2} | ms {} | {seconds:.2} s",
+                    rig.path.name(),
+                    shown.join(" "),
+                    stats.medians.get("cache").copied().unwrap_or(0.0),
+                    cache.len(),
+                    stats.medians.get("span").copied().unwrap_or(0.0),
+                    pass_text.join(" ")
+                );
+                let passes: Vec<(String, f64)> = stats.medians.into_iter().collect();
+                let series: Vec<String> =
+                    stats.cache_frames.iter().map(|v| v.map_or("null".into(), |v| format!("{v:.4}"))).collect();
+                println!(
+                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"cache_ms_frames\":[{}],\"run_s\":{seconds:.3}}}",
                     json_string(&name),
                     rig.path.name(),
                     json_map(&metrics),
-                    json_map(&passes)
+                    json_map(&passes),
+                    series.join(",")
                 );
             }
             Err(error) => {
+                rig.read_to = std::fs::metadata(&rig.pass_log).map_or(0, |m| m.len());
                 println!("bench {name} {} error: {error}", rig.path.name());
                 if matches!(error, Error::Fault(_)) {
                     // A faulted renderer is rebuilt on the next round.
@@ -376,7 +417,8 @@ pub fn main() -> i32 {
             }
         };
         for fixture in fixtures::fixtures() {
-            if o.only.as_ref().is_some_and(|only| !only.iter().any(|n| n == fixture.name())) {
+            let named = o.only.as_ref().map(|only| only.iter().any(|n| n == fixture.name()));
+            if named == Some(false) || named.is_none() && fixtures::NAMED_ONLY.contains(&fixture.name()) {
                 continue;
             }
             let pass_log = o.runs.join(format!("passes-{pid}-{}-{}.jsonl", fixture.name(), path.name()));

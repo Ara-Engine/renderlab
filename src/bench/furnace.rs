@@ -10,6 +10,12 @@
 //! - `slab-roof`: the slab under a black sky with a grey roof 0.5 m above it. No path from the
 //!   emitter reaches the roof or the top face: both must read 0.
 //!
+//! - `walk`: the grey box seen by a walking camera: settled still for the usual frames, then
+//!   moved a fixed step per frame (LIGHTBENCH_WALK_STEP metres, default 0.02, for
+//!   LIGHTBENCH_WALK_FRAMES frames, default 48), scored on its last frame. The bench's
+//!   per-frame cache milliseconds cover the walking frames only (`frames_measured`), the cost
+//!   the budgeted cache is judged on.
+//!
 //! Metrics per view (`<view>.` prefix where a case has several): `energy`, the mean luminance
 //! over the exact answer's; `err`, the mean per-pixel |luminance / answer - 1|; `off5`, the share
 //! of pixels more than 5% off; `mean`, the mean luminance. Where the answer is black, `mean` is the
@@ -55,6 +61,8 @@ struct View {
     target: Vec3,
     up: Vec3,
     expected: [f32; 3],
+    /// Walking views move eye and target this far each frame after settling.
+    walk: Option<Vec3>,
 }
 pub(crate) struct Furnace {
     name: &'static str,
@@ -77,6 +85,7 @@ impl Furnace {
                 target: Vec3::new(1.0, 0.7, 0.6),
                 up: Vec3::Y,
                 expected: std::array::from_fn(|c| glow[c] / (1.0 - albedo[c])),
+                walk: None,
             }],
             loaded: None,
         }
@@ -86,6 +95,16 @@ impl Furnace {
     }
     pub(crate) fn orange() -> Self {
         Self::room("orange", [0.9, 0.4, 0.1])
+    }
+    /// The grey box with a walking camera (along +x, through the room's middle).
+    pub(crate) fn walk() -> Self {
+        let mut room = Self::room("walk", [0.5; 3]);
+        let step = std::env::var("LIGHTBENCH_WALK_STEP").ok().and_then(|v| v.parse().ok()).unwrap_or(0.02);
+        room.views[0].name = "walk";
+        room.views[0].eye = Vec3::new(-1.2, -0.2, -0.4);
+        room.views[0].target = Vec3::new(0.3, 0.5, 0.6);
+        room.views[0].walk = Some(Vec3::X * step);
+        room
     }
     fn slab_shapes() -> Vec<Shape> {
         vec![
@@ -102,7 +121,7 @@ impl Furnace {
             name: "slab",
             sky: 1.0,
             shapes: Self::slab_shapes(),
-            views: vec![View { name: "top", eye: Vec3::new(0.0, 1.2, 0.0), target: Vec3::ZERO, up: Vec3::Z, expected: [0.5; 3] }],
+            views: vec![View { name: "top", eye: Vec3::new(0.0, 1.2, 0.0), target: Vec3::ZERO, up: Vec3::Z, expected: [0.5; 3], walk: None }],
             loaded: None,
         }
     }
@@ -118,8 +137,8 @@ impl Furnace {
             sky: 0.0,
             shapes,
             views: vec![
-                View { name: "top", eye: Vec3::new(0.0, 0.3, 0.0), target: Vec3::ZERO, up: Vec3::Z, expected: [0.0; 3] },
-                View { name: "roof", eye: Vec3::new(0.0, 0.2, 0.0), target: Vec3::new(0.0, 0.5, 0.0), up: Vec3::Z, expected: [0.0; 3] },
+                View { name: "top", eye: Vec3::new(0.0, 0.3, 0.0), target: Vec3::ZERO, up: Vec3::Z, expected: [0.0; 3], walk: None },
+                View { name: "roof", eye: Vec3::new(0.0, 0.2, 0.0), target: Vec3::new(0.0, 0.5, 0.0), up: Vec3::Z, expected: [0.0; 3], walk: None },
             ],
             loaded: None,
         }
@@ -140,6 +159,8 @@ impl Fixture for Furnace {
         // Single-sample frames: the estimator's own answer, not TR1's history of it.
         r.set_reconstruction(Reconstruction::off())?;
         r.set_indirect(IndirectSettings::default())?;
+        // The emitter list on every gathering frame, as the furnace test builds it.
+        r.gi.request_emitters();
         let program = r.try_create_program(&ProgramDescriptor { label: "furnace", source: FURNACE_PROGRAM })?;
         let parts = self
             .shapes
@@ -160,6 +181,15 @@ impl Fixture for Furnace {
             let camera = Camera::look_at(view.eye, view.target, view.up, FOV, 0.01, 100.0)?;
             for _ in 0..frames() {
                 kit::frame(r, target, &camera, parts)?;
+            }
+            if let Some(step) = view.walk {
+                let walked: u32 = std::env::var("LIGHTBENCH_WALK_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(48);
+                for k in 1..=walked {
+                    let at = step * k as f32;
+                    let camera = Camera::look_at(view.eye + at, view.target + at, view.up, FOV, 0.01, 100.0)?;
+                    kit::frame(r, target, &camera, parts)?;
+                }
+                metrics.push(("frames_measured".into(), f64::from(walked)));
             }
             let pixels = kit::capture_radiance(r, 0.0)?;
             let name = |m: &str| if prefix { format!("{}.{m}", view.name) } else { m.to_owned() };
