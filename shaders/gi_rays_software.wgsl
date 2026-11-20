@@ -2,7 +2,8 @@
 // Per-placement object-space BVH4s built in the R0c format (docs/m7-r0c.md).
 // P-MEM's runtime upload keeps 16-word nodes (origin, step, four tagged children,
 // axis-major byte planes), 2-word leaves (index offset/count), three-word positions
-// and unchanged leaf-local indices, packed by src/gi_bvh.rs into
+// and unchanged leaf-local indices (or, with RENDERLAB_GI_RS=1, 12-word triangle records in
+// their place: header word 4), packed by src/gi_bvh.rs into
 // one buffer behind a flat instance list (a top level rebuilt on the CPU when
 // transforms change; a cooked near field's placements may instead be one merged world BVH,
 // an identity instance, src/gi_cache.rs World). Each ray is its own work item, traversed
@@ -40,8 +41,11 @@ fn gi_slab_near(o:vec3<f32>, inv:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>, tmin:f32
 }
 // Moller-Trumbore, both faces: (t, u, v) with t in (tmin, tmax), or t = -1.
 fn gi_triangle(o:vec3<f32>, d:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>, tmin:f32, tmax:f32) -> vec3<f32> {
+    return gi_triangle_edges(o,d,a,b-a,c-a,tmin,tmax);
+}
+// gi_triangle from corner a and edges e1 = b - a, e2 = c - a (a triangle record's words).
+fn gi_triangle_edges(o:vec3<f32>, d:vec3<f32>, a:vec3<f32>, e1:vec3<f32>, e2:vec3<f32>, tmin:f32, tmax:f32) -> vec3<f32> {
     let none=vec3<f32>(-1.0,0.0,0.0);
-    let e1=b-a;let e2=c-a;
     let p=cross(d,e2);
     let det=dot(e1,p);
     if abs(det)<1e-30 { return none; }
@@ -92,6 +96,23 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
             // P-MEM runtime layout: only leaf index offset/count are uploaded.
             let l=leaves+(child&~GI_BVH_LEAF)*2u;
             let first=gi_geometry[l];let count=gi_geometry[l+1u];
+            if gi_geometry[4]!=0u {
+                // Triangle records (src/gi_bvh.rs `records`, header word 4), from the instance
+                // record's word 20: per triangle its corner, two edges and three position
+                // indices, in index order (a leaf's index offset / 3 is its first), so a test
+                // loads its own words with no dependent index load.
+                for(var k=0u;k<count;k+=3u) {
+                    let x=positions+(first+k)*4u;
+                    let a=gi_gv(x);let e1=gi_gv(x+3u);let e2=gi_gv(x+6u);
+                    let h=gi_triangle_edges(o,d,a,e1,e2,tmin,gi_limit(*best,i));
+                    if h.x>=0.0 {
+                        let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(e1,e2);
+                        *best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(gi_geometry[x+9u],gi_geometry[x+10u],gi_geometry[x+11u]),h.yz);
+                        if any_hit { return true; }
+                    }
+                }
+                continue;
+            }
             // Two triangles a step: both triangles' indices, then both triangles'
             // positions, load before either is tested, so a leaf costs half the dependent
             // round trips. They are tested in leaf order, the second against the first's

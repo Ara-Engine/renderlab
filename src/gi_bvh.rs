@@ -12,9 +12,12 @@
 use crate::asset::cluster_bvh::Bvh;
 use crate::{Error, Mat4};
 
-/// Words before the instance records; shaders/gi_rays_software.wgsl reads the count at 0 and
-/// the top level's base and root at 1 and 2 (src/instance_bvh.rs).
+/// Words before the instance records; shaders/gi_rays_software.wgsl reads the count at 0, the
+/// top level's base and root at 1 and 2 (src/instance_bvh.rs), and at 4 whether meshes carry
+/// triangle records (`records`).
 pub(crate) const HEADER_WORDS: usize = 16;
+/// Header word 4: 1 when meshes are packed as triangle records (`records`).
+const RECORDS_WORD: usize = 4;
 /// One instance record; WGSL GI_INSTANCE_WORDS must match. Words 0-11 world-to-object
 /// rows, 12-17 world bounds, 18-21 the mesh's array offsets, 22 its root, 23 the
 /// instance's near-field mask base (0: none, the instance is traced over whole rays); 24-26
@@ -23,7 +26,19 @@ pub(crate) const INSTANCE_WORDS: usize = 32;
 const NODE_WORDS: usize = 16;
 const LEAF_WORDS: usize = 2;
 const POSITION_WORDS: usize = 3;
+/// One triangle record (`records`): corner a, edges b - a and c - a, then the three position
+/// indices (near-field masks and the merged world's material map read them).
+const RECORD_WORDS: usize = 12;
 
+/// `RENDERLAB_GI_RS=1`: each mesh's triangles are packed as records in its index order, as
+/// the reflection pass's software trace stores them (src/reflection_software.rs), instead of
+/// index triples into a position array: a triangle's test needs no dependent index load. The
+/// nodes and leaves are unchanged (a leaf's index offset / 3 is its first record), so the
+/// same rays meet the same triangles in the same order.
+pub(crate) fn records() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RS").is_ok_and(|v| v == "1"))
+}
 /// Builds a full-detail one-level BVH4 over a triangle list (eight triangles a leaf), by binned
 /// SAH splits (GC1: software rays visit fewer nodes and triangles than over median splits; the
 /// same hits, docs/m7-gc1.md).
@@ -71,10 +86,12 @@ impl Blas {
         })
     }
     pub(crate) fn words(&self) -> usize {
-        self.bvh.nodes.len() * NODE_WORDS
-            + self.bvh.leaves.len() * LEAF_WORDS
-            + self.bvh.positions.len() * POSITION_WORDS
-            + self.bvh.indices.len()
+        let triangles = if records() {
+            self.bvh.indices.len() / 3 * RECORD_WORDS
+        } else {
+            self.bvh.positions.len() * POSITION_WORDS + self.bvh.indices.len()
+        };
+        self.bvh.nodes.len() * NODE_WORDS + self.bvh.leaves.len() * LEAF_WORDS + triangles
     }
     /// The base word of the near-field masks cooked under exactly `model`, given this
     /// mesh's mask bases in the packed buffer; 0 when none matches.
@@ -99,8 +116,9 @@ fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
     )
 }
 
-/// Word offsets of each mesh's arrays after the instance records and their top level, then
-/// the base word of each of its near placements' masks, and the total.
+/// Word offsets of each mesh's arrays after the instance records and their top level (nodes,
+/// leaves, positions, indices; with `records`, the records at both of the last two), then the
+/// base word of each of its near placements' masks, and the total.
 pub(crate) fn layout(meshes: &[&Blas], instances: usize) -> (Vec<[u32; 4]>, Vec<Vec<u32>>, usize) {
     let mut at =
         HEADER_WORDS + instances * INSTANCE_WORDS + crate::instance_bvh::reserve(instances);
@@ -110,7 +128,7 @@ pub(crate) fn layout(meshes: &[&Blas], instances: usize) -> (Vec<[u32; 4]>, Vec<
             let nodes = at;
             let leaves = nodes + b.bvh.nodes.len() * NODE_WORDS;
             let positions = leaves + b.bvh.leaves.len() * LEAF_WORDS;
-            let indices = positions + b.bvh.positions.len() * POSITION_WORDS;
+            let indices = if records() { positions } else { positions + b.bvh.positions.len() * POSITION_WORDS };
             at += b.words();
             [nodes, leaves, positions, indices].map(|v| v as u32)
         })
@@ -158,20 +176,40 @@ pub(crate) fn mesh_words(
             words[at..at + LEAF_WORDS].copy_from_slice(&[l.indices.offset, l.indices.count]);
             at += LEAF_WORDS;
         }
-        for p in &b.bvh.positions {
-            words[at..at + POSITION_WORDS].copy_from_slice(&[
-                p[0].to_bits(),
-                p[1].to_bits(),
-                p[2].to_bits(),
-            ]);
-            at += POSITION_WORDS;
+        if records() {
+            let n = b.bvh.indices.len() / 3 * RECORD_WORDS;
+            triangle_records(&b.bvh, &mut words[at..at + n]);
+            at += n;
+        } else {
+            for p in &b.bvh.positions {
+                words[at..at + POSITION_WORDS].copy_from_slice(&[
+                    p[0].to_bits(),
+                    p[1].to_bits(),
+                    p[2].to_bits(),
+                ]);
+                at += POSITION_WORDS;
+            }
+            words[at..at + b.bvh.indices.len()].copy_from_slice(&b.bvh.indices);
         }
-        words[at..at + b.bvh.indices.len()].copy_from_slice(&b.bvh.indices);
         for (n, &base) in b.near.iter().zip(bases) {
             words[base as usize..base as usize + n.masks.len()].copy_from_slice(&n.masks);
         }
     }
     words
+}
+
+/// `bvh`'s triangles as records (`records`), in index order, into `out`.
+fn triangle_records(bvh: &Bvh, out: &mut [u32]) {
+    for (t, w) in bvh.indices.chunks_exact(3).zip(out.chunks_exact_mut(RECORD_WORDS)) {
+        // Positions carry a fourth component the runtime layout never uploads: corner xyz only.
+        let [a, p, q] = [t[0], t[1], t[2]].map(|i| bvh.positions[i as usize]);
+        let corner = [a[0], a[1], a[2]];
+        let e1: [f32; 3] = std::array::from_fn(|k| p[k] - a[k]);
+        let e2: [f32; 3] = std::array::from_fn(|k| q[k] - a[k]);
+        for (slot, v) in w.iter_mut().zip(corner.into_iter().chain(e1).chain(e2).map(f32::to_bits).chain(t.iter().copied())) {
+            *slot = v;
+        }
+    }
 }
 
 /// The header and instance records: per placement, world-to-object rows, the world
@@ -181,6 +219,7 @@ pub(crate) fn instance_words(
 ) -> Result<Vec<u32>, Error> {
     let mut words = vec![0u32; HEADER_WORDS + instances.len() * INSTANCE_WORDS];
     words[0] = instances.len() as u32;
+    words[RECORDS_WORD] = u32::from(records());
     for (i, (model, blas, offsets, near)) in instances.iter().enumerate() {
         let inverse = model.inverse();
         if !inverse.is_finite() {
@@ -287,6 +326,31 @@ mod tests {
         }
         assert!(seen.iter().all(|&n| n == 1));
         assert!(deepest <= MAX_SAH_DEPTH);
+    }
+
+    #[test]
+    /// A triangle record (RENDERLAB_GI_RS) holds its corner, both edges and its position
+    /// indices, in index order; leaves start on a triangle, so the shader's `first * 4` (a leaf's
+    /// index offset / 3 records of 12 words) is its first record's word.
+    fn triangle_records_follow_index_order() {
+        let (p, i) = grid(6);
+        let blas = Blas::new(build(&p, &i).unwrap(), 0).unwrap();
+        let triangles = blas.bvh.indices.len() / 3;
+        let mut words = vec![0u32; triangles * RECORD_WORDS];
+        triangle_records(&blas.bvh, &mut words);
+        for (t, w) in blas.bvh.indices.chunks_exact(3).zip(words.chunks_exact(RECORD_WORDS)) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| blas.bvh.positions[i as usize]);
+            let f = |k: usize| f32::from_bits(w[k]);
+            assert_eq!([f(0), f(1), f(2)], [a[0], a[1], a[2]]);
+            assert_eq!([f(3), f(4), f(5)], [b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+            assert_eq!([f(6), f(7), f(8)], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            assert_eq!(&w[9..12], t);
+        }
+        for leaf in &blas.bvh.leaves {
+            assert_eq!(leaf.indices.offset % 3, 0);
+            assert_eq!(leaf.indices.count % 3, 0);
+            assert_eq!(leaf.indices.offset as usize * 4, leaf.indices.offset as usize / 3 * RECORD_WORDS);
+        }
     }
 
     #[test]
