@@ -64,6 +64,7 @@ Environment:
 - `LIGHTBENCH_RUNS`: where the pass log goes (default `D:/Coding/renderlab-work/bench-runs`).
 - `LIGHTBENCH_FURNACE_FRAMES`: frames per furnace view (default 64).
 - `LIGHTBENCH_WALK_STEP` / `LIGHTBENCH_WALK_FRAMES`: the walking camera's step in metres per frame (default 0.02) and how many frames it walks (default 48).
+- `LIGHTBENCH_SHADOW_FRAMES` / `LIGHTBENCH_SHADOW_DUMP=<dir>`: the shadow fixture's frames per run (default 8), and a directory for its measured, exact and unshadowed images as PGM.
 - `LIGHTBENCH_GPU_LOCK`: the GPU lock whose owner marks a round contended (default `D:/Coding/renderlab-work/gpu-slot.lock`).
 
 **Others' timing rows** (main thread's rule, 20 Nov). The bench takes no GPU lease of its own: a round is about 3 s of tiny frames (320x180, about 2.4 ms each).
@@ -134,7 +135,7 @@ A fixture is a child of the `renderer` module, so crate-internal renderer state 
 | `grey`, `orange` | gicut (src/gi_furnace_tests.rs) | closed emitting box, exact L = Le / (1 - rho) | `energy`, `err`, `off5` |
 | `slab` (named only) | gicut | thin slab over an emitter under a sky; the top reads 0.5 | `energy`, `err`, `off5` |
 | `slab-roof` (named only) | gicut | the slab under a roof and a black sky; top and roof read 0 | `top.mean`, `top.leak_max`, `roof.*` |
-| shadow edges (coming) | clipmap | rail edge, contact edge, thin caster | `lit_in_shadow`, `rail_wobble_px`, `contact_gap_px` |
+| `shadow-edges` | clipmap (src/bench/shadow_edges.rs) | a grey floor under a soft sun (0.02 rad), the sun only: a 3 m rail 0.9 m up turned against the map's grid, a 0.3 m block resting on the floor, a 5 mm wire; 256x256, `LIGHTBENCH_SHADOW_FRAMES` frames (default 8) with TR1 | against the exact answer (the sun's disk cast on the CPU from each floor pixel, once at load): `err` over the edge band, `lit_in_shadow`, `rail_wobble_px`, `contact_gap_px`, `thin_missing`; `mask_mismatch` checks the camera |
 
 **Known bug.** The slab cases read black on the bench, where the furnace test reads 0.5 on the top face. So they run only when `--fixtures` names them.
 

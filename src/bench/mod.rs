@@ -15,6 +15,7 @@ mod city;
 mod fixtures;
 mod furnace;
 pub(crate) mod kit;
+mod shadow_edges;
 
 /// The two device paths every fixture runs on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
