@@ -1778,34 +1778,13 @@ impl VirtualState {
             }),
             ResourceKind::ShaderModule,
         );
-        let map_compute = |entry, layout: &wgpu::PipelineLayout, constants: &[(&str, f64)]| {
-            ledger.own(
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(layout),
-                    module: &map_module,
-                    entry_point: Some(entry),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants,
-                        ..Default::default()
-                    },
-                    cache: None,
-                }),
-                ResourceKind::ComputePipeline,
-            )
-        };
-        let resolve = map_compute("vmap_resolve", &resolve_layout, &[]);
         let mip_dispatch_layout =
             pipeline_layout("N8k mip dispatch ABI", &[Some(&layouts.mip_dispatch)]);
         let minmip_layout = pipeline_layout(
             "N8k min-mip ABI",
             &[Some(&layouts.minmip), None, None, Some(&layouts.pass)],
         );
-        let mip_dispatch = map_compute("vmap_mip_dispatch", &mip_dispatch_layout, &[]);
-        let minmip = map_compute("vmap_minmip", &minmip_layout, &[]);
         let queue_layout = pipeline_layout("N8k hybrid queue ABI", &[Some(&layouts.queue)]);
-        let queue_args = map_compute("vmap_queue_args", &queue_layout, &[]);
-        let map = map_compute("vmap_lookup", &map_layout, &[]);
         let disk_layout = pipeline_layout(
             "N-VSM1 disk visibility ABI",
             &[Some(&layouts.disk), Some(arrays), None, Some(lighting)],
@@ -1817,38 +1796,12 @@ impl VirtualState {
             }),
             ResourceKind::ShaderModule,
         );
-        let disk_compute = |entry, layout: &wgpu::PipelineLayout| {
-            ledger.own(
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(layout),
-                    module: &disk_module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    cache: None,
-                }),
-                ResourceKind::ComputePipeline,
-            )
-        };
-        let disk_mark = disk_compute("vd_mark", &mark_layout);
-        let disk = disk_compute("vd_lookup", &disk_layout);
         let record_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8g walk records"),
                 source: wgpu::ShaderSource::Wgsl(records_source().into()),
             }),
             ResourceKind::ShaderModule,
-        );
-        let record = ledger.own(
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("vsm_record"),
-                layout: Some(&horizon_layout),
-                module: &record_module,
-                entry_point: Some("vsm_record"),
-                compilation_options: Default::default(),
-                cache: None,
-            }),
-            ResourceKind::ComputePipeline,
         );
         let module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1857,16 +1810,73 @@ impl VirtualState {
             }),
             ResourceKind::ShaderModule,
         );
+        // The covered fraction's samples a texel: the attachment's when multisampled, else the 8x
+        // pattern (WGSL VSM_SAMPLES, on every entry of the page module).
         let samples = fraction_samples(device);
-        // The samples a texel: the attachment's when multisampled, else the 8x pattern.
         let samples_constant = ("VSM_SAMPLES", f64::from(if samples > 1 { samples } else { 8 }));
-        let compute = |entry, layout: &wgpu::PipelineLayout, constants: &[(&str, f64)]| {
-            let constants: Vec<_> = constants.iter().copied().chain([samples_constant]).collect();
-            ledger.own(
+        // Every pipeline, created at once (each takes one of the process's compile slots: prepare
+        // holds four, frames one). Order matters: they are taken back in this order below.
+        enum Job<'a> {
+            Compute(&'a wgpu::ShaderModule, &'static str, &'a wgpu::PipelineLayout, Vec<(&'static str, f64)>),
+            /// A page-caster raster pipeline: its label and VSM_PEEL_PASS.
+            Hardware(&'static str, f64),
+        }
+        enum Built {
+            Compute(Owned<wgpu::ComputePipeline>),
+            Render(Owned<wgpu::RenderPipeline>),
+        }
+        // The page module's constants: its own and the samples a texel.
+        let vsm = |mut c: Vec<(&'static str, f64)>| {
+            c.push(samples_constant);
+            c
+        };
+        let peel = |p: f64| vsm(vec![("VSM_PEEL_PASS", p)]);
+        let jobs = vec![
+            Job::Compute(&map_module, "vmap_resolve", &resolve_layout, vec![]),
+            Job::Compute(&map_module, "vmap_mip_dispatch", &mip_dispatch_layout, vec![]),
+            Job::Compute(&map_module, "vmap_minmip", &minmip_layout, vec![]),
+            Job::Compute(&map_module, "vmap_queue_args", &queue_layout, vec![]),
+            Job::Compute(&map_module, "vmap_lookup", &map_layout, vec![]),
+            Job::Compute(&disk_module, "vd_mark", &mark_layout, vec![]),
+            Job::Compute(&disk_module, "vd_lookup", &disk_layout, vec![]),
+            Job::Compute(&record_module, "vsm_record", &horizon_layout, vec![]),
+            Job::Compute(&module, "vsm_mark", &mark_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_compact", &compact_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_clear", &clear_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_cull", &cull_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_finish", &cull_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_mip", &mip_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_raster", &raster_layout, peel(0.0)),
+            Job::Compute(&module, "vsm_raster", &raster_layout, peel(1.0)),
+            Job::Hardware("N8c hardware page casters", 0.0),
+            Job::Hardware("N8c hardware page peel", 1.0),
+            Job::Compute(&module, "vsm_lookup", &lookup_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_horizon", &horizon_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_release", &compact_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_allocate", &allocate_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_clear_sparse", &clear_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_mip_sparse", &mip_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_outline_dense", &outline_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_outline_sparse", &outline_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_fold_dense", &clear_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_fold_sparse", &clear_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_silhouette_dense", &raster_layout, vsm(vec![])),
+            Job::Compute(&module, "vsm_silhouette_sparse", &raster_layout, vsm(vec![])),
+        ];
+        // The covered fraction's multisampled raster: a colour attachment that is never written,
+        // whose samples give each fragment its mask (FRACTION_AREA_FORMAT); otherwise the depth
+        // attachment only sizes the raster area.
+        let targets = [Some(wgpu::ColorTargetState {
+            format: FRACTION_AREA_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::empty(),
+        })];
+        let build = |job: &Job<'_>| match job {
+            Job::Compute(module, entry, layout, constants) => Built::Compute(ledger.own(
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
                     layout: Some(layout),
-                    module: &module,
+                    module,
                     entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants: &constants,
@@ -1875,74 +1885,90 @@ impl VirtualState {
                     cache: None,
                 }),
                 ResourceKind::ComputePipeline,
-            )
-        };
-        let hardware = |label, peel: f64| {
-            let constants = [("VSM_PEEL_PASS", peel), samples_constant];
-            // The covered fraction: a multisampled colour attachment that is never written, whose
-            // samples give each fragment its mask (FRACTION_AREA_FORMAT); otherwise the depth
-            // attachment only sizes the raster area.
-            let targets = [Some(wgpu::ColorTargetState {
-                format: FRACTION_AREA_FORMAT,
-                blend: None,
-                write_mask: wgpu::ColorWrites::empty(),
-            })];
-            ledger.own(
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(&raster_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vs_vsm_cluster"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("fs_vsm_cluster"),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &constants,
+            )),
+            Job::Hardware(label, peel) => {
+                let constants = [("VSM_PEEL_PASS", *peel), samples_constant];
+                Built::Render(ledger.own(
+                    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                        label: Some(label),
+                        layout: Some(&raster_layout),
+                        vertex: wgpu::VertexState {
+                            module: &module,
+                            entry_point: Some("vs_vsm_cluster"),
+                            compilation_options: Default::default(),
+                            buffers: &[],
+                        },
+                        fragment: Some(wgpu::FragmentState {
+                            module: &module,
+                            entry_point: Some("fs_vsm_cluster"),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &constants,
+                                ..Default::default()
+                            },
+                            targets: if samples > 1 { &targets } else { &[] },
+                        }),
+                        primitive: wgpu::PrimitiveState {
+                            cull_mode: None,
                             ..Default::default()
                         },
-                        targets: if samples > 1 { &targets } else { &[] },
+                        // The 64-bit max decides; the attachment only sizes the raster area.
+                        depth_stencil: (samples == 1).then_some(wgpu::DepthStencilState {
+                            format: AREA_FORMAT,
+                            depth_write_enabled: Some(false),
+                            depth_compare: Some(wgpu::CompareFunction::Always),
+                            stencil: Default::default(),
+                            bias: Default::default(),
+                        }),
+                        multisample: wgpu::MultisampleState {
+                            count: samples,
+                            ..Default::default()
+                        },
+                        multiview_mask: None,
+                        cache: None,
                     }),
-                    primitive: wgpu::PrimitiveState {
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    // The 64-bit max decides; the attachment only sizes the raster area.
-                    depth_stencil: (samples == 1).then_some(wgpu::DepthStencilState {
-                        format: AREA_FORMAT,
-                        depth_write_enabled: Some(false),
-                        depth_compare: Some(wgpu::CompareFunction::Always),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: wgpu::MultisampleState {
-                        count: samples,
-                        ..Default::default()
-                    },
-                    multiview_mask: None,
-                    cache: None,
-                }),
-                ResourceKind::RenderPipeline,
-            )
+                    ResourceKind::RenderPipeline,
+                ))
+            }
+        };
+        let built: Vec<Built> = std::thread::scope(|scope| {
+            let handles: Vec<_> = jobs.iter().map(|job| scope.spawn(|| build(job))).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut built = built.into_iter();
+        let mut compute = || match built.next() {
+            Some(Built::Compute(p)) => p,
+            _ => unreachable!("the jobs' order above"),
+        };
+        let resolve = compute();
+        let mip_dispatch = compute();
+        let minmip = compute();
+        let queue_args = compute();
+        let map = compute();
+        let disk_mark = compute();
+        let disk = compute();
+        let record = compute();
+        let (mark, compact, clear, cull, finish, mip) = (compute(), compute(), compute(), compute(), compute(), compute());
+        let software = [compute(), compute()];
+        let mut render = || match built.next() {
+            Some(Built::Render(p)) => p,
+            _ => unreachable!("the jobs' order above"),
+        };
+        let hardware = [render(), render()];
+        let mut compute = || match built.next() {
+            Some(Built::Compute(p)) => p,
+            _ => unreachable!("the jobs' order above"),
         };
         let pipelines = Pipelines {
-            mark: compute("vsm_mark", &mark_layout, &[]),
-            compact: compute("vsm_compact", &compact_layout, &[]),
-            clear: compute("vsm_clear", &clear_layout, &[]),
-            cull: compute("vsm_cull", &cull_layout, &[]),
-            finish: compute("vsm_finish", &cull_layout, &[]),
-            mip: compute("vsm_mip", &mip_layout, &[]),
-            software: [0.0, 1.0]
-                .map(|peel| compute("vsm_raster", &raster_layout, &[("VSM_PEEL_PASS", peel)])),
-            hardware: [
-                hardware("N8c hardware page casters", 0.0),
-                hardware("N8c hardware page peel", 1.0),
-            ],
-            lookup: compute("vsm_lookup", &lookup_layout, &[]),
-            horizon: compute("vsm_horizon", &horizon_layout, &[]),
+            mark,
+            compact,
+            clear,
+            cull,
+            finish,
+            mip,
+            software,
+            hardware,
+            lookup: compute(),
+            horizon: compute(),
             record,
             debug: None,
             order: None,
@@ -1954,22 +1980,13 @@ impl VirtualState {
             queued: None,
             disk_mark,
             disk,
-            release: compute("vsm_release", &compact_layout, &[]),
-            allocate: compute("vsm_allocate", &allocate_layout, &[]),
-            clear_sparse: compute("vsm_clear_sparse", &clear_layout, &[]),
-            mip_sparse: compute("vsm_mip_sparse", &mip_layout, &[]),
-            outline: [
-                compute("vsm_outline_dense", &outline_layout, &[]),
-                compute("vsm_outline_sparse", &outline_layout, &[]),
-            ],
-            fold: [
-                compute("vsm_fold_dense", &clear_layout, &[]),
-                compute("vsm_fold_sparse", &clear_layout, &[]),
-            ],
-            silhouette: [
-                compute("vsm_silhouette_dense", &raster_layout, &[]),
-                compute("vsm_silhouette_sparse", &raster_layout, &[]),
-            ],
+            release: compute(),
+            allocate: compute(),
+            clear_sparse: compute(),
+            mip_sparse: compute(),
+            outline: [compute(), compute()],
+            fold: [compute(), compute()],
+            silhouette: [compute(), compute()],
         };
         Self {
             settings: VirtualShadowSettings::default(),
