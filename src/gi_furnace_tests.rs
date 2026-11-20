@@ -40,6 +40,10 @@
 //!   cargo test --lib gi_furnace -- --ignored --nocapture
 use super::*;
 
+/// The final gather's stable-probe strips (a light switched on, a mover's shadow), on this fixture's scenes.
+#[path = "fg_rate_tests.rs"]
+mod rate;
+
 /// Lambert with a constant emission: `scatter` carries bounce light into the cache and
 /// `emission` makes the surface a light source for it (cells' outgoing radiance and the
 /// emitter list). The pixel is its irradiance times albedo over pi, plus its own emission.
