@@ -95,6 +95,7 @@ struct Options {
     only: Option<Vec<String>>,
     shaders: PathBuf,
     hold: PathBuf,
+    gpu_lock: PathBuf,
     refs: PathBuf,
     runs: PathBuf,
 }
@@ -107,6 +108,7 @@ fn options() -> Result<Options, String> {
         only: None,
         shaders: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders"),
         hold: env("LIGHTBENCH_HOLD", "D:/Coding/renderlab-work/timing-hold"),
+        gpu_lock: env("LIGHTBENCH_GPU_LOCK", "D:/Coding/renderlab-work/gpu-slot.lock"),
         refs: env("LIGHTBENCH_REFS", "D:/Coding/renderlab-work/bench-refs"),
         runs: env("LIGHTBENCH_RUNS", "D:/Coding/renderlab-work/bench-runs"),
     };
@@ -190,17 +192,38 @@ fn decode_reference(bytes: &[u8]) -> Option<RefImage> {
         .then(|| RefImage { size, rgb: floats.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect() })
 }
 
-/// Waits while a timing-hold exists (someone's timing row needs the machine quiet), saying so.
-fn wait_quiet(hold: &Path) {
+/// Whether the timing-hold asks the machine to be quiet: held by a timing lease (`--timing`,
+/// whose owner file carries no `exclusive` field) or an exclusive one. Ordinary smokes and play
+/// gates write `"exclusive":false`; the bench runs beside them (docs/bench.md).
+fn quiet_wanted(hold: &Path) -> Option<String> {
     if !hold.exists() {
-        return;
+        return None;
     }
     let owner = std::fs::read_to_string(hold.join("owner.json")).unwrap_or_default();
-    println!("lightbench: idle, a timing-hold is held: {}", owner.trim());
-    while hold.exists() {
+    let compact = owner.replace(' ', "");
+    let ordinary = compact.contains("\"exclusive\":false");
+    (!ordinary).then(|| owner.trim().to_owned())
+}
+/// Waits while a timing lease or an exclusive hold wants the machine quiet, saying so.
+fn wait_quiet(hold: &Path) {
+    let Some(owner) = quiet_wanted(hold) else { return };
+    println!("lightbench: idle, a timing lease holds the machine: {owner}");
+    while quiet_wanted(hold).is_some() {
         std::thread::sleep(Duration::from_millis(500));
     }
-    println!("lightbench: the timing-hold is gone, resuming");
+    println!("lightbench: the timing lease is gone, resuming");
+}
+/// The leases running now (the timing-hold's and the GPU lock's owners): a round that overlaps
+/// one is contended, and its milliseconds are not clean.
+fn leases(o: &Options) -> Vec<String> {
+    [&o.hold, &o.gpu_lock]
+        .into_iter()
+        .filter_map(|d| std::fs::read_to_string(d.join("owner.json")).ok())
+        .map(|text| {
+            let get = |key: &str| text.split(&format!("\"{key}\":\"")).nth(1).and_then(|r| r.split('"').next()).unwrap_or("").to_owned();
+            format!("{} {}", get("owner"), get("label")).trim().to_owned()
+        })
+        .collect()
 }
 
 /// The pass log's frames from `offset` on (the last `last` of them when given): each pass's
@@ -309,8 +332,13 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
         }
         let r = rig.r.as_mut().unwrap();
         let t = Instant::now();
+        let mut busy = leases(o);
         let result = rig.fixture.run(r, rig.path, rig.reference.as_ref());
         let _ = kit::drain(r);
+        busy.extend(leases(o));
+        busy.sort();
+        busy.dedup();
+        let contended = if busy.is_empty() { String::new() } else { format!(" | contended: {}", busy.join("; ")) };
         let seconds = t.elapsed().as_secs_f64();
         let name = rig.fixture.name().to_owned();
         match result {
@@ -325,7 +353,7 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
                 let pass_text: Vec<String> =
                     stats.medians.iter().filter(|(k, _)| *k != "cache" && *k != "span").map(|(k, v)| format!("{k}={v:.2}")).collect();
                 println!(
-                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames, span {:.2} | ms {} | {seconds:.2} s",
+                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames, span {:.2} | ms {} | {seconds:.2} s{contended}",
                     rig.path.name(),
                     shown.join(" "),
                     stats.medians.get("cache").copied().unwrap_or(0.0),
@@ -337,12 +365,13 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
                 let series: Vec<String> =
                     stats.cache_frames.iter().map(|v| v.map_or("null".into(), |v| format!("{v:.4}"))).collect();
                 println!(
-                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"cache_ms_frames\":[{}],\"run_s\":{seconds:.3}}}",
+                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"cache_ms_frames\":[{}],\"contended\":{},\"run_s\":{seconds:.3}}}",
                     json_string(&name),
                     rig.path.name(),
                     json_map(&metrics),
                     json_map(&passes),
-                    series.join(",")
+                    series.join(","),
+                    if busy.is_empty() { "null".to_owned() } else { json_string(&busy.join("; ")) }
                 );
             }
             Err(error) => {
