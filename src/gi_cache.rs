@@ -177,7 +177,9 @@ const GATHER_MS: f32 = 1.5;
 /// A gather's estimated rays, for sizing the refinement sweep's turn.
 const SWEEP_RAYS_PER_CELL: u64 = 32;
 /// Longest refinement sweep turn, in frames.
-const SWEEP_TURN_MAX: u32 = 256;
+const SWEEP_TURN_MAX: u32 = 4096;
+/// Frames a camera holds before the refinement sweep runs.
+const SWEEP_STILL: u32 = 8;
 const GATHER_RAYS_PER_MS_SOFTWARE: f32 = 40_000.0;
 const GATHER_RAYS_PER_MS_HARDWARE: f32 = 160_000.0;
 /// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
@@ -1382,6 +1384,10 @@ pub(crate) struct ViewPlan {
     idle_frames: u32,
     view_key: Option<[u8; 32]>,
     view_frames: u32,
+    /// Frames the camera alone has held (the refinement sweep runs on still cameras; moving
+    /// placements such as Glint's spinners do not stop it).
+    camera_key: Option<[u8; 32]>,
+    camera_frames: u32,
 }
 
 /// The cache's CPU history between frames, and the per-frame plan made from it:
@@ -1413,11 +1419,13 @@ pub(crate) struct Planner {
     /// while any wait (the ray budget deferred them) the cache does not idle.
     pub(crate) queued: u32,
     /// The refinement sweep (shaders/gi_cache.wgsl GI_SCAN_SWEEP): valued cells the last sweep
-    /// frame met, frames since a cell was made or a gather moved one (both read back without
-    /// waiting), and the turn. The sweep runs, and the cache does not idle, until two whole turns
-    /// pass with no change.
+    /// frame met, and frames since a gather last moved a value (both read back without waiting).
+    /// It runs while the camera holds (SWEEP_STILL frames), the deferred queue is short
+    /// (`sweep_room`) and two whole turns have not passed without a moved value; while it runs
+    /// the cache does not idle (`sweep_on`, this frame's decision).
     pub(crate) live: u32,
     pub(crate) quiet: u32,
+    sweep_on: bool,
     /// Requests readers outside the cache appended on a recent frame (the external list's
     /// count, read back without waiting): while any is unanswered the cache does not idle.
     pub(crate) external_pending: u32,
@@ -1450,6 +1458,7 @@ impl Default for Planner {
             queued: 0,
             live: 0,
             quiet: 0,
+            sweep_on: false,
             external_pending: 0,
             parity: false,
             tick_queues: [0; 2],
@@ -1503,9 +1512,14 @@ impl Planner {
         let rays = u64::from(self.live) * SWEEP_RAYS_PER_CELL;
         (rays.div_ceil(u64::from(gather_rays(software)).max(1)) as u32).max(1).next_power_of_two().min(SWEEP_TURN_MAX)
     }
-    /// The sweep runs until two whole turns pass with no cell made and no value moved.
+    /// The sweep runs until two whole turns pass with no value moved.
     fn sweeping(&self) -> bool {
         self.quiet < 2 * self.sweep_turn(true).max(8)
+    }
+    /// The sweep adds cells only while the queue holds fewer than two frames of the budget's
+    /// cells, so its arrivals never outrun what the budget gathers.
+    fn sweep_room(&self, software: bool) -> bool {
+        u64::from(self.queued) < 2 * u64::from(gather_rays(software)) / SWEEP_RAYS_PER_CELL
     }
     fn stale_turns(&self) -> [u32; 2] {
         let [read, sweep] = stale_periods();
@@ -1783,8 +1797,12 @@ impl Planner {
         if !boxes.is_empty() && s.invalidate_casters {
             flags |= 1;
         }
-        // The refinement sweep: this frame's turn of the valued cells gathers again.
-        if s.bounce && self.sweeping() {
+        // The refinement sweep: this frame's turn of the valued cells gathers again, on a still
+        // camera, while the queue has room (moving frames keep each cell's own events' gathers,
+        // as before the sweep; a sweep that outran the budget left Glint's queue at 700k
+        // deferred cells, whose screening cost the gather pass 11 ms a frame without ray hardware).
+        self.sweep_on = s.bounce && view.camera_frames >= SWEEP_STILL && self.sweeping() && self.sweep_room(c.software);
+        if self.sweep_on {
             flags |= 128;
         }
         // Partially traced cells re-queue: form 2 always; a clear's phases on the frames after
@@ -1867,7 +1885,7 @@ impl Planner {
         // otherwise idle.
         // A reader outside the cache with unanswered requests (the final gather's probes) keeps
         // the cache running: idle means nobody waits on a cell.
-        let busy = (bounce && (self.bounce_busy > 0 || self.queued > 0 || self.sweeping())) || self.external_pending > 0;
+        let busy = (bounce && (self.bounce_busy > 0 || self.queued > 0 || self.sweep_on)) || self.external_pending > 0;
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
                 s.gathers + 2
@@ -1975,6 +1993,18 @@ impl Planner {
             view.view_frames = 0;
         }
         view.view_key = Some(view_key);
+        let camera_key: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(still_matrix);
+            h.update(&still_extent);
+            h.finalize().into()
+        };
+        if view.camera_key == Some(camera_key) && !clear {
+            view.camera_frames = view.camera_frames.saturating_add(1);
+        } else {
+            view.camera_frames = 0;
+        }
+        view.camera_key = Some(camera_key);
         // A gather cap spreads a cut's gathers over more frames: still frames keep running
         // until a spread of up to 64 slot groups per gather generation can have drained.
         let idle_after = match (bounce, s.gather_cells) {
@@ -2119,7 +2149,7 @@ pub(super) struct GiState {
     stale_watch: Option<FullWatch>,
     /// Cells queued for a gather on recent cache frames (`Planner::queued`).
     queue_watch: Option<FullWatch>,
-    /// Made cells and moved values, and valued cells the sweep met (`Planner::quiet`, `live`).
+    /// Moved values, and valued cells the sweep met (`Planner::quiet`, `live`).
     change_watch: Option<FullWatch>,
     live_watch: Option<FullWatch>,
     /// The external list's count (word 0) at the start of each encode, idle or not: what
@@ -4200,9 +4230,9 @@ impl Renderer {
             if let Some(queued) = watch.collect() {
                 self.gi.planner.queued = queued;
             }
-            // Made cells (word 7) and moved values (211) restart the sweep's quiet count; the
-            // valued cells it met (212) size its turn.
-            let changes = self.gi.change_watch.get_or_insert_with(|| FullWatch::of_words(device, &[7, 211]));
+            // Moved values (211) restart the sweep's quiet count (new cells get their own events'
+            // gathers); the valued cells it met (212) size its turn.
+            let changes = self.gi.change_watch.get_or_insert_with(|| FullWatch::of_words(device, &[211]));
             match changes.collect() {
                 Some(0) => self.gi.planner.quiet = self.gi.planner.quiet.saturating_add(1),
                 Some(_) => self.gi.planner.quiet = 0,
