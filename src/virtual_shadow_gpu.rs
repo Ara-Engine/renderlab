@@ -968,7 +968,7 @@ pub(super) fn shader_source() -> String {
         crate::TRACED_DRAWS,
         variant
             .as_deref()
-            .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl")),
+            .unwrap_or(&crate::program::engine_shader("virtual_shadow.wgsl", include_str!("../shaders/virtual_shadow.wgsl"))),
         super::primary_ray_gpu::temporal_reconstruction::zones_source("vsm.zones")
     )
     .replacen(
@@ -1050,7 +1050,7 @@ fn records_source() -> String {
     format!(
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
         crate::TRACED_DRAWS,
-        include_str!("../shaders/virtual_shadow_records.wgsl")
+        &crate::program::engine_shader("virtual_shadow_records.wgsl", include_str!("../shaders/virtual_shadow_records.wgsl"))
     )
 }
 
@@ -1060,7 +1060,7 @@ pub(super) fn hybrid_source() -> String {
     format!(
         "{}\n{}",
         shader_source(),
-        include_str!("../shaders/virtual_shadow_hybrid.wgsl")
+        &crate::program::engine_shader("virtual_shadow_hybrid.wgsl", include_str!("../shaders/virtual_shadow_hybrid.wgsl"))
     )
 }
 
@@ -1079,7 +1079,7 @@ pub(super) fn map_source() -> String {
         crate::TRACED_DRAWS,
         variant
             .as_deref()
-            .unwrap_or(include_str!("../shaders/virtual_shadow_lookup.wgsl"))
+            .unwrap_or(&crate::program::engine_shader("virtual_shadow_lookup.wgsl", include_str!("../shaders/virtual_shadow_lookup.wgsl")))
     )
 }
 
@@ -1112,7 +1112,7 @@ pub(super) fn disk_source() -> String {
         crate::TRACED_DRAWS,
         variant
             .as_deref()
-            .unwrap_or(include_str!("../shaders/virtual_shadow_disk.wgsl"))
+            .unwrap_or(&crate::program::engine_shader("virtual_shadow_disk.wgsl", include_str!("../shaders/virtual_shadow_disk.wgsl")))
     )
     .replace(
         "override VD_EDGES:bool=false;",
@@ -4661,5 +4661,30 @@ mod tests {
                 assert_eq!(seen.len() as u32, refresh);
             }
         }
+    }
+}
+
+/// The bench's reload of the virtual sun shadows (src/bench, feature `bench`, docs/bench.md).
+/// The composed modules are checked with naga first: `VirtualState::new`'s threads push no error
+/// scope, so a module that fails would fault the renderer instead of returning. Then the view's
+/// state is rebuilt under prepare's compile slots; its page cache starts empty.
+#[cfg(feature = "bench")]
+impl Renderer {
+    pub(super) fn bench_reload_vsm(&mut self) -> Result<(), Error> {
+        if self.view.virtual_shadows.is_none() {
+            return Ok(());
+        }
+        for source in [shader_source(), records_source(), hybrid_source(), map_source(), disk_source()] {
+            let module = naga::front::wgsl::parse_str(&source).map_err(|e| Error::Shader(e.emit_to_string(&source)))?;
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .map_err(|e| Error::Shader(e.emit_to_string(&source)))?;
+        }
+        let slots = crate::pipeline_compilation::prepare_compile_slots();
+        crate::pipeline_compilation::with_compile_slots(slots, || {
+            self.view.virtual_shadows = None;
+            self.prepare_virtual_pipelines();
+        });
+        Ok(())
     }
 }

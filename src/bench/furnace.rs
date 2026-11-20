@@ -15,6 +15,8 @@
 //!   LIGHTBENCH_WALK_FRAMES frames, default 48), scored on its last frame. The bench's
 //!   per-frame cache milliseconds cover the walking frames only (`frames_measured`), the cost
 //!   the budgeted cache is judged on.
+//! - `walk-wrap`: `walk` with the cache's frame stamp started 24 frames into the walk before 4096
+//!   (`Renderer::bench_start_frame`), so the walk crosses a 12-bit stamp's wrap (gicut).
 //!
 //! Metrics per view (`<view>.` prefix where a case has several): `energy`, the mean luminance
 //! over the exact answer's; `err`, the mean per-pixel |luminance / answer - 1|; `off5`, the share
@@ -70,6 +72,8 @@ pub(crate) struct Furnace {
     shapes: Vec<Shape>,
     views: Vec<View>,
     loaded: Option<(crate::Program, Vec<kit::Part>, wgpu::Texture)>,
+    /// The cache's frame stamp after each run's reset (`walk-wrap`); None starts at 0.
+    start_frame: Option<u32>,
 }
 
 impl Furnace {
@@ -88,6 +92,7 @@ impl Furnace {
                 walk: None,
             }],
             loaded: None,
+            start_frame: None,
         }
     }
     pub(crate) fn grey() -> Self {
@@ -106,6 +111,13 @@ impl Furnace {
         room.views[0].walk = Some(Vec3::X * step);
         room
     }
+    /// `walk` whose walking frames cross frame 4096 of the cache's stamp, 24 frames in.
+    pub(crate) fn walk_wrap() -> Self {
+        let mut walk = Self::walk();
+        walk.name = "walk-wrap";
+        walk.start_frame = Some(4096 - frames() - 24);
+        walk
+    }
     fn slab_shapes() -> Vec<Shape> {
         vec![
             Shape { faces: kit::box_faces(Vec3::ZERO, Vec3::new(1.5, 0.01, 1.5), false), albedo: [0.5; 3], glow: [0.0; 3] },
@@ -123,6 +135,7 @@ impl Furnace {
             shapes: Self::slab_shapes(),
             views: vec![View { name: "top", eye: Vec3::new(0.0, 1.2, 0.0), target: Vec3::ZERO, up: Vec3::Z, expected: [0.5; 3], walk: None }],
             loaded: None,
+            start_frame: None,
         }
     }
     pub(crate) fn slab_roof() -> Self {
@@ -141,6 +154,7 @@ impl Furnace {
                 View { name: "roof", eye: Vec3::new(0.0, 0.2, 0.0), target: Vec3::new(0.0, 0.5, 0.0), up: Vec3::Z, expected: [0.0; 3], walk: None },
             ],
             loaded: None,
+            start_frame: None,
         }
     }
 }
@@ -175,6 +189,9 @@ impl Fixture for Furnace {
         let (_, parts, target) = self.loaded.as_mut().ok_or(Error::InvalidInput("furnace fixture not loaded"))?;
         // Every run starts from an empty cache, as a fresh renderer would.
         r.reset_indirect();
+        if let Some(frame) = self.start_frame {
+            r.bench_start_frame(frame);
+        }
         let mut metrics = vec![];
         let prefix = self.views.len() > 1;
         for view in &self.views {

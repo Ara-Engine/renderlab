@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
+mod city;
 mod fixtures;
 mod furnace;
 pub(crate) mod kit;
@@ -57,6 +58,11 @@ pub(crate) trait Fixture {
     fn reference(&mut self, _r: &mut Renderer) -> Option<Result<RefImage, Error>> {
         None
     }
+    /// Per-frame values from the last `run` (rays per frame, ...): the JSON line carries them
+    /// whole (`series`), the text line their median and largest value.
+    fn series(&mut self) -> Vec<(String, Vec<f64>)> {
+        vec![]
+    }
 }
 
 /// Shader text read from disk by the bench, by file name under shaders/: `program::gi_shader`
@@ -87,6 +93,16 @@ const PASSES: &[Pass] = &[Pass {
         "gi_shade_entry.wgsl",
     ],
     reload: Renderer::bench_reload_gi,
+}, Pass {
+    name: "vsm",
+    files: &[
+        "virtual_shadow.wgsl",
+        "virtual_shadow_records.wgsl",
+        "virtual_shadow_hybrid.wgsl",
+        "virtual_shadow_lookup.wgsl",
+        "virtual_shadow_disk.wgsl",
+    ],
+    reload: Renderer::bench_reload_vsm,
 }];
 
 struct Options {
@@ -349,7 +365,15 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
                 rig.read_to = end;
                 let cache: Vec<f64> = stats.cache_frames.iter().flatten().copied().collect();
                 let cache_max = cache.iter().copied().fold(0.0, f64::max);
-                let shown: Vec<String> = metrics.iter().map(|(k, v)| format!("{k}={v:.4}")).collect();
+                let series = rig.fixture.series();
+                let mut shown: Vec<String> = metrics.iter().map(|(k, v)| format!("{k}={v:.4}")).collect();
+                for (k, values) in &series {
+                    let mut sorted = values.clone();
+                    sorted.sort_by(f64::total_cmp);
+                    if let (Some(median), Some(max)) = (sorted.get(sorted.len() / 2), sorted.last()) {
+                        shown.push(format!("{k}/frame={median:.0} (max {max:.0})"));
+                    }
+                }
                 let pass_text: Vec<String> =
                     stats.medians.iter().filter(|(k, _)| *k != "cache" && *k != "span").map(|(k, v)| format!("{k}={v:.2}")).collect();
                 println!(
@@ -362,15 +386,20 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
                     pass_text.join(" ")
                 );
                 let passes: Vec<(String, f64)> = stats.medians.into_iter().collect();
-                let series: Vec<String> =
+                let cache_series: Vec<String> =
                     stats.cache_frames.iter().map(|v| v.map_or("null".into(), |v| format!("{v:.4}"))).collect();
                 println!(
-                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"cache_ms_frames\":[{}],\"contended\":{},\"run_s\":{seconds:.3}}}",
+                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"cache_ms_frames\":[{}],\"series\":{{{}}},\"contended\":{},\"run_s\":{seconds:.3}}}",
                     json_string(&name),
                     rig.path.name(),
                     json_map(&metrics),
                     json_map(&passes),
-                    series.join(","),
+                    cache_series.join(","),
+                    series
+                        .iter()
+                        .map(|(k, v)| format!("{}:[{}]", json_string(k), v.iter().map(|x| format!("{x}")).collect::<Vec<_>>().join(",")))
+                        .collect::<Vec<_>>()
+                        .join(","),
                     if busy.is_empty() { "null".to_owned() } else { json_string(&busy.join("; ")) }
                 );
             }
