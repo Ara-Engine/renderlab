@@ -166,6 +166,14 @@ fn stale_periods() -> [u32; 2] {
 const STALE_READ: u32 = 1;
 const STALE_SWEEP: u32 = 16;
 /// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
+/// RENDERLAB_GI_FIXED=N: the cache updates a fixed number of cells a frame, chosen by priority
+/// (shaders/gi_cache.wgsl gi_fixed_rank): N with software rays, 4N with hardware rays (a gather
+/// costs about a quarter there: GATHERS_PER_MS_*). Unset or 0 keeps the event-driven gather queue.
+/// The ara-gpu port does not encode the ranking passes: leave it unset there.
+pub(crate) fn fixed_cells() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
 fn stale_budget() -> u32 {
     static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *B.get_or_init(|| {
@@ -1052,6 +1060,10 @@ struct Pipelines {
     emitters_cdf: Owned<wgpu::ComputePipeline>,
     gather_count: Owned<wgpu::ComputePipeline>,
     gather_select: Owned<wgpu::ComputePipeline>,
+    /// The fixed update budget's ranking, cut and listing (shaders/gi_cache.wgsl gi_fixed_*).
+    fixed_rank: Owned<wgpu::ComputePipeline>,
+    fixed_select: Owned<wgpu::ComputePipeline>,
+    fixed_list: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
     filter: Owned<wgpu::ComputePipeline>,
     /// The kernels built on the lean layout (`lean`): their passes bind the lean group 1.
@@ -1614,7 +1626,9 @@ impl Planner {
         };
         header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
         header[54] = u32::from(fill && since_fill == 0);
-        header[53] = if ray_budget { GATHER_RAYS_SOFTWARE } else { 0 };
+        header[53] = if ray_budget && fixed_cells() == 0 { GATHER_RAYS_SOFTWARE } else { 0 };
+        // The fixed update budget (shaders/gi_cache.wgsl GI_H_FIXED_CELLS); 0 keeps the event queue.
+        header[45] = if software { fixed_cells() } else { fixed_cells().saturating_mul(4) };
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
@@ -1799,7 +1813,8 @@ impl Planner {
         // otherwise idle.
         // A reader outside the cache with unanswered requests (the final gather's probes) keeps
         // the cache running: idle means nobody waits on a cell.
-        let busy = (bounce && self.bounce_busy > 0) || self.external_pending > 0;
+        // The fixed update budget works every frame, standing or walking.
+        let busy = (bounce && (self.bounce_busy > 0 || fixed_cells() != 0)) || self.external_pending > 0;
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
                 s.gathers + 2
@@ -3694,6 +3709,9 @@ impl Renderer {
             emitters_cdf: kernel("gi_emitters_cdf"),
             gather_count: kernel("gi_gather_count"),
             gather_select: kernel("gi_gather_select"),
+            fixed_rank: kernel("gi_fixed_rank"),
+            fixed_select: kernel("gi_fixed_select"),
+            fixed_list: kernel("gi_fixed_list"),
             light: kernel("gi_light"),
             filter: kernel("gi_filter"),
             lean: vec![],
@@ -4676,9 +4694,19 @@ impl GiState {
         }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
-            // The gather ray budget's admission (no-ops without it).
-            main_pass(encoder, "indirect gather count", &p.gather_count, u32::MAX, grid);
-            main_pass(encoder, "indirect gather select", &p.gather_select, u32::MAX, grid.map(|_| [1, 1]));
+            if fixed_cells() != 0 {
+                // The fixed update budget: rank every slot, cut, list this frame's gathers.
+                let slots = plan.bounce.then_some([r.slots.div_ceil(64).min(65535), 1]);
+                mark(encoder, "gi_fixed");
+                main_pass(encoder, "indirect fixed rank", &p.fixed_rank, u32::MAX, slots);
+                main_pass(encoder, "indirect fixed select", &p.fixed_select, u32::MAX, grid.map(|_| [1, 1]));
+                main_pass(encoder, "indirect fixed list", &p.fixed_list, u32::MAX, slots);
+                mark(encoder, "gi_gather");
+            } else {
+                // The gather ray budget's admission (no-ops without it).
+                main_pass(encoder, "indirect gather count", &p.gather_count, u32::MAX, grid);
+                main_pass(encoder, "indirect gather select", &p.gather_select, u32::MAX, grid.map(|_| [1, 1]));
+            }
             if let Some(priority) = &p.priority {
                 if self.priority_hold {
                     main_pass(encoder,"indirect gather hold",&priority.hold,b,grid);

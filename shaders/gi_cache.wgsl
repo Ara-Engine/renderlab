@@ -968,6 +968,9 @@ fn gi_schedule(slot:u32, gathers:u32) {
     if gathers==0u { return; }
     let cold=gi_cold(slot);
     let state=gi_table[cold+GI_C_STATE];
+    // With the fixed update budget an event only marks the cell: the frame's ranking chooses
+    // what gathers (gi_fixed_rank).
+    if gi_fixed_on() { gi_table[cold+GI_C_STATE]=state|GI_DIRTY; return; }
     let left=max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,min(gathers,7u));
     var next=(state&~GI_GATHER_MASK)|(left<<GI_GATHER_SHIFT);
     if (state&GI_BQUEUED)==0u {
@@ -2166,6 +2169,90 @@ var<private> gi_gather_fixed:array<vec3<f32>,4>;
 var<workgroup> gi_wg_hits:atomic<u32>;
 var<workgroup> gi_wg_valued:atomic<u32>;
 // The gather period P for `count` queued cells (1 without a cap).
+// ---- fixed update budget (RENDERLAB_GI_FIXED) ----
+// A fixed number of cell updates (gathers) a frame, GI_H_FIXED_CELLS, the same whether the camera
+// walks, cuts or stands, as shipping surface caches budget their updates. Each frame one pass
+// ranks every live cell its readers used this frame or the last (the probe's and the gathers'
+// seen stamps) into a bin: no value yet first, then cells an event marked (GI_DIRTY), then by
+// frames since their last update (the stamp in the state's top bits). One thread then cuts the
+// bins from the top at the budget (the crossing bin admits the share that fits, by a per-frame
+// hash), and a second pass lists the admitted cells as this frame's gather queue. Nothing waits
+// in a queue: a cell that does not fit keeps its rank for next frame, one bin older. Events
+// (gi_schedule) only mark cells; a gather stamps its cell and schedules nothing (gi_gather_done).
+// Convergence comes from the age order: every used cell is gathered again in turn, each gather
+// reading the others' last values (the bounce series' next term).
+const GI_H_FIXED_CELLS:u32=45u;
+const GI_FIXED_NONE:u32=95u;
+const GI_FIXED_DIRTY:u32=94u;
+const GI_FIXED_AGES:u32=93u;
+const GI_W_FIXED_CUT:u32=352u;
+const GI_W_FIXED_SHARE:u32=353u;
+fn gi_fixed_on() -> bool { return gi_word(GI_H_FIXED_CELLS)!=0u; }
+// A slot's bin, or 0xffffffff for a cell not ranked this frame (empty, not traced, an orphan,
+// queued for tracing, or not read this frame or the last).
+fn gi_fixed_bin(slot:u32) -> u32 {
+    if gi_table[gi_hot(slot)]==0u { return 0xffffffffu; }
+    let cold=gi_cold(slot);
+    let state=gi_table[cold+GI_C_STATE];
+    if (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))!=GI_TRACED || (state&GI_QUEUED)!=0u { return 0xffffffffu; }
+    let frame=gi_word(GI_H_FRAME);
+    if frame-gi_table[cold+GI_C_SEEN]>1u { return 0xffffffffu; }
+    if !(gi_outgoing[slot].w>0.0) { return GI_FIXED_NONE; }
+    if (state&GI_DIRTY)!=0u { return GI_FIXED_DIRTY; }
+    return min((frame-(state>>GI_STAMP_SHIFT))&0xfffu,GI_FIXED_AGES);
+}
+@compute @workgroup_size(64) fn gi_fixed_rank(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    for(var slot=id.x;slot<gi_frame.offsets.x;slot+=groups.x*64u) {
+        let bin=gi_fixed_bin(slot);
+        if bin==0xffffffffu { continue; }
+        atomicStore(&gi_work[GI_W_CLAIMS+slot],bin+1u);
+        atomicAdd(&gi_work[GI_W_GATHER_HIST+bin],1u);
+    }
+}
+@compute @workgroup_size(1) fn gi_fixed_select() {
+    let budget=gi_word(GI_H_FIXED_CELLS);
+    atomicStore(&gi_work[gi_frame.bounce.x],0u);
+    var total=0u;
+    for(var k=0u;k<=GI_FIXED_NONE;k+=1u) {
+        let b=GI_FIXED_NONE-k;
+        let h=atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
+        if total+h>budget {
+            atomicStore(&gi_work[GI_W_FIXED_CUT],b+1u);
+            atomicStore(&gi_work[GI_W_FIXED_SHARE],max(u32(f32(budget-total)/f32(h)*65536.0),1u));
+            return;
+        }
+        total+=h;
+    }
+}
+@compute @workgroup_size(64) fn gi_fixed_list(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    let cut=atomicLoad(&gi_work[GI_W_FIXED_CUT]);
+    let share=atomicLoad(&gi_work[GI_W_FIXED_SHARE]);
+    let frame=gi_word(GI_H_FRAME);
+    for(var slot=id.x;slot<gi_frame.offsets.x;slot+=groups.x*64u) {
+        let kept=atomicExchange(&gi_work[GI_W_CLAIMS+slot],0u);
+        if kept==0u { continue; }
+        let bin=kept-1u;
+        let pick=gi_mix(slot^(frame*0x85ebca6bu))&0xffffu;
+        if !(cut==0u || bin+1u>cut || (bin+1u==cut && pick<share)) { continue; }
+        let at=atomicAdd(&gi_work[gi_frame.bounce.x],1u);
+        if at>=gi_frame.offsets.x { continue; }
+        atomicStore(&gi_work[gi_frame.bounce.x+1u+at],slot);
+        let cold=gi_cold(slot);
+        let state=gi_table[cold+GI_C_STATE];
+        gi_table[cold+GI_C_STATE]=(state&~GI_GATHER_MASK)|GI_BQUEUED|(1u<<GI_GATHER_SHIFT);
+    }
+}
+// A gather's end: with the fixed budget it stamps the cell (its update frame, no event mark) and
+// schedules nothing; else the schedule as before.
+fn gi_gather_done(slot:u32, left:u32) {
+    if gi_fixed_on() {
+        let cold=gi_cold(slot);
+        let state=gi_table[cold+GI_C_STATE];
+        gi_table[cold+GI_C_STATE]=(state&~(GI_DIRTY|GI_STAMP_MASK|GI_GATHER_MASK))|((gi_word(GI_H_FRAME)&0xfffu)<<GI_STAMP_SHIFT);
+        return;
+    }
+    gi_schedule(slot,left);
+}
 // ---- gather ray budget ----
 // A gather's cost is its rays, and they differ by cell: the fixed directions not open to the
 // sky (under the stride), plus GI_H_NEAR_RAYS + 1 aimed rays for every local light in range
@@ -2477,7 +2564,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             }
             gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
             gi_queue_shade(slot);
-            gi_schedule(slot,left);
+            gi_gather_done(slot,left);
         }
         }
         // Outside this frame's slot group: next frame's queue, the schedule unchanged.
