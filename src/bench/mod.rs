@@ -17,8 +17,11 @@ pub(crate) mod edits;
 mod reload;
 mod fixtures;
 mod furnace;
+mod glass;
 pub(crate) mod kit;
+mod reflect;
 mod shadow_edges;
+mod tr1_edge;
 
 /// The two device paths every fixture runs on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -580,6 +583,9 @@ pub fn main() -> i32 {
     let _ = std::fs::remove_file(&compile_log);
     // SAFETY: set before any thread starts; nothing else reads the environment concurrently.
     unsafe { std::env::set_var("RENDERLAB_PIPELINE_LOG", &compile_log) };
+    // Frames keep their draws' programs, which the fixtures' live references trace (kit.rs).
+    // SAFETY: as above.
+    unsafe { std::env::set_var("RENDERLAB_LIVE_REFERENCE", "1") };
     // The passes' sources as they are on disk now, not as this binary was built.
     {
         let mut text = TEXT.lock().unwrap();
@@ -726,13 +732,16 @@ pub fn main() -> i32 {
         let reload_s = t.elapsed().as_secs_f64();
         let (summary, end) = compiles(&compile_log, compiled_to);
         compiled_to = end;
+        println!("lightbench: reloaded in {reload_s:.2} s: {summary}");
+        let fixtures_s = run_round(&mut rigs, &o, round, |rig| reload.iter().any(|p| rig.reads(p)));
+        // Counted after the round: some kernels compile on first use in the fixtures' frames.
         let reached: Vec<String> = edited.iter().map(|f| format!("{f} reached {} modules", edits::reached(f))).collect();
-        let reached = if reached.is_empty() { String::new() } else { format!("; {}", reached.join(", ")) };
-        println!("lightbench: reloaded in {reload_s:.2} s: {summary}{reached}");
+        if !reached.is_empty() {
+            println!("lightbench: {}", reached.join(", "));
+        }
         for file in edited.iter().filter(|f| edits::reached(f) == 0) {
             println!("lightbench: warning: the edit to {file} reached no module: its numbers are the old kernels' (docs/bench.md)");
         }
-        let fixtures_s = run_round(&mut rigs, &o, round, |rig| reload.iter().any(|p| rig.reads(p)));
         // A module the fixtures' frames compiled (built on first use) failed: its pipelines used
         // the last working text; the rigs rebuild that text before they next run.
         if let Some(error) = edits::take_error() {

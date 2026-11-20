@@ -43,6 +43,8 @@ impl Renderer {
         self.bench_drop_reflection_trace();
         // Cell shading composes the program stage too.
         self.bench_drop_gi_shading();
-        self.prepare_view_pipelines(&programs)
+        self.prepare_view_pipelines(&programs)?;
+        self.bench_build_lean(&programs);
+        Ok(())
     }
 }
