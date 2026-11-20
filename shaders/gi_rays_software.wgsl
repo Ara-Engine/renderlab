@@ -96,23 +96,6 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
             // P-MEM runtime layout: only leaf index offset/count are uploaded.
             let l=leaves+(child&~GI_BVH_LEAF)*2u;
             let first=gi_geometry[l];let count=gi_geometry[l+1u];
-            if gi_geometry[4]!=0u {
-                // Triangle records (src/gi_bvh.rs `records`, header word 4), from the instance
-                // record's word 20: per triangle its corner, two edges and three position
-                // indices, in index order (a leaf's index offset / 3 is its first), so a test
-                // loads its own words with no dependent index load.
-                for(var k=0u;k<count;k+=3u) {
-                    let x=positions+(first+k)*4u;
-                    let a=gi_gv(x);let e1=gi_gv(x+3u);let e2=gi_gv(x+6u);
-                    let h=gi_triangle_edges(o,d,a,e1,e2,tmin,gi_limit(*best,i));
-                    if h.x>=0.0 {
-                        let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(e1,e2);
-                        *best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(gi_geometry[x+9u],gi_geometry[x+10u],gi_geometry[x+11u]),h.yz);
-                        if any_hit { return true; }
-                    }
-                }
-                continue;
-            }
             // Two triangles a step: both triangles' indices, then both triangles'
             // positions, load before either is tested, so a leaf costs half the dependent
             // round trips. They are tested in leaf order, the second against the first's
@@ -186,12 +169,87 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
     }
     return false;
 }
+// gi_instance over triangle records (src/gi_bvh.rs `records`, header word 4), walked as the
+// reflection trace walks its BVH4 (shaders/reflections_software_bvh4.wgsl rs_instance, the same
+// 16-word nodes): the four children's distances in registers, the nearest visited next without
+// a stack round trip, the rest pushed farthest first. A leaf's triangles are records from the
+// instance record's word 20 (a leaf's index offset / 3 is its first): corner, two edges and three
+// position indices, so a test loads its own words with no dependent index load. The same hits.
+fn gi_instance_records(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>, tmin:f32, any_hit:bool,
+    best:ptr<function,GiHit>, stack:ptr<function,array<u32,GI_BVH_STACK>>) -> bool {
+    let r=16u+i*GI_INSTANCE_WORDS;
+    if any_hit && gi_geometry[r+27u]!=0u { return false; }
+    if !gi_slab(origin,world_inv,gi_gv(r+12u),gi_gv(r+15u),tmin,gi_limit(*best,i)) { return false; }
+    let r0=vec4<f32>(gi_gv(r),gi_gf(r+3u));let r1=vec4<f32>(gi_gv(r+4u),gi_gf(r+7u));let r2=vec4<f32>(gi_gv(r+8u),gi_gf(r+11u));
+    let o=vec3<f32>(dot(r0,vec4<f32>(origin,1.0)),dot(r1,vec4<f32>(origin,1.0)),dot(r2,vec4<f32>(origin,1.0)));
+    let d=vec3<f32>(dot(r0.xyz,direction),dot(r1.xyz,direction),dot(r2.xyz,direction));
+    let inv=gi_safe_inverse(d);
+    let nodes=gi_geometry[r+18u];let leaves=gi_geometry[r+19u];let records=gi_geometry[r+20u];
+    (*stack)[0]=gi_geometry[r+22u];
+    var sp=1u;
+    while sp>0u {
+        sp-=1u;
+        var child=(*stack)[sp];
+        loop {
+            if (child&GI_BVH_LEAF)!=0u {
+                let l=leaves+(child&~GI_BVH_LEAF)*2u;
+                let first=gi_geometry[l];let count=gi_geometry[l+1u];
+                for(var k=0u;k<count;k+=3u) {
+                    let x=records+(first+k)*4u;
+                    let a=gi_gv(x);let e1=gi_gv(x+3u);let e2=gi_gv(x+6u);
+                    let h=gi_triangle_edges(o,d,a,e1,e2,tmin,gi_limit(*best,i));
+                    if h.x>=0.0 {
+                        let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(e1,e2);
+                        *best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(gi_geometry[x+9u],gi_geometry[x+10u],gi_geometry[x+11u]),h.yz);
+                        if any_hit { return true; }
+                    }
+                }
+                break;
+            }
+            let n=nodes+child*16u;
+            let origin_q=gi_gv(n);let step=gi_gv(n+3u);
+            let lim=gi_limit(*best,i);
+            let ids=vec4<u32>(gi_geometry[n+6u],gi_geometry[n+7u],gi_geometry[n+8u],gi_geometry[n+9u]);
+            let lower=vec3<u32>(gi_geometry[n+10u],gi_geometry[n+11u],gi_geometry[n+12u]);
+            let upper=vec3<u32>(gi_geometry[n+13u],gi_geometry[n+14u],gi_geometry[n+15u]);
+            var dist=vec4<f32>(gi_child(o,inv,origin_q,step,lower,upper,ids.x,0u,tmin,lim),
+                gi_child(o,inv,origin_q,step,lower,upper,ids.y,8u,tmin,lim),
+                gi_child(o,inv,origin_q,step,lower,upper,ids.z,16u,tmin,lim),
+                gi_child(o,inv,origin_q,step,lower,upper,ids.w,24u,tmin,lim));
+            var order=ids;
+            if dist.y<dist.x {dist=dist.yxzw;order=order.yxzw;}
+            if dist.w<dist.z {dist=dist.xywz;order=order.xywz;}
+            if dist.z<dist.x {dist=dist.zyxw;order=order.zyxw;}
+            if dist.w<dist.y {dist=dist.xwzy;order=order.xwzy;}
+            if dist.z<dist.y {dist=dist.xzyw;order=order.xzyw;}
+            if dist.w<=lim && sp<GI_BVH_STACK {(*stack)[sp]=order.w;sp+=1u;}
+            if dist.z<=lim && sp<GI_BVH_STACK {(*stack)[sp]=order.z;sp+=1u;}
+            if dist.y<=lim && sp<GI_BVH_STACK {(*stack)[sp]=order.y;sp+=1u;}
+            if dist.x<=lim {child=order.x;continue;}
+            break;
+        }
+    }
+    return false;
+}
+// One quantized child's entry distance (gi_slab_near), or a value above `lim` for an empty slot.
+fn gi_child(o:vec3<f32>, inv:vec3<f32>, base:vec3<f32>, step:vec3<f32>, lower:vec3<u32>, upper:vec3<u32>, id:u32, shift:u32, tmin:f32, lim:f32) -> f32 {
+    if id==GI_BVH_EMPTY { return 3.4028235e38; }
+    let lo=base+step*vec3<f32>((lower>>vec3<u32>(shift))&vec3<u32>(255u));
+    let hi=base+step*vec3<f32>((upper>>vec3<u32>(shift))&vec3<u32>(255u));
+    return gi_slab_near(o,inv,lo,hi,tmin,lim);
+}
 const GI_TOP_STACK:u32=48u;
 // The top level's layout (src/instance_bvh.rs): a BVH4 of float boxes, axis-major, 32 words a
 // node; RENDERLAB_INSTANCE_BVH_WIDE=0 selects the BVH2 (16 words).
 const GI_TOP_WIDE:bool=true;
 const GI_TOP_NODE:u32=32u;
 fn gi_g4(i:u32) -> vec4<f32> { return vec4<f32>(gi_gf(i),gi_gf(i+1u),gi_gf(i+2u),gi_gf(i+3u)); }
+// The instance walk for the packed layout: triangle records (header word 4) or index triples.
+fn gi_instance_any(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>, tmin:f32, any_hit:bool,
+    best:ptr<function,GiHit>, stack:ptr<function,array<u32,GI_BVH_STACK>>) -> bool {
+    if gi_geometry[4]!=0u { return gi_instance_records(i,origin,direction,world_inv,tmin,any_hit,best,stack); }
+    return gi_instance(i,origin,direction,world_inv,tmin,any_hit,best,stack);
+}
 // Closest hit (or, with `any`, the first found) in (tmin, tmax) over every instance: through
 // the top-level BVH over the instances' world boxes (src/instance_bvh.rs, header word 1 its
 // base, 2 its root), or the flat list when there is none (RENDERLAB_INSTANCE_BVH=0).
@@ -203,7 +261,7 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
     let top=gi_geometry[1];
     if top==0u {
         for(var i=0u;i<instances;i+=1u) {
-            if gi_instance(i,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
+            if gi_instance_any(i,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
         }
         return best;
     }
@@ -214,7 +272,7 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
         sp-=1u;
         let item=nodes[sp];
         if (item&GI_BVH_LEAF)!=0u {
-            if gi_instance(item&~GI_BVH_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
+            if gi_instance_any(item&~GI_BVH_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
             continue;
         }
         // The children's boxes against a bound that keeps equal-distance ties (gi_limit).
