@@ -3749,7 +3749,8 @@ impl Renderer {
             "gi_resolve", "gi_resolve_last", "gi_scan", "gi_setup", "gi_rays", "gi_finish", "gi_integrate",
             if priority { "gi_priority_gather_empty" } else if software { "gi_gather_batched" } else { "gi_gather" },
             "gi_fill_count", "gi_fill_select", "gi_emitters_build", "gi_emitters_publish", "gi_emitters_cdf",
-            "gi_gather_count", "gi_gather_select", "gi_light", "gi_filter",
+            "gi_gather_count", "gi_gather_select", "gi_fixed_rank", "gi_fixed_select", "gi_fixed_list",
+            "gi_light", "gi_filter",
         ];
         let mut first_error = None;
         let mut ready = std::collections::HashMap::new();
