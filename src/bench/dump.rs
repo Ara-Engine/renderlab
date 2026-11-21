@@ -24,13 +24,14 @@
 //! seen by Glint's course camera (5.4 m behind, 2.2 m up, 16 degrees down; levels/glint.scene).
 //! It has no reference, so it prints the cost, rays, cells and queue only.
 //!
-//! `outpost` walks the play gate's own Outpost walk: a dump from the gate's session
-//! (u-sunrt/bench/outpost_dump.py: seed 7, paused at tick 1500, then 360 ticks of Move forward) in
-//! `LIGHTBENCH_OUTPOST` (default bench-scenes/outpost-walk), whose `walk.json` holds the camera at
-//! the walk's start and every 90 ticks. The camera settles `LIGHTBENCH_DUMP_SETTLE` frames
-//! (default 300, the gate's still window before its walk) at the start, then moves along that path
-//! one 60 Hz tick a frame, as the gate steps. Its sky is the engine's atmosphere (the dump's
-//! `sky.kind` "cube" from "atmosphere"), with the sun at its top-of-atmosphere lux.
+//! `outpost` and `glint-play` replay the play gate's own sessions (`LIGHTBENCH_OUTPOST`,
+//! `LIGHTBENCH_GLINT_PLAY`; default bench-scenes/outpost-play and glint-play): a dump armed with
+//! `motion` at the still window's first tick (u-sunrt/bench/motion_dump.py: seed 7, tick 1200,
+//! then the gate's 300 still ticks and 360 ticks of Move forward), replayed one play step a frame
+//! after `LIGHTBENCH_DUMP_SETTLE` frames (default 60) at the dump: the camera, every placement
+//! that moved and every skinned mesh posed as the game posed it (replay.rs). The walk steps are
+//! the measured window. An atmosphere sky (the dump's `sky.kind` "cube" from "atmosphere",
+//! Outpost's) is drawn by the product atmosphere, with the sun at its top-of-atmosphere lux.
 //!
 //! Per walking frame every fixture here also reads `shades`, `integrates`, `traces`, `gathers`,
 //! `invalidated` and `reshaded` (shade's cell shading and integrate box, 21 Nov).
@@ -45,6 +46,7 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 #[path = "../../viewer/src/prepared.rs"]
 mod prepared;
+pub(super) type Prepared = prepared::Prepared;
 
 const SECONDS_PER_FRAME: f32 = 1.0 / 60.0;
 /// The ball's path on Glint's course: bot_probe positions from an uninterrupted roll (ticks
@@ -131,10 +133,8 @@ struct Loaded {
     exposure: f32,
     reference: Option<RefImage>,
     triangles: u64,
-    /// The recorded camera path (`Walk::Recorded`), else empty.
-    recorded: Vec<(Vec3, Vec3)>,
-    /// The placement carried along a recorded walk (`follower`): (batch, slot, model at the start).
-    follow: Vec<(usize, usize, crate::Mat4)>,
+    /// The session's motion (`Walk::Recorded`).
+    replay: Option<super::replay::Replay>,
 }
 /// How a dump fixture's camera moves.
 #[derive(Clone, Copy, PartialEq)]
@@ -143,7 +143,7 @@ enum Walk {
     IntoView,
     /// Glint's course under Glint's course camera (`glint-course`).
     Course,
-    /// The camera path a play session recorded (`walk.json`), one 60 Hz tick a frame (`outpost`).
+    /// A play session's recorded motion, one play step a frame (`outpost`, `glint-play`).
     Recorded,
 }
 pub(crate) struct Dump {
@@ -166,83 +166,17 @@ impl Dump {
         Self::new("glint-course", "LIGHTBENCH_GLINT", "glint-goal", Walk::Course)
     }
     pub(crate) fn outpost() -> Self {
-        Self::new("outpost", "LIGHTBENCH_OUTPOST", "outpost-walk", Walk::Recorded)
+        Self::new("outpost", "LIGHTBENCH_OUTPOST", "outpost-play", Walk::Recorded)
     }
-}
-
-/// `walk.json`'s camera points ([tick, eye, target] along a play session's walk), one pose per
-/// tick between them: (eye, forward).
-fn recorded_path(dir: &std::path::Path) -> Result<Vec<(Vec3, Vec3)>, Error> {
-    let bad = || Error::InvalidInput("bench scene dump: walk.json (the recorded camera path)");
-    let text = std::fs::read(dir.join("walk.json")).map_err(|_| bad())?;
-    let walk: serde_json::Value = serde_json::from_slice(&text).map_err(|_| bad())?;
-    let points: Vec<(f32, Vec3, Vec3)> = walk["walk"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|p| Some((p[0].as_f64()? as f32, json_vec3(&p[1])?, json_vec3(&p[2])?)))
-        .collect();
-    if points.len() < 2 {
-        return Err(bad());
+    pub(crate) fn glint_play() -> Self {
+        Self::new("glint-play", "LIGHTBENCH_GLINT_PLAY", "glint-play", Walk::Recorded)
     }
-    let mut poses = vec![];
-    for pair in points.windows(2) {
-        let ((t0, e0, g0), (t1, e1, g1)) = (pair[0], pair[1]);
-        for tick in 0..(t1 - t0).round().max(1.0) as usize {
-            let s = tick as f32 / (t1 - t0).max(1.0);
-            let (eye, target) = (e0.lerp(e1, s), g0.lerp(g1, s));
-            poses.push((eye, (target - eye).normalize()));
-        }
-    }
-    let (_, eye, target) = points[points.len() - 1];
-    poses.push((eye, (target - eye).normalize()));
-    Ok(poses)
-}
-
-/// The placement a recorded walk carries along with the camera: the player's character. Outpost's
-/// play gate walks its player, a caster moving beside the camera every frame, and the cache
-/// relights the cells around a moved caster; the dump holds it where the walk starts (without it
-/// the bench walk cost what the game's standing did, 21 Nov). Chosen as the nearest placement
-/// under 3 m across, 1-8 m ahead of the camera and within 2 m of its line. Returns its
-/// (batch, slot) pairs in `Prepared`'s order (a batch per primitive of each placed mesh, a slot
-/// per placement of that mesh) with their models, and what was chosen.
-fn follower(source: &crate::asset::Asset, eye: Vec3, forward: Vec3) -> (Vec<(usize, usize, crate::Mat4)>, String) {
-    let flat = Vec3::new(forward.x, 0.0, forward.z).normalize_or_zero();
-    let mut best: Option<(f32, usize, Vec3, Vec3)> = None;
-    for (i, p) in source.placements.iter().enumerate() {
-        let model = crate::Mat4::from_cols_array_2d(&p.transform);
-        let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
-        for v in source.meshes[p.mesh as usize].primitives.iter().flat_map(|q| &q.vertices) {
-            let w = model.transform_point3(Vec3::from_array(v.position));
-            (lo, hi) = (lo.min(w), hi.max(w));
-        }
-        let (center, size) = ((lo + hi) * 0.5, hi - lo);
-        let to = center - eye;
-        let ahead = to.dot(flat);
-        let side = (Vec3::new(to.x, 0.0, to.z) - flat * ahead).length();
-        if size.max_element() < 3.0 && (1.0..8.0).contains(&ahead) && side < 2.0 && best.is_none_or(|b| ahead < b.0) {
-            best = Some((ahead, i, center, size));
-        }
-    }
-    let Some((ahead, chosen, center, size)) = best else { return (vec![], "nothing ahead of the camera to carry".into()) };
-    let mesh = source.placements[chosen].mesh as usize;
-    let slot = source.placements[..chosen].iter().filter(|p| p.mesh as usize == mesh).count();
-    let placed = |m: usize| source.placements.iter().any(|p| p.mesh as usize == m);
-    let first_batch: usize = (0..mesh).filter(|&m| placed(m)).map(|m| source.meshes[m].primitives.len()).sum();
-    let model = crate::Mat4::from_cols_array_2d(&source.placements[chosen].transform);
-    let pairs = (0..source.meshes[mesh].primitives.len()).map(|k| (first_batch + k, slot, model)).collect();
-    (pairs, format!("placement {chosen} (mesh {mesh}), {ahead:.1} m ahead, centre {center:?}, size {size:?}"))
 }
 
 /// One run's cameras, (eye, forward) per frame: settling still, walking (the range returned),
 /// then holding. The goal walk ends at the dump's own view; the course follows the ball.
-fn cameras(walk: Walk, recorded: &[(Vec3, Vec3)], eye: Vec3, forward: Vec3, settle: usize, hold: usize) -> (Vec<(Vec3, Vec3)>, std::ops::Range<usize>) {
+fn cameras(walk: Walk, eye: Vec3, forward: Vec3, settle: usize, hold: usize) -> (Vec<(Vec3, Vec3)>, std::ops::Range<usize>) {
     let mut frames = vec![];
-    if walk == Walk::Recorded {
-        frames.extend(std::iter::repeat_n(recorded[0], settle));
-        frames.extend_from_slice(recorded);
-        return (frames, settle..settle + recorded.len());
-    }
     if walk == Walk::Course {
         let speed = setting("LIGHTBENCH_COURSE_SPEED", 9.5);
         let step = speed / setting("LIGHTBENCH_COURSE_FPS", 33.0);
@@ -334,7 +268,9 @@ impl Fixture for Dump {
             let map = kit::admitted(r, "bench sky map", |r| r.try_upload_environment(&map))?;
             r.set_environment(Some(&map), crate::EnvironmentParameters::default())?;
         }
-        r.set_reconstruction(Reconstruction::off())?;
+        // TR1 as the engine runs it (jittered, at the engine's default scale) for a replayed play session, whose
+        // game ran with it; off for the goal walk, scored against an unjittered reference.
+        r.set_reconstruction(if self.walk == Walk::Recorded && setting("LIGHTBENCH_DUMP_TR1", 1.0) != 0.0 { Reconstruction::default() } else { Reconstruction::off() })?;
         r.set_indirect(IndirectSettings::default())?;
         // The scene: each primitive's triangles kept for the cache's software rays (the
         // uploader moves them into the meshes), then uploaded.
@@ -356,16 +292,12 @@ impl Fixture for Dump {
             .flat_map(|m| m.primitives.iter().map(|p| (p.vertices.iter().map(|v| v.position).collect(), p.indices.clone())))
             .collect();
         let triangles = geometry.iter().map(|(_, i)| i.len() as u64 / 3).sum();
-        let follow = if self.walk == Walk::Recorded {
-            let (eye, target) = (json_vec3(&scene["camera"]["eye"]), json_vec3(&scene["camera"]["target"]));
-            let (follow, chosen) = match (eye, target) {
-                (Some(eye), Some(target)) => follower(&source, eye, (target - eye).normalize()),
-                _ => (vec![], "no camera".into()),
-            };
-            println!("lightbench: {} carries {chosen}", self.name);
-            follow
+        let replay = if self.walk == Walk::Recorded {
+            let replay = super::replay::Replay::load(&self.dir, &source, r)?.ok_or(Error::InvalidInput("bench scene dump: no motion.bin (a dump armed with `motion`)"))?;
+            println!("lightbench: {} replays {} steps ({} still), {} posed skinned meshes", self.name, replay.frames(), replay.still, replay.skins.len());
+            Some(replay)
         } else {
-            vec![]
+            None
         };
         let mut asset = prepared::Prepared::new_with_limits(source, limits, 1_000_000)
             .map_err(|_| Error::InvalidInput("bench scene dump: the asset does not fit the uploader"))?;
@@ -393,7 +325,6 @@ impl Fixture for Dump {
         let eye = json_vec3(&scene["camera"]["eye"]).ok_or(Error::InvalidInput("bench scene dump: camera"))?;
         let target = json_vec3(&scene["camera"]["target"]).ok_or(Error::InvalidInput("bench scene dump: camera"))?;
         let reference = read_pfm(&self.dir.join("reference.pfm")).filter(|r| r.size == size);
-        let recorded = if self.walk == Walk::Recorded { recorded_path(&self.dir)? } else { vec![] };
         self.loaded = Some(Loaded {
             asset,
             _program: program,
@@ -405,18 +336,32 @@ impl Fixture for Dump {
             exposure,
             reference,
             triangles,
-            recorded,
-            follow,
+            replay,
         });
         Ok(())
     }
     fn run(&mut self, r: &mut Renderer, _path: BenchPath, _reference: Option<&RefImage>) -> Result<Vec<(String, f64)>, Error> {
         let l = self.loaded.as_mut().ok_or(Error::InvalidInput("dump fixture not loaded"))?;
         r.reset_indirect();
-        let settle = setting("LIGHTBENCH_DUMP_SETTLE", if self.walk == Walk::Recorded { 300.0 } else { 30.0 }) as usize;
+        let settle = setting("LIGHTBENCH_DUMP_SETTLE", if self.walk == Walk::Recorded { 60.0 } else { 30.0 }) as usize;
         let hold = if self.walk == Walk::IntoView { setting("LIGHTBENCH_DUMP_HOLD", 90.0) as usize } else { 0 };
-        let (frames, walking) = cameras(self.walk, &l.recorded, l.eye, l.forward, settle, hold);
-        let mut series: [Vec<f64>; 12] = Default::default();
+        // A replay: `settle` frames at the dump, then its steps (the cameras come from the record).
+        let (frames, walking) = match l.replay.as_mut() {
+            Some(replay) => {
+                replay.rewind(&mut l.asset)?;
+                // `LIGHTBENCH_DUMP_WINDOW=still`: measure the still steps instead of the walk (the gate's standing row).
+                let window = if std::env::var("LIGHTBENCH_DUMP_WINDOW").as_deref() == Ok("still") {
+                    settle..settle + replay.still
+                } else {
+                    settle + replay.still..settle + replay.frames()
+                };
+                (vec![(l.eye, l.forward); settle + replay.frames()], window)
+            }
+            None => cameras(self.walk, l.eye, l.forward, settle, hold),
+        };
+        let mut path = Vec::with_capacity(frames.len());
+        let mut last = (l.eye, l.forward);
+        let mut series: [Vec<f64>; 19] = Default::default();
         let (w, h) = (l.size[0] as usize, l.size[1] as usize);
         let region = |p: &[[f32; 3]]| {
             let (x0, x1, y0, y1) = (w * 2 / 5, w * 3 / 5, h * 2 / 5, h * 3 / 5);
@@ -437,15 +382,32 @@ impl Fixture for Dump {
         };
         let mut metrics = vec![];
         let mut converge = -1.0;
-        let start = frames.first().map_or(Vec3::ZERO, |f| f.0);
-        for (frame, &(at, forward)) in frames.iter().enumerate() {
-            for &(batch, slot, model) in &l.follow {
-                l.asset.set_model(batch, slot, crate::Mat4::from_translation(at - start) * model)?;
-            }
+        for (frame, &planned) in frames.iter().enumerate() {
+            let (at, forward) = match l.replay.as_mut() {
+                Some(replay) if frame >= settle => {
+                    if let Some((eye, target)) = replay.advance(frame - settle, &mut l.asset)? {
+                        last = (eye, (target - eye).normalize());
+                    }
+                    last
+                }
+                _ => planned,
+            };
+            path.push(at);
             let camera = Camera::look_at(at, at + forward, Vec3::Y, l.fov, 0.1, 2000.0)?;
             let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
             loop {
-                let mut draws = l.asset.draws(Visibility::Frustum);
+                let mut draws = match l.replay.as_mut() {
+                    Some(replay) => l.asset.draws_replacing(
+                        Visibility::Frustum,
+                        &replay.skip,
+                        replay.skins.iter_mut().map(|skin| {
+                            let super::replay::Skin { scene_mesh, posed, instances } = skin;
+                            let posed: &crate::SkinnedMeshInstance = posed;
+                            (*scene_mesh, posed.mesh(), instances)
+                        }),
+                    ),
+                    None => l.asset.draws(Visibility::Frustum),
+                };
                 if r.try_render_view(&l.target, &camera, &mut draws, ViewMode::Lit)?.is_some() {
                     break;
                 }
@@ -469,7 +431,14 @@ impl Fixture for Dump {
                     c.gathers,
                     c.invalidated,
                     c.reshaded[0],
-                    c.reshade_skipped,
+                    c.refreshed,
+                    c.trace_partial,
+                    c.shade_causes[0],
+                    c.shade_causes[1],
+                    c.shade_causes[2],
+                    c.shade_causes[3],
+                    c.shade_causes[4],
+                    c.moved_boxes,
                 ]) {
                     values.push(f64::from(v));
                 }
@@ -499,13 +468,33 @@ impl Fixture for Dump {
         }
         metrics.push(("triangles".into(), l.triangles as f64));
         metrics.push(("geometry_bytes".into(), r.indirect_stats().geometry_bytes as f64));
-        let walked_m: f32 = frames[walking.clone()].windows(2).map(|w| w[0].0.distance(w[1].0)).sum();
+        let walked_m: f32 = path[walking.clone()].windows(2).map(|w| w[0].distance(w[1])).sum();
         metrics.push(("walked_m".into(), f64::from(walked_m)));
         metrics.push(("walk_frames".into(), walking.len() as f64));
         // The bench's pass window: the walking frames, before the held ones.
         metrics.push(("frames_measured".into(), walking.len() as f64));
-        metrics.push(("frames_after".into(), hold as f64));
-        self.series = ["rays", "gather_rays", "light_rays", "created", "queued", "shades", "integrates", "traces", "gathers", "invalidated", "reshaded", "reshade_skipped"]
+        metrics.push(("frames_after".into(), (frames.len() - walking.end) as f64));
+        self.series = [
+            "rays",
+            "gather_rays",
+            "light_rays",
+            "created",
+            "queued",
+            "shades",
+            "integrates",
+            "traces",
+            "gathers",
+            "invalidated",
+            "reshaded",
+            "refreshed",
+            "trace_partial",
+            "shade_trace",
+            "shade_sky",
+            "shade_relight",
+            "shade_mover",
+            "shade_gather",
+            "moved_boxes",
+        ]
             .into_iter()
             .map(str::to_owned)
             .zip(series)
