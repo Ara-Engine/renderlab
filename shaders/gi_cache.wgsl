@@ -956,8 +956,12 @@ fn gi_bounce_on() -> bool { return gi_word(GI_H_BOUNCE)!=0u; }
 // (its sky, its bounce, or the lights themselves), so with GI_H_TRICKLE the cell is marked
 // GI_SHADE_FULL: shaded, and filtered (gi_filter), whatever its light visibility.
 fn gi_queue_shade(slot:u32) {
+    gi_queue_cell(slot,gi_trickle());
+}
+// Queues a cell once, marking it GI_SHADE_FULL when `full` (the mark stays once set this frame).
+fn gi_queue_cell(slot:u32, full:bool) {
     let cold=gi_cold(slot);
-    let state=gi_table[cold+GI_C_STATE]|select(0u,GI_SHADE_FULL,gi_trickle());
+    let state=gi_table[cold+GI_C_STATE]|select(0u,GI_SHADE_FULL,full);
     gi_table[cold+GI_C_STATE]=state;
     if (state&GI_SHADE)!=0u { return; }
     gi_table[cold+GI_C_STATE]=state|GI_SHADE;
@@ -979,13 +983,7 @@ const GI_SHADE_SKIP:u32=0xffffffffu;
 fn gi_trickle() -> bool { return gi_word(GI_H_TRICKLE)!=0u; }
 // Queues a cell a moved caster reached: as gi_queue_shade without GI_SHADE_FULL.
 fn gi_queue_reshade(slot:u32) {
-    if !gi_trickle() { gi_queue_shade(slot); return; }
-    let cold=gi_cold(slot);
-    let state=gi_table[cold+GI_C_STATE];
-    if (state&GI_SHADE)!=0u { return; }
-    gi_table[cold+GI_C_STATE]=state|GI_SHADE;
-    let at=atomicAdd(&gi_work[GI_W_SHADES],1u);
-    if at<gi_frame.offsets.x { atomicStore(&gi_work[gi_frame.bounce.w+at],slot); }
+    gi_queue_cell(slot,false);
 }
 // Schedules at least `gathers` gathers of a cell on the next frames, queueing it for next
 // frame's once (GI_BQUEUED). An event reaching the cell sets the schedule; it is not a count
