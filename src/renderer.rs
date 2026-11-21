@@ -73,6 +73,8 @@ mod texture_residency;
 pub use texture_residency::{ResidencyStats, TextureResidency};
 #[path = "gi_cache.rs"]
 pub(crate) mod gi_cache;
+#[path = "gi_causes.rs"]
+pub(crate) mod gi_causes;
 /// The test bench (`lightbench`, docs/bench.md).
 #[cfg(feature = "bench")]
 #[path = "bench/mod.rs"]

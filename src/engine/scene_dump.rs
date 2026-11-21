@@ -9,8 +9,16 @@
 //! listed renderer frames as `frame-<id>`, for frame-locked hosts. A procedural atmosphere sky is written as the cube shading
 //! reads (`sky.f32`) with the sun as it reaches surfaces. While dumping, the engine reports no block-compressed
 //! texture support, so embedders upload RGBA8 levels the tracer can read.
+//!
+//! An arm file whose second line is `motion` also records how the scene moves from that dump on
+//! (the bench replays it, src/bench/dump.rs): `skins.rla` (each skinned mesh's rest primitive,
+//! in `skins.bin` order) and `skins.bin` (per skinned mesh: its scene.rla mesh index, joint
+//! count and vertex influences), then `motion.bin`, one record per rendered frame: its renderer
+//! frame id, the camera, each dumped placement whose model changed since the last record (its
+//! scene.rla placement index) and each skinned mesh whose palette changed. Records are deltas:
+//! a replay applies every record up to a frame. Recording stops when `<dir>/motion-stop` appears.
 use super::*;
-use std::{collections::HashMap, fmt::Write as _, path::PathBuf};
+use std::{collections::HashMap, fmt::Write as _, io::Write as _, path::PathBuf};
 
 enum Recorded {
     Static {
@@ -46,6 +54,22 @@ pub(super) struct Recorder {
     textures: HashMap<TextureId, Arc<TextureData>>,
     materials: HashMap<MaterialId, RecordedMaterial>,
     environments: HashMap<EnvironmentId, Arc<PreparedEnvironment>>,
+    motion: Option<Motion>,
+}
+
+/// A motion recording in progress (module doc).
+struct Motion {
+    out: std::io::BufWriter<std::fs::File>,
+    /// Each dumped placement's object: its scene.rla placement index and its last model.
+    objects: HashMap<ObjectId, (u32, Mat4)>,
+    /// Each dumped skinned mesh: its index in skins.bin and its last palette.
+    skins: HashMap<MeshId, (u32, Vec<Mat4>)>,
+}
+
+fn put_f32s(out: &mut Vec<u8>, values: impl IntoIterator<Item = f32>) {
+    for v in values {
+        out.extend(v.to_le_bytes());
+    }
 }
 
 impl Recorder {
@@ -98,24 +122,81 @@ impl Recorder {
     }
 
     /// The label renderer frame `frame` dumps under: `frame-<id>` when listed, else the label
-    /// in `<dir>/arm` if it exists (consumed).
-    pub(super) fn armed(&self, frame: u64) -> Option<String> {
+    /// in `<dir>/arm` if it exists (consumed); and whether it starts a motion recording (the arm
+    /// file's second line is `motion`).
+    pub(super) fn armed(&self, frame: u64) -> Option<(String, bool)> {
         if self.frames.contains(&frame) {
-            return Some(format!("frame-{frame}"));
+            return Some((format!("frame-{frame}"), false));
         }
         let arm = self.dir.join("arm");
         // The label line ends with a newline; without one the file is still being written (an
         // empty read once dumped spinner-a as "frame"), so it waits for a later frame.
         let text = std::fs::read_to_string(&arm).ok().filter(|t| t.ends_with('\n'))?;
         let _ = std::fs::remove_file(&arm);
-        Some(text.lines().next().unwrap_or("frame").trim().to_owned())
+        let mut lines = text.lines();
+        let label = lines.next().unwrap_or("frame").trim().to_owned();
+        Some((label, lines.next().is_some_and(|l| l.trim() == "motion")))
+    }
+
+    /// Writes this frame's motion record when a recording runs (module doc); stops the
+    /// recording once `<dir>/motion-stop` exists.
+    pub(super) fn record_motion<'a>(&mut self, frame: u64, camera: &Camera, batches: impl Iterator<Item = (&'a [ObjectId], &'a [Mat4])>) {
+        let Some(m) = self.motion.as_mut() else { return };
+        let stop = self.dir.join("motion-stop");
+        if stop.exists() {
+            let _ = std::fs::remove_file(&stop);
+            let _ = m.out.flush();
+            self.motion = None;
+            return;
+        }
+        let inverse = camera.view().inverse();
+        let (eye, target) = (inverse.w_axis.truncate(), inverse.w_axis.truncate() - inverse.z_axis.truncate());
+        let cam = [eye.x, eye.y, eye.z, target.x, target.y, target.z];
+        let mut models = vec![];
+        for (batch_objects, batch_models) in batches {
+            for (object, model) in batch_objects.iter().zip(batch_models) {
+                if let Some((index, last)) = m.objects.get_mut(object) {
+                    if last != model {
+                        *last = *model;
+                        models.push((*index, *model));
+                    }
+                }
+            }
+        }
+        let mut skins = vec![];
+        for (mesh, (index, last)) in m.skins.iter_mut() {
+            if let Some(Recorded::Skinned { palette, .. }) = self.meshes.get(mesh) {
+                if palette != last {
+                    last.clone_from(palette);
+                    skins.push((*index, palette.clone()));
+                }
+            }
+        }
+        let mut rec = frame.to_le_bytes().to_vec();
+        put_f32s(&mut rec, cam);
+        rec.extend((models.len() as u32).to_le_bytes());
+        for (index, model) in models {
+            rec.extend(index.to_le_bytes());
+            put_f32s(&mut rec, model.to_cols_array());
+        }
+        skins.sort_by_key(|s| s.0);
+        rec.extend((skins.len() as u32).to_le_bytes());
+        for (index, palette) in skins {
+            rec.extend(index.to_le_bytes());
+            rec.extend((palette.len() as u32).to_le_bytes());
+            put_f32s(&mut rec, palette.iter().flat_map(|j| j.to_cols_array()));
+        }
+        let _ = m.out.write_all(&rec);
     }
 }
 
 impl Engine {
     /// Writes the frozen scene for `label` as seen by `camera` into `size` pixels (module doc).
-    pub(super) fn dump_scene(&mut self, label: &str, camera: &Camera, size: [u32; 2], stops: f32) -> Result<(), Error> {
+    pub(super) fn dump_scene(&mut self, label: &str, camera: &Camera, size: [u32; 2], stops: f32, motion: bool) -> Result<(), Error> {
         let Some(rec) = self.dump.as_ref() else { return Ok(()) };
+        // For a motion recording: each placement's object and each skinned mesh's rest data.
+        let mut objects: HashMap<ObjectId, (u32, Mat4)> = HashMap::new();
+        let mut skins: Vec<(MeshId, u32, Primitive, Vec<crate::asset::skin::Influence>, usize)> = vec![];
         let out = rec.dir.join(label);
         let _ = std::fs::create_dir_all(&out);
         let mut asset = crate::asset::Asset { meshes: vec![], placements: vec![], materials: vec![], textures: vec![] };
@@ -166,12 +247,16 @@ impl Engine {
             let mesh = *mesh_index.entry((batch.mesh, batch.material)).or_insert_with(|| {
                 let (vertices, indices, tangents) = match recorded {
                     Recorded::Static { vertices, indices, tangents } => (vertices.clone(), indices.clone(), tangents.clone()),
-                    Recorded::Skinned { primitive, influences, palette } => (skin(primitive, influences, palette), primitive.indices.clone(), None),
+                    Recorded::Skinned { primitive, influences, palette } => {
+                        skins.push((batch.mesh, asset.meshes.len() as u32, primitive.clone(), influences.clone(), palette.len()));
+                        (skin(primitive, influences, palette), primitive.indices.clone(), None)
+                    }
                 };
                 asset.meshes.push(crate::asset::Mesh { primitives: vec![Primitive { vertices, tangents, indices, material: m }] });
                 asset.meshes.len() as u32 - 1
             });
-            for model in &batch.models {
+            for (object, model) in batch.objects.iter().zip(&batch.models) {
+                objects.insert(*object, (asset.placements.len() as u32, *model));
                 asset.placements.push(crate::asset::Placement { mesh, transform: model.to_cols_array_2d() });
             }
         }
@@ -234,6 +319,50 @@ impl Engine {
             "{{\"label\":\"{label}\",\"camera\":{{\"eye\":{},\"target\":{},\"fov_y\":{}}},\"size\":[{},{}],\"exposure_stops\":{stops},\"sun\":{sun},\"sky\":{sky},\"lights\":[{lights}],\"emission\":[{emission}],\"skipped_instances\":{skipped},\"path\":\"{:?}\"}}\n",
             v3(eye), v3(target), camera.fov_y(), size[0], size[1], self.path);
         std::fs::write(out.join("scene.json"), json).map_err(|_| Error::InvalidInput("scene dump write failed"))?;
+        if motion {
+            let write_failed = |_| Error::InvalidInput("scene dump motion write failed");
+            // The rest primitives (material 0 of one plain material: the bench draws them with
+            // scene.rla's material for the same mesh) and their influences.
+            let plain = crate::asset::Material {
+                base_color: [1.0; 4],
+                metallic: 0.0,
+                roughness: 1.0,
+                base_color_texture: None,
+                metallic_roughness_texture: None,
+                normal_texture: None,
+                double_sided: true,
+            };
+            let rest = crate::asset::Asset {
+                meshes: skins.iter().map(|s| crate::asset::Mesh { primitives: vec![Primitive { material: 0, ..s.2.clone() }] }).collect(),
+                placements: vec![],
+                materials: vec![plain],
+                textures: vec![],
+            };
+            let bytes = crate::asset::encode(&rest, crate::asset::Limits::unlimited()).map_err(|e| Error::InvalidInput(e.0))?;
+            std::fs::write(out.join("skins.rla"), bytes).map_err(write_failed)?;
+            let mut bin = (skins.len() as u32).to_le_bytes().to_vec();
+            for (_, mesh, _, influences, joints) in &skins {
+                bin.extend(mesh.to_le_bytes());
+                bin.extend((*joints as u32).to_le_bytes());
+                bin.extend((influences.len() as u32).to_le_bytes());
+                for inf in influences {
+                    for j in inf.joints {
+                        bin.extend(j.to_le_bytes());
+                    }
+                    put_f32s(&mut bin, inf.weights);
+                }
+            }
+            std::fs::write(out.join("skins.bin"), bin).map_err(write_failed)?;
+            let file = std::fs::File::create(out.join("motion.bin")).map_err(write_failed)?;
+            let skins = skins.iter().enumerate().map(|(k, s)| (s.0, (k as u32, rec.meshes.get(&s.0).map_or(vec![], |r| match r {
+                Recorded::Skinned { palette, .. } => palette.clone(),
+                Recorded::Static { .. } => vec![],
+            })))).collect();
+            let motion = Motion { out: std::io::BufWriter::new(file), objects, skins };
+            if let Some(rec) = self.dump.as_mut() {
+                rec.motion = Some(motion);
+            }
+        }
         Ok(())
     }
 }
