@@ -128,8 +128,11 @@ fn gs_triangle_input(p:u32, primitive:u32, bary:vec2<f32>, q:vec3<f32>, nc:vec3<
         a.tangent*w.x+b.tangent*w.y+c.tangent*w.z,s*a.handedness,a.uv*w.x+b.uv*w.y+c.uv*w.z,uv[0],uv[1],
         a.color*w.x+b.color*w.y+c.color*w.z,true,eye,vec2<u32>(0u),material,receiver,decal_none());
 }
+// The last gs_shade's borrow record (gi_cells.wgsl gi_borrow_record; 0 without a value).
+var<private> gs_borrow:vec4<f32>;
 // One cell's outgoing radiance: rgb, w 1 (written), or 0 for a cell without a value.
 fn gs_shade(slot:u32) -> vec4<f32> {
+    gs_borrow=vec4<f32>(0.0);
     let cold=gi_cold(slot);
     let hot=gi_hot(slot);
     if (gi_word(hot)&GI_VALID)==0u || (gi_word(cold+GI_C_STATE)&GI_ORPHAN)!=0u { return vec4<f32>(0.0); }
@@ -155,7 +158,9 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     // Nonnegative and finite (NaN fails both comparisons), then the energy bound.
     albedo=select(vec3<f32>(0.0),albedo*(6.283185307179586/f32(GS_DIRECTIONS)),albedo>=vec3<f32>(0.0));
     albedo=min(albedo,vec3<f32>(1.0));
-    var incident=gi_sky_scale(gi_cell_sky_irradiance(hot,nc))+gi_cell_bounce_irradiance(hot,nc);
+    let bounce=gi_cell_bounce_irradiance(hot,nc);
+    gs_borrow=gi_borrow_record(bounce,albedo,gi_word(hot+GI_HOT_BOUNCE)!=0u);
+    var incident=gi_sky_scale(gi_cell_sky_irradiance(hot,nc))+bounce;
     // LC2 light-list plumbing only: preserve G2c's hit shading and sum all light words.
     for(var first=0u;first<light_count();first+=32u) {
         var bits=gi_word(cold+GI_C_LIGHTS+(first>>5u));
@@ -249,6 +254,7 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=gi_shade_work[queue+i];
         gi_shade_out[slot]=gs_shade(slot);
+        if gi_borrow_on() { gi_shade_out[gi_borrow_at(slot)]=gs_borrow; }
         // GC1 (shared with G2c's cell shading; the line above is MP1's seam): a value whose
         // cell still has gathers scheduled is marked as changing (w 0.75), so gathers that read
         // it repeat (gi_gather). It depends only on the cell's state, so a mixed frame's
