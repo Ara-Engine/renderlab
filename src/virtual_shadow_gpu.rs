@@ -59,6 +59,14 @@ const REACH_BYTES: u64 = 48;
 // requested return to the pool after a while or under pressure.
 /// The sparse windows' side in pages.
 const SPARSE_PAGES: u32 = 32;
+/// Measurement (`RENDERLAB_VSM_SPARSE_DENSE=1`, with `RENDERLAB_VSM_SPARSE=1`): the sparse pool stores
+/// the dense clipmap's own windows (the settings' side in pages, kept until the eye's page moves
+/// more than one page from their centre), so receivers take the levels they take dense and the
+/// picture is the dense one; only the storage differs (pages receivers request, from the pool).
+fn sparse_dense_windows() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE_DENSE").is_ok_and(|v| v.trim() == "1"))
+}
 /// WGSL `VSM_POOL_FREE`: header words before the free stack.
 const POOL_FREE: u64 = 16;
 /// WGSL `VSM_PAGE_MIPS`: in-page max-mip words per physical page.
@@ -2120,7 +2128,7 @@ impl VirtualState {
         sparse: bool,
         queue: &wgpu::Queue,
     ) -> Result<bool, Error> {
-        let pages = if sparse {
+        let pages = if sparse && !sparse_dense_windows() {
             SPARSE_PAGES
         } else {
             self.settings.pages
@@ -2949,7 +2957,7 @@ impl Renderer {
         cache.poses = poses;
         // Sparse with the Disk lookup only: the other lookups read the dense layout.
         let sparse = sparse_switch() && s.lookup == VirtualLookup::Disk;
-        let pages = i64::from(if sparse { SPARSE_PAGES } else { s.pages });
+        let pages = i64::from(if sparse && !sparse_dense_windows() { SPARSE_PAGES } else { s.pages });
         let eye_light = glam::DVec2::new(eye.dot(u), eye.dot(v));
         // U-FIXED forward windows: the finest levels' windows sit ahead of the eye, in whole
         // pages toward the view's sector (`forward_sector`).
@@ -2974,8 +2982,12 @@ impl Renderer {
             let centre = [centre[0] + shift[0], centre[1] + shift[1]];
             let origin = if sparse {
                 // The page table is toroidal over absolute pages: the window follows the eye's
-                // page every frame and keeps the pages it still covers (their tags).
-                let origin = [centre[0] - pages / 2, centre[1] - pages / 2];
+                // page every frame and keeps the pages it still covers (their tags). With the dense
+                // windows it moves as the dense one does (a page of slack each way).
+                let keep = cache.origins[i].filter(|o| {
+                    sparse_dense_windows() && (0..2).all(|a| (centre[a] - (o[a] + pages / 2)).abs() <= 1)
+                });
+                let origin = keep.unwrap_or([centre[0] - pages / 2, centre[1] - pages / 2]);
                 cache.origins[i] = Some(origin);
                 if invalidated[i] {
                     cache.epochs[i] = cache.epochs[i].wrapping_add(1).max(1);
