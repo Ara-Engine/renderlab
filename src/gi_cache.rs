@@ -5412,6 +5412,12 @@ impl Renderer {
     pub(super) fn bench_start_frame(&mut self, frame: u32) {
         self.gi.planner.frame = frame;
     }
+    /// The prelude passes' reload (src/bench/reload.rs): every program's cell shading compiles
+    /// again when prepare or a frame next needs it.
+    pub(super) fn bench_drop_gi_shading(&mut self) {
+        self.gi.shading.clear();
+        self.gi.frame_shading.clear();
+    }
     pub(super) fn bench_reload_gi(&mut self) -> Result<(), Error> {
         let slots = crate::pipeline_compilation::prepare_compile_slots();
         crate::pipeline_compilation::with_compile_slots(slots, || self.bench_rebuild_gi())

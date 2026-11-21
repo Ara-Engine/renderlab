@@ -186,6 +186,29 @@ impl Renderer {
         }
     }
 
+    /// The bench's reload (src/bench/reload.rs): a lean compile started before it is dropped (its
+    /// text is the old one, and its digests cannot tell), then the lean pipelines of `ids` whose
+    /// full pipelines prepare built compile now, waited for, so the fixtures' frames neither
+    /// compile them nor switch kernels partway through a run.
+    #[cfg(feature = "bench")]
+    pub(in crate::renderer) fn bench_build_lean(&mut self, ids: &[u64]) {
+        if let Some(state) = self.view.primary.as_mut() {
+            if let Some(compile) = state.lean.running.take() {
+                let _ = compile.worker.join();
+            }
+            state.lean.failed.clear();
+        }
+        for shading in 0..2 {
+            for _ in 0..=ids.len() {
+                self.prepare_lean(ids, false, shading);
+                let Some(compile) = self.view.primary.as_ref().and_then(|s| s.lean.running.as_ref()) else { break };
+                while !compile.worker.is_finished() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+    }
+
     /// Program `id`'s lean pipeline (tiles or list, `Shading` index `shading`) when this
     /// frame shades lean and it has landed; the frame's full pipeline otherwise.
     pub(super) fn lean_pipeline(

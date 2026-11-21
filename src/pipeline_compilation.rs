@@ -419,6 +419,15 @@ fn shader_module(
     } else {
         wgpu::ShaderRuntimeChecks::unchecked()
     };
+    // The bench's edits to the passes outside gi and vsm (src/bench/edits.rs).
+    #[cfg(feature = "bench")]
+    let desc = match &desc.source {
+        wgpu::ShaderSource::Wgsl(source) => match crate::renderer::bench::edits::rewrite(source) {
+            Some(text) => wgpu::ShaderModuleDescriptor { label: desc.label, source: wgpu::ShaderSource::Wgsl(text.into()) },
+            None => desc,
+        },
+        _ => desc,
+    };
     // SAFETY: unchecked is used only for engine-owned shaders: bounded dispatches,
     // explicit buffer bounds and terminating loops are the engine's responsibility.
     // User-authored compositions always select checked, even in unchecked mode.
