@@ -219,7 +219,7 @@ var<workgroup> gi_drain_base:u32;
             }
             gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
             gi_queue_shade(slot);
-            gi_schedule(slot,left);
+            gi_gather_done(slot,left);
         }
         workgroupBarrier();
         }
