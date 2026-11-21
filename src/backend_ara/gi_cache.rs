@@ -488,6 +488,7 @@ impl Cache {
             raw_slots: self.sizes.raw_slots,
             emitters: shared::EMITTERS_MAX,
             software: false,
+            fixed_budget: false,
             field: scene.field,
             profiling: false,
             near_bins: 0,
