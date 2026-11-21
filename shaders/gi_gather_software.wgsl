@@ -183,6 +183,10 @@ var<workgroup> gi_drain_base:u32;
             var m=0.0;
             for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[j*GI_GATHER_LANES])); }
             let hot=gi_hot(slot);
+            // The fixed budget's idle test: a gather that moves its cell's value (gi_fixed_note).
+            if gi_fixed_on() && !(valued==0u && hits>0u) {
+                gi_fixed_note(hot,vec3<f32>(gi_wg_bounce[0u],gi_wg_bounce[GI_GATHER_LANES],gi_wg_bounce[2u*GI_GATHER_LANES]),atomicLoad(&gi_wg_changing)==0u);
+            }
             if valued==0u && hits>0u {
                 // Every hit was without a value: nothing to average, so the cell keeps its last
                 // bounce (its retry gathers again).

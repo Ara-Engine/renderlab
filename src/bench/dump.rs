@@ -448,7 +448,10 @@ impl Fixture for Dump {
                 // Scored at arrival, until the region converges, and on the last held frame.
                 let last = k + 1 == hold;
                 let k = k as u32;
-                if k == 0 || last || converge < 0.0 {
+                // The held window's timing reads back only arrival and the last frame (a readback a
+                // frame downclocks the GPU and inflates the very passes measured).
+                let timing = std::env::var("LIGHTBENCH_DUMP_WINDOW").as_deref() == Ok("hold");
+                if k == 0 || last || (converge < 0.0 && !timing) {
                     let pixels = kit::capture_radiance(r, l.exposure)?;
                     if converge < 0.0 && (region(&pixels) / region(&reference.rgb) - 1.0).abs() <= 0.02 {
                         converge = f64::from(k);
