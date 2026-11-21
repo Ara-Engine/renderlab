@@ -45,27 +45,27 @@ const PAGE: u32 = 128;
 /// the page work) the sparse pool's header words 4..11 (`POOL_*`).
 const REACH_BYTES: u64 = 48;
 
-// Sparse clipmap (U-CLIPMAP, opt-in with the Disk lookup: `RENDERLAB_VSM_SPARSE=1`; the dense
-// windows are the default). It gives receivers the level their footprint wants, about 450 MiB
-// less memory on Outpost and a shorter stall after a camera cut, but its steady lookup costs
-// 3.5 ms on Outpost against the dense windows' 1.9, because pixels now walk the finest band
-// instead of falling back to coarse levels. It becomes the default once that cost is gone. Each level is a 32x32-page window over absolute light-space pages, addressed
-// toroidally through a page table (shaders/virtual_shadow.wgsl `vsm_vpage`), so a window
-// following the eye keeps every page it still covers and is wide enough that receivers read
-// the level their footprint wants. Only pages receivers request this frame are resident: they
-// take 128x128-texel physical pages (both layers, 256 KiB, plus in-page max-mips) from a pool
-// that grows on demand, at most `pool_settings().1` new pages are rasterized per frame (coarse
-// levels first, the lookup reads a coarser level while a page is missing), and pages nobody
+// Sparse clipmap (U-CLIPMAP, on by default with dense-matched windows so receivers take the exact
+// dense levels while only requested pages allocate physical storage from the pool — saving ~400+
+// MiB on Outpost, ~320+ MiB on Glint, and ~350+ MiB on Showcase; `RENDERLAB_VSM_SPARSE=0` reverts
+// to the dense array and `RENDERLAB_VSM_SPARSE_DENSE=0` widens windows to 32x32). Each level is
+// addressed toroidally through a page table (shaders/virtual_shadow.wgsl `vsm_vpage`), so a window
+// following the eye keeps every page it still covers. Only pages receivers request this frame are
+// resident: they take 128x128-texel physical pages (both layers, 256 KiB, plus in-page max-mips)
+// from a pool that grows on demand, at most `pool_settings().1` new pages are rasterized per frame
+// (coarse levels first, the lookup reads a coarser level while a page is missing), and pages nobody
 // requested return to the pool after a while or under pressure.
-/// The sparse windows' side in pages.
+/// The sparse windows' side in pages when `sparse_dense_windows()` is off.
 const SPARSE_PAGES: u32 = 32;
-/// Measurement (`RENDERLAB_VSM_SPARSE_DENSE=1`, with `RENDERLAB_VSM_SPARSE=1`): the sparse pool stores
+/// Default on with sparse VSM (`RENDERLAB_VSM_SPARSE_DENSE=0` turns it off): the sparse pool stores
 /// the dense clipmap's own windows (the settings' side in pages, kept until the eye's page moves
 /// more than one page from their centre), so receivers take the levels they take dense and the
 /// picture is the dense one; only the storage differs (pages receivers request, from the pool).
 fn sparse_dense_windows() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE_DENSE").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| {
+        std::env::var("RENDERLAB_VSM_SPARSE_DENSE").map_or(true, |v| v.trim() != "0")
+    })
 }
 /// WGSL `VSM_POOL_FREE`: header words before the free stack.
 const POOL_FREE: u64 = 16;
@@ -73,10 +73,10 @@ const POOL_FREE: u64 = 16;
 const PAGE_MIP_WORDS: u64 = 5461;
 /// The pool's largest size: one layer of 1024 pages is the 128 MiB storage binding.
 const POOL_MAX: u32 = 1024;
-/// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=1` turns it on; off by default).
+/// Whether the sparse clipmap is on (default on; `RENDERLAB_VSM_SPARSE=0` reverts to dense).
 fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").map_or(true, |v| v.trim() != "0"))
 }
 /// Measurement: `RENDERLAB_VD_DUMP=<dir>;<first>;<count>` writes, for `count` renderer frames
 /// from frame `first`, the sun visibility the lookup produced before reconstruction (one u32 a

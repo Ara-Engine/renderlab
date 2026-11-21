@@ -102,6 +102,9 @@ fn vsm_resident(level:u32,page:vec2<u32>)->u32 {return vsm_pages[vsm_section(2u)
 var<private> vd_pl:u32;
 var<private> vd_pa:vec2<u32>;
 var<private> vd_ps:vec4<u32>;
+var<private> vd_single_page:bool;
+var<private> vd_single_base:u32;
+var<private> vd_all_missing:bool;
 fn vd_cache_pages(level:u32,a:vec2<i32>,b:vec2<i32>) {
     let n=vsm.counts.y;let pa=vec2<u32>(a)/VSM_PAGE;let pb=vec2<u32>(b)/VSM_PAGE;
     vd_pl=level;vd_pa=pa;
@@ -113,16 +116,23 @@ fn vd_cache_pages(level:u32,a:vec2<i32>,b:vec2<i32>) {
     if y1 {e.z=vsm_resident(level,pa+vec2<u32>(0u,1u));}
     if x1 && y1 {e.w=vsm_resident(level,pa+vec2<u32>(1u,1u));}
     vd_ps=e;
+    let single=pa.x==pb.x && pa.y==pb.y;
+    vd_single_page=single && e.x!=VSM_NONE;
+    vd_single_base=e.x<<14u;
+    vd_all_missing=single && e.x==VSM_NONE;
 }
 const VD_UNREAD:u32=0xfffffffeu;
 // The word of texel `cell` (inside the window) of `level`: VSM_NONE where its page is missing
 // (sparse only), which reads as an empty texel.
 fn vsm_index(cell:vec2<i32>,level:u32)->u32 {
     if !vsm_sparse() {return vsm_word(cell,level);}
+    if vd_single_page && level==vd_pl {
+        return vd_single_base|((u32(cell.y)&127u)<<7u)|(u32(cell.x)&127u);
+    }
     let c=vec2<u32>(cell);
     let slot=vd_slot(level,c/VSM_PAGE);
     if slot==VSM_NONE {return VSM_NONE;}
-    return slot*VSM_PAGE*VSM_PAGE+(c.y%VSM_PAGE)*VSM_PAGE+c.x%VSM_PAGE;
+    return (slot<<14u)|((c.y&127u)<<7u)|(c.x&127u);
 }
 // The normalized top height of mip `mip` (1..7) over the cell holding texel `cell`; a missing
 // page is the highest (conservative).
@@ -351,7 +361,15 @@ fn vd_mip_max(level:u32,a:vec2<i32>,b:vec2<i32>)->f32 {
         if mip<=7u {
             // The four cells holding the corners (cells of mip <= 7 lie inside one page).
             let ua=vec2<u32>(a);let ub=vec2<u32>(b);
-            h=max(max(vsm_mip_at(level,mip,ua),vsm_mip_at(level,mip,vec2<u32>(ub.x,ua.y))),max(vsm_mip_at(level,mip,vec2<u32>(ua.x,ub.y)),vsm_mip_at(level,mip,ub)));
+            if vd_single_page && level==vd_pl {
+                let s=VSM_PAGE>>mip;
+                let base=(vd_single_base>>14u)*VSM_PAGE_MIPS+(VSM_PAGE*VSM_PAGE-4u*s*s)/3u;
+                let la=(ua&vec2<u32>(127u))>>vec2<u32>(mip);
+                let lb=(ub&vec2<u32>(127u))>>vec2<u32>(mip);
+                h=max(max(vsm_mips[base+la.y*s+la.x],vsm_mips[base+la.y*s+lb.x]),max(vsm_mips[base+lb.y*s+la.x],vsm_mips[base+lb.y*s+lb.x]));
+            } else {
+                h=max(max(vsm_mip_at(level,mip,ua),vsm_mip_at(level,mip,vec2<u32>(ub.x,ua.y))),max(vsm_mip_at(level,mip,vec2<u32>(ua.x,ub.y)),vsm_mip_at(level,mip,ub)));
+            }
         } else {
             // Above page size: the page maxima (after the pool's mips) of the pages spanned.
             let pa=vec2<u32>(a)/VSM_PAGE;let pb=min(vec2<u32>(b)/VSM_PAGE,pa+vec2<u32>(3u));
@@ -377,10 +395,14 @@ fn vd_mip_max(level:u32,a:vec2<i32>,b:vec2<i32>)->f32 {
 // g.y rank is a permutation (vd.above). Both coordinates sit at the 64 quantiles of the disk's
 // marginal distribution, so the samples on one side of an axis-aligned line are a rank, and an
 // axis-aligned occluder edge crossing the disk passes one sample at a time.
-// The share of the disk's area with a coordinate below g.
+// The share of the disk's area with a coordinate below g: exact (x*sqrt(1-x^2)+asin(x))/pi + 0.5
+// rewritten via (1-|x|)^(3/2) * P(1-|x|), max error 1.7e-6 (< 0.00011 of a 64-sample bin, 0/200k bin flips).
 fn vd_share(g:f32)->f32 {
     let x=clamp(g,-1.0,1.0);
-    return 0.5+(x*sqrt(1.0-x*x)+asin(x))*0.3183098861837907;
+    let t=1.0-abs(x);
+    let q=fma(fma(fma(fma(-0.000988685,t,-0.000922507),t,-0.008306107),t,-0.089990333),t,0.600209375);
+    let tail=t*sqrt(t)*q;
+    return select(tail,1.0-tail,x>=0.0);
 }
 // Bits k..63.
 fn vd_from(k:u32)->vec2<u32> {
@@ -769,23 +791,6 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     if !vd_above(vec3<f32>(c,height),margin) {return;}
     let min_lo=max(max(lo,cone_lo),1e-6*size);
     var bottom=t-VD_THICK*size;
-    // Both the top column (even after VD_FRACTION narrowing) and any VD_PEEL2 surface under it
-    // lie within [min_lo, chi], so their bits are a subset of max_m. Skip peel and neighbour
-    // loads whenever max_m adds no new bits, or when bottom already reaches min_lo without
-    // fractional narrowing.
-    var max_m=vec2<u32>(0u);
-    let fast_bound=!VD_EDGES && !VD_COUNTS;
-    if fast_bound {
-        max_m=vd_column_mask(c-p.xy,0.5*size,min_lo,chi);
-        let known=select(vd_mask,vd_mask&vd_far,vd_edge);
-        if all((max_m&~known)==vec2<u32>(0u)) {return;}
-        let unnarrowed=!VD_FRACTION || stride!=1 || (top.y&7u)==0u;
-        if bottom<=min_lo && unnarrowed {
-            vd_mask|=max_m;
-            if vd_edge && !vd_replaced(cell,level,stride,chi) {vd_far|=max_m;}
-            return;
-        }
-    }
     let side=i32(vsm.counts.y*VSM_PAGE);
     let bits=vsm.misc.x;
     // The underside. A closed mesh gives it: the peel layer, when that is the top's own
@@ -793,30 +798,54 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     // its lowest neighbour of the same placement, which closes a sloped surface between texels
     // and leaves a floating sheet thin. Either way a column is at least VD_THICK texels thick,
     // so the columns of a thin or oblique surface overlap in height where thinner ones would
-    // leave slits of light.
+    // leave slits of light. Defer loading the peel word when the minimum thickness already
+    // reaches min_lo: umbra columns that fill the disk then skip the peel read altogether.
     var peel=vec2<u32>(0u);
-    if VD_PEEL {peel=vsm_peel_words[i];}
-    let own=peel.x!=0u && peel.x>>bits==top.x>>bits;
-    if own {
-        bottom=min(bottom,vsm_height(peel)-p.z);
-    } else if bottom>min_lo || VD_EDGES {
-        for(var k=0u;k<4u;k+=1u) {
-            let n=cell+stride*vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
-            if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
-            let j=vsm_index(n,level);
-            if j==VSM_NONE {continue;}
-            let other=vsm_top_words[j];
-            if other.x!=0u && other.x>>bits==top.x>>bits {
-                bottom=min(bottom,vsm_height(other)-p.z);
-                if bottom<=min_lo && !VD_EDGES {break;}
+    var peel_loaded=false;
+    var own=false;
+    if bottom>min_lo || VD_EDGES {
+        if VD_PEEL {
+            peel=vsm_peel_words[i];
+            peel_loaded=true;
+            own=peel.x!=0u && peel.x>>bits==top.x>>bits;
+        }
+        if own {
+            bottom=min(bottom,vsm_height(peel)-p.z);
+        } else {
+            let fast_nb=(!vsm_sparse() || (vd_single_page && level==vd_pl)) && stride==1 && all(cell>vec2<i32>(0)) && all(cell<vec2<i32>(side-1));
+            if fast_nb {
+                let row_step=select(vsm_pitch(),VSM_PAGE,vsm_sparse());
+                let n0=vsm_top_words[i-1u];
+                if n0.x!=0u && n0.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(n0)-p.z);}
+                if bottom>min_lo || VD_EDGES {
+                    let n1=vsm_top_words[i+1u];
+                    if n1.x!=0u && n1.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(n1)-p.z);}
+                }
+                if bottom>min_lo || VD_EDGES {
+                    let n2=vsm_top_words[i-row_step];
+                    if n2.x!=0u && n2.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(n2)-p.z);}
+                }
+                if bottom>min_lo || VD_EDGES {
+                    let n3=vsm_top_words[i+row_step];
+                    if n3.x!=0u && n3.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(n3)-p.z);}
+                }
+            } else {
+                for(var k=0u;k<4u;k+=1u) {
+                    let n=cell+stride*vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
+                    if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
+                    let j=vsm_index(n,level);
+                    if j==VSM_NONE {continue;}
+                    let other=vsm_top_words[j];
+                    if other.x!=0u && other.x>>bits==top.x>>bits {
+                        bottom=min(bottom,vsm_height(other)-p.z);
+                        if bottom<=min_lo && !VD_EDGES {break;}
+                    }
+                }
             }
         }
     }
     let clo=max(max(bottom,lo),1e-6*size);
-    var m=max_m;
-    if !fast_bound || clo>min_lo {
-        m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
-    }
+    var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
     // The covered fraction: a level's own texel (not a max-mip cell) whose near layer covers k
     // eighths of its samples (the top word's low bits, vsm_fold) blocks only the directions through
     // the k/8 of its square on its covered side (vd_half).
@@ -860,13 +889,19 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     if vd_edge && !vd_replaced(cell,level,stride,chi) {vd_far|=m;}
     // Another placement's surface under the top one: a second sheet, or the solid a sheet lies
     // over. Its own underside is unknown: the least thickness.
-    if VD_PEEL2 && peel.x!=0u && !own && (!fast_bound || any((max_m&~select(vd_mask,vd_mask&vd_far,vd_edge))!=vec2<u32>(0u))) {
-        let under=vsm_height(peel);
-        let t2=under-p.z;
-        if t2>lo && vd_above(vec3<f32>(c,under),margin) {
-            let m2=vd_column_mask(c-p.xy,0.5*size,max(max(t2-VD_THICK*size,lo),1e-6*size),min(t2,hi));
-            vd_mask|=m2;
-            if vd_edge && !vd_replaced(cell,level,stride,min(t2,hi)) {vd_far|=m2;}
+    if VD_PEEL2 && !vd_full() {
+        if !peel_loaded && VD_PEEL {
+            peel=vsm_peel_words[i];
+            own=peel.x!=0u && peel.x>>bits==top.x>>bits;
+        }
+        if peel.x!=0u && !own {
+            let under=vsm_height(peel);
+            let t2=under-p.z;
+            if t2>lo && vd_above(vec3<f32>(c,under),margin) {
+                let m2=vd_column_mask(c-p.xy,0.5*size,max(max(t2-VD_THICK*size,lo),1e-6*size),min(t2,hi));
+                vd_mask|=m2;
+                if vd_edge && !vd_replaced(cell,level,stride,min(t2,hi)) {vd_far|=m2;}
+            }
         }
     }
 }
@@ -1070,6 +1105,7 @@ fn vd_map(ceiling:f32) {
         // the mip test and the texels read them from the cache.
         if !skip && vsm_sparse() {
             vd_cache_pages(level,max(a-vec2<i32>(1),vec2<i32>(0)),min(b+vec2<i32>(1),vec2<i32>(side-1)));
+            if vd_all_missing {skip=true;}
         }
         // Every texel but the 2x2 whose centres surround the cone's point is half a texel or
         // more from it, so it reaches the cone only above half a texel / slope (vd_texel's cone
@@ -1110,6 +1146,8 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     let facing=vd_mask;
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {
         vd_pl=VSM_NONE;
+        vd_single_page=false;
+        vd_all_missing=false;
         let ceil_info=vd_ceiling();
         if ceil_info.height>0.0 || !ceil_info.fine_clear {
             let margin=VD_BIAS*vsm_texel(vd_px.level);

@@ -338,9 +338,12 @@ struct Gpu {
     draws: Owned<wgpu::Buffer>,
     sampler: Owned<wgpu::Sampler>,
     compare: Owned<wgpu::Sampler>,
-    shadow: Depth,
-    /// The still casters' depth (`sun_map_cache`), copied into `shadow` before moved casters draw.
+    /// 2048^2 sun shadow map, allocated lazily when non-RT glass or particle emitters need it.
+    shadow: Option<Depth>,
+    /// The still casters' depth (`sun_map_cache`), allocated lazily once a caster moves.
     shadow_still: Option<Depth>,
+    /// 1x1 depth stand-in for binding 34 when RT glass needs no shadow map.
+    dummy_shadow: Depth,
     white: Owned<wgpu::TextureView>,
     _white: Owned<wgpu::Texture>,
     /// Indexed by RT (hardware sun rays) or not.
@@ -384,8 +387,9 @@ struct ParticlePipelines {
 pub(super) struct Targets {
     color: Depth,
     depth: Depth,
-    aa: Depth,
-    /// Per-pixel panes' four-sample triangle ids (`panes`), when they are on.
+    /// 4x MSAA glass target, allocated lazily only when a draw uses MSAA raster rather than panes.
+    aa: Option<Depth>,
+    /// Per-pixel panes' four-sample triangle ids (`panes`), allocated lazily when panes run.
     pane_ids: Option<Depth>,
     generation: u64,
 }
@@ -861,32 +865,17 @@ impl Renderer {
             }),
             ResourceKind::Sampler,
         );
-        let shadow = self.tp_target(
-            "TP1 sun shadow map",
+        let dummy_shadow = self.tp_target(
+            "TP1 sun shadow stand-in",
             wgpu::Extent3d {
-                width: SHADOW_SIZE,
-                height: SHADOW_SIZE,
+                width: 1,
+                height: 1,
                 depth_or_array_layers: 1,
             },
             wgpu::TextureFormat::Depth32Float,
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+            wgpu::TextureUsages::TEXTURE_BINDING,
             4,
         );
-        let shadow_still = sun_map_cache().then(|| {
-            self.tp_target(
-                "TP1 sun shadow map, still casters",
-                wgpu::Extent3d {
-                    width: SHADOW_SIZE,
-                    height: SHADOW_SIZE,
-                    depth_or_array_layers: 1,
-                },
-                wgpu::TextureFormat::Depth32Float,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                4,
-            )
-        });
         let white_texture = self.ledger.own(
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("TP1 white sprite"),
@@ -1301,8 +1290,9 @@ impl Renderer {
             draws,
             sampler,
             compare,
-            shadow,
-            shadow_still,
+            shadow: None,
+            shadow_still: None,
+            dummy_shadow,
             white,
             _white: white_texture,
             glass_bindings,
@@ -1320,6 +1310,44 @@ impl Renderer {
             empty,
             empty_bindings,
         }
+    }
+
+    fn ensure_tp_shadow(&mut self) {
+        if self.transparency.gpu.as_ref().unwrap().shadow.is_some() {
+            return;
+        }
+        let target = self.tp_target(
+            "TP1 sun shadow map",
+            wgpu::Extent3d {
+                width: SHADOW_SIZE,
+                height: SHADOW_SIZE,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            4,
+        );
+        self.transparency.gpu.as_mut().unwrap().shadow = Some(target);
+    }
+
+    fn ensure_tp_shadow_still(&mut self) {
+        if self.transparency.gpu.as_ref().unwrap().shadow_still.is_some() {
+            return;
+        }
+        let target = self.tp_target(
+            "TP1 sun shadow map, still casters",
+            wgpu::Extent3d {
+                width: SHADOW_SIZE,
+                height: SHADOW_SIZE,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureFormat::Depth32Float,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            4,
+        );
+        self.transparency.gpu.as_mut().unwrap().shadow_still = Some(target);
     }
 
     fn tp_target(
@@ -1789,6 +1817,7 @@ impl Renderer {
             wgpu::BufferUsages::STORAGE,
         );
         let uniform = buffer("TP1 emitter", EMITTER_BYTES, wgpu::BufferUsages::UNIFORM);
+        self.ensure_tp_shadow();
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let sim = self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1798,7 +1827,7 @@ impl Renderer {
                     frame_entry(&gpu.frame),
                     wgpu::BindGroupEntry {
                         binding: 34,
-                        resource: wgpu::BindingResource::TextureView(&gpu.shadow.view),
+                        resource: wgpu::BindingResource::TextureView(&gpu.shadow.as_ref().unwrap().view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 35,
@@ -2037,65 +2066,11 @@ impl Renderer {
                     | wgpu::TextureUsages::COPY_SRC,
                 4,
             );
-            let texture = self.ledger.own(
-                self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("TP2 multisampled glass"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 4,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                }),
-                ResourceKind::Texture,
-            );
-            let view = self.ledger.own(
-                texture.create_view(&Default::default()),
-                ResourceKind::TextureView,
-            );
-            let aa = Depth {
-                texture,
-                view,
-                _allocation: self.ledger.allocate(
-                    AllocationKind::Target,
-                    u64::from(size.width) * u64::from(size.height) * 32,
-                ),
-            };
-            let pane_ids = self.tp_pane_pixels().then(|| {
-                let texture = self.ledger.own(
-                    self.device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("TP pane ids"),
-                        size,
-                        mip_level_count: 1,
-                        sample_count: 4,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: panes::ID_FORMAT,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                            | wgpu::TextureUsages::TEXTURE_BINDING,
-                        view_formats: &[],
-                    }),
-                    ResourceKind::Texture,
-                );
-                let view = self.ledger.own(
-                    texture.create_view(&Default::default()),
-                    ResourceKind::TextureView,
-                );
-                Depth {
-                    texture,
-                    view,
-                    _allocation: self.ledger.allocate(
-                        AllocationKind::Target,
-                        u64::from(size.width) * u64::from(size.height) * 16,
-                    ),
-                }
-            });
             self.view.transparency_targets = Some(Targets {
                 color,
                 depth,
-                aa,
-                pane_ids,
+                aa: None,
+                pane_ids: None,
                 generation,
             });
         }
@@ -2188,111 +2163,129 @@ impl Renderer {
             crate::Light::Directional { travel, lux } => Some((travel.normalize(), *lux)),
             _ => None,
         });
-        let mut receivers: Vec<(Vec3, Vec3)> = Vec::new();
-        for draw in &transparent {
-            for b in draw.instances.state.world_bounds(draw.mesh.bounds)?.iter() {
-                receivers.push((b.min, b.max));
-            }
-        }
-        receivers.extend(self.transparency.emitters.iter().map(|e| e.params.bounds()));
-        // What the opaque casters are: each draw's mesh and placements by name (the collection
-        // and its edit count), not matrix by matrix (8,195 matrices on Ara's Outpost).
-        let mut casters_key = Sha256::new();
-        for draw in opaque {
-            casters_key.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
-            let (id, edits) = draw.instances.state.revision();
-            casters_key.update(id.to_ne_bytes());
-            casters_key.update(edits.to_ne_bytes());
-        }
-        let casters_key: [u8; 32] = casters_key.finalize().into();
-        // The fit depends on the sun, the receivers and the casters only: reused while those are
-        // the same (a moving camera changes none of them).
-        let fit_inputs: [u8; 32] = {
-            let mut h = Sha256::new();
-            if let Some((travel, _)) = sun {
-                h.update(bytes_of(&travel.to_array()));
-            }
-            for (min, max) in &receivers {
-                h.update(bytes_of(&min.to_array()));
-                h.update(bytes_of(&max.to_array()));
-            }
-            h.update(casters_key);
-            h.finalize().into()
+        let need_sun_map = {
+            #[cfg(test)]
+            let profile_map = std::env::var("RENDERLAB_TP2_PROFILE").is_ok_and(|v| v.contains("map"));
+            #[cfg(not(test))]
+            let profile_map = false;
+            !rt || !self.transparency.emitters.is_empty() || profile_map
         };
-        let fit = match &self.transparency.fit_memo {
-            Some((inputs, fit)) if *inputs == fit_inputs => *fit,
-            _ => {
-                // Every opaque caster's world bounds, in draw then instance order.
-                let mut casters: Vec<(Vec3, Vec3)> = Vec::new();
-                for draw in opaque {
-                    if let Ok(boxes) = draw.instances.state.world_bounds(draw.mesh.bounds) {
-                        casters.extend(boxes.iter().map(|b| (b.min, b.max)));
+        let (fit, drawn, key, render_shadow, moved, still_key) = if need_sun_map {
+            let mut receivers: Vec<(Vec3, Vec3)> = Vec::new();
+            for draw in &transparent {
+                for b in draw.instances.state.world_bounds(draw.mesh.bounds)?.iter() {
+                    receivers.push((b.min, b.max));
+                }
+            }
+            receivers.extend(self.transparency.emitters.iter().map(|e| e.params.bounds()));
+            // What the opaque casters are: each draw's mesh and placements by name (the collection
+            // and its edit count), not matrix by matrix (8,195 matrices on Ara's Outpost).
+            let mut casters_key = Sha256::new();
+            for draw in opaque {
+                casters_key.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
+                let (id, edits) = draw.instances.state.revision();
+                casters_key.update(id.to_ne_bytes());
+                casters_key.update(edits.to_ne_bytes());
+            }
+            let casters_key: [u8; 32] = casters_key.finalize().into();
+            // The fit depends on the sun, the receivers and the casters only: reused while those are
+            // the same (a moving camera changes none of them).
+            let fit_inputs: [u8; 32] = {
+                let mut h = Sha256::new();
+                if let Some((travel, _)) = sun {
+                    h.update(bytes_of(&travel.to_array()));
+                }
+                for (min, max) in &receivers {
+                    h.update(bytes_of(&min.to_array()));
+                    h.update(bytes_of(&max.to_array()));
+                }
+                h.update(casters_key);
+                h.finalize().into()
+            };
+            let fit = match &self.transparency.fit_memo {
+                Some((inputs, fit)) if *inputs == fit_inputs => *fit,
+                _ => {
+                    // Every opaque caster's world bounds, in draw then instance order.
+                    let mut casters: Vec<(Vec3, Vec3)> = Vec::new();
+                    for draw in opaque {
+                        if let Ok(boxes) = draw.instances.state.world_bounds(draw.mesh.bounds) {
+                            casters.extend(boxes.iter().map(|b| (b.min, b.max)));
+                        }
                     }
+                    let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, &casters));
+                    self.transparency.fit_memo = Some((fit_inputs, fit));
+                    fit
                 }
-                let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, &casters));
-                self.transparency.fit_memo = Some((fit_inputs, fit));
-                fit
-            }
-        };
-        let shadow = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
-        // Which opaque draws the sun map draws: those inside its volume (`sun_map_cull`); a
-        // draw outside it writes no depth, so leaving it out keeps the map the same.
-        let mut drawn: Option<Vec<bool>> = None;
-        let casters_key = if sun_map_cull() && fit.is_some() {
-            let mut h = Sha256::new();
-            let mut seen = Vec::with_capacity(opaque.len());
-            let mut inside = Vec::with_capacity(opaque.len());
-            for (i, draw) in opaque.iter().enumerate() {
-                h.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
-                let (id, edits) = draw.instances.state.revision();
-                h.update(id.to_ne_bytes());
-                let now = draw.instances.state.world_bounds(draw.mesh.bounds).ok().and_then(|boxes| {
-                    boxes.iter().fold(None, |u: Option<(Vec3, Vec3)>, b| {
-                        Some(u.map_or((b.min, b.max), |(lo, hi)| (lo.min(b.min), hi.max(b.max))))
-                    })
-                });
-                let before = self.transparency.caster_bounds.get(i).copied().flatten();
-                if now.is_none() || [now, before].into_iter().flatten().any(|b| in_sun_map(shadow, b)) {
-                    h.update(edits.to_ne_bytes());
+            };
+            let shadow = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
+            // Which opaque draws the sun map draws: those inside its volume (`sun_map_cull`); a
+            // draw outside it writes no depth, so leaving it out keeps the map the same.
+            let mut drawn: Option<Vec<bool>> = None;
+            let casters_key = if sun_map_cull() && fit.is_some() {
+                let mut h = Sha256::new();
+                let mut seen = Vec::with_capacity(opaque.len());
+                let mut inside = Vec::with_capacity(opaque.len());
+                for (i, draw) in opaque.iter().enumerate() {
+                    h.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
+                    let (id, edits) = draw.instances.state.revision();
+                    h.update(id.to_ne_bytes());
+                    let now = draw.instances.state.world_bounds(draw.mesh.bounds).ok().and_then(|boxes| {
+                        boxes.iter().fold(None, |u: Option<(Vec3, Vec3)>, b| {
+                            Some(u.map_or((b.min, b.max), |(lo, hi)| (lo.min(b.min), hi.max(b.max))))
+                        })
+                    });
+                    let before = self.transparency.caster_bounds.get(i).copied().flatten();
+                    if now.is_none() || [now, before].into_iter().flatten().any(|b| in_sun_map(shadow, b)) {
+                        h.update(edits.to_ne_bytes());
+                    }
+                    inside.push(now.is_none_or(|b| in_sun_map(shadow, b)));
+                    seen.push(now);
                 }
-                inside.push(now.is_none_or(|b| in_sun_map(shadow, b)));
-                seen.push(now);
+                self.transparency.caster_bounds = seen;
+                drawn = Some(inside);
+                h.finalize().into()
+            } else {
+                casters_key
+            };
+            let mut key = Sha256::new();
+            key.update(bytes_of(&shadow.to_cols_array()));
+            key.update(casters_key);
+            let key: [u8; 32] = key.finalize().into();
+            let render_shadow = fit.is_some() && self.transparency.shadow_key != Some(key);
+            // Which casters have moved (`sun_map_cache`), and what the still ones' cached depth is
+            // drawn from: the fit and each still draw's edits, and which draws have moved.
+            let mut moved = vec![false; opaque.len()];
+            let still_key: Option<[u8; 32]> = (sun_map_cache() && render_shadow).then(|| {
+                let mut h = Sha256::new();
+                h.update(bytes_of(&shadow.to_cols_array()));
+                let mut seen = std::collections::HashMap::with_capacity(opaque.len());
+                for (i, draw) in opaque.iter().enumerate() {
+                    let (id, edits) = draw.instances.state.revision();
+                    let name = (Arc::as_ptr(&draw.mesh.vertex) as usize, id);
+                    let state = match self.transparency.caster_still.get(&name) {
+                        Some(Some(e)) if *e != edits => None,
+                        Some(known) => *known,
+                        None => Some(edits),
+                    };
+                    moved[i] = state.is_none();
+                    h.update(name.0.to_ne_bytes());
+                    h.update(id.to_ne_bytes());
+                    h.update(state.map_or([0xff; 8], u64::to_ne_bytes));
+                    seen.insert(name, state);
+                }
+                self.transparency.caster_still = seen;
+                h.finalize().into()
+            });
+            if render_shadow {
+                self.ensure_tp_shadow();
+                if still_key.is_some() && moved.iter().any(|&m| m) {
+                    self.ensure_tp_shadow_still();
+                }
             }
-            self.transparency.caster_bounds = seen;
-            drawn = Some(inside);
-            h.finalize().into()
+            (fit, drawn, key, render_shadow, moved, still_key)
         } else {
-            casters_key
+            (None, None, [0u8; 32], false, Vec::new(), None)
         };
-        let mut key = Sha256::new();
-        key.update(bytes_of(&shadow.to_cols_array()));
-        key.update(casters_key);
-        let key: [u8; 32] = key.finalize().into();
-        let render_shadow = fit.is_some() && self.transparency.shadow_key != Some(key);
-        // Which casters have moved (`sun_map_cache`), and what the still ones' cached depth is
-        // drawn from: the fit and each still draw's edits, and which draws have moved.
-        let mut moved = vec![false; opaque.len()];
-        let still_key: Option<[u8; 32]> = (sun_map_cache() && render_shadow).then(|| {
-            let mut h = Sha256::new();
-            h.update(bytes_of(&shadow.to_cols_array()));
-            let mut seen = std::collections::HashMap::with_capacity(opaque.len());
-            for (i, draw) in opaque.iter().enumerate() {
-                let (id, edits) = draw.instances.state.revision();
-                let name = (Arc::as_ptr(&draw.mesh.vertex) as usize, id);
-                let state = match self.transparency.caster_still.get(&name) {
-                    Some(Some(e)) if *e != edits => None,
-                    Some(known) => *known,
-                    None => Some(edits),
-                };
-                moved[i] = state.is_none();
-                h.update(name.0.to_ne_bytes());
-                h.update(id.to_ne_bytes());
-                h.update(state.map_or([0xff; 8], u64::to_ne_bytes));
-                seen.insert(name, state);
-            }
-            self.transparency.caster_still = seen;
-            h.finalize().into()
-        });
         let mut bytes = frame_block(&FrameInputs {
             camera,
             size: [size.width, size.height],
@@ -2449,6 +2442,125 @@ impl Renderer {
                 blobs.extend_from_slice(&uniform);
             }
         }
+        // Per-pixel panes (`panes`): a record (rectangle and model slot) per instance of each
+        // glass draw, at its dynamic offset, and a pane group per draw. Draws with a tangent
+        // stream keep the raster (the pane shading builds vertices without tangents), and so do
+        // draws of more than `panes::MAX_INSTANCES` instances and films (below).
+        // Films (IOR one, no thickness) of programs that declare them blend in hardware:
+        // consecutive films share one pass, each draw's instances far to near (`film_ids`).
+        let films: Vec<bool> = transparent
+            .iter()
+            .map(|draw| {
+                let program = draw.material.map_or(default_program, |m| m.program.id());
+                draw.material
+                    .and_then(|m| m.transparency)
+                    .is_some_and(|t| t.ior <= 1.0 && t.thickness == 0.0)
+                    && self
+                        .transparency
+                        .glass
+                        .iter()
+                        .any(|g| g.program == program && g.films.is_some())
+            })
+            .collect();
+        let mut pane_records: Vec<Vec<(u32, [u32; 4])>> = vec![Vec::new(); transparent.len()];
+        let mut pane_bytes = Vec::new();
+        if pixel_panes {
+            for (i, draw) in transparent.iter().enumerate() {
+                if films[i]
+                    || draw.mesh.tangent.is_some()
+                    || draw.instances.state.models.len() > panes::MAX_INSTANCES
+                {
+                    continue;
+                }
+                let state = &draw.instances.state;
+                for (model, slot) in state.models.iter().zip(&state.ids) {
+                    let rect =
+                        panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height]);
+                    let at = pane_bytes.len();
+                    pane_bytes.extend(panes::record(rect, *slot));
+                    pane_bytes.resize(at + panes::RECORD as usize, 0);
+                    pane_records[i].push((at as u32, rect));
+                }
+            }
+        }
+        let need_pane_ids = !pane_bytes.is_empty();
+        let need_aa = glass_samples() == 4
+            && transparent
+                .iter()
+                .enumerate()
+                .any(|(i, _)| pane_records[i].is_empty());
+        // Lazily allocate the heavy 4x MSAA targets only when this frame's draws actually need them.
+        if (need_pane_ids && self.view.transparency_targets.as_ref().unwrap().pane_ids.is_none())
+            || (need_aa && self.view.transparency_targets.as_ref().unwrap().aa.is_none())
+        {
+            let new_pane_ids = (need_pane_ids
+                && self.view.transparency_targets.as_ref().unwrap().pane_ids.is_none())
+            .then(|| {
+                let texture = self.ledger.own(
+                    self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("TP pane ids"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 4,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: panes::ID_FORMAT,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    }),
+                    ResourceKind::Texture,
+                );
+                let view = self.ledger.own(
+                    texture.create_view(&Default::default()),
+                    ResourceKind::TextureView,
+                );
+                Depth {
+                    texture,
+                    view,
+                    _allocation: self.ledger.allocate(
+                        AllocationKind::Target,
+                        u64::from(size.width) * u64::from(size.height) * 16,
+                    ),
+                }
+            });
+            let new_aa = (need_aa
+                && self.view.transparency_targets.as_ref().unwrap().aa.is_none())
+            .then(|| {
+                let texture = self.ledger.own(
+                    self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("TP2 multisampled glass"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 4,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    }),
+                    ResourceKind::Texture,
+                );
+                let view = self.ledger.own(
+                    texture.create_view(&Default::default()),
+                    ResourceKind::TextureView,
+                );
+                Depth {
+                    texture,
+                    view,
+                    _allocation: self.ledger.allocate(
+                        AllocationKind::Target,
+                        u64::from(size.width) * u64::from(size.height) * 32,
+                    ),
+                }
+            });
+            let t = self.view.transparency_targets.as_mut().unwrap();
+            if let Some(p) = new_pane_ids {
+                t.pane_ids = Some(p);
+            }
+            if let Some(a) = new_aa {
+                t.aa = Some(a);
+            }
+        }
         // ---- GPU ----
         let hdr = self.view.hdr.as_ref().unwrap();
         let targets = self.view.transparency_targets.as_ref().unwrap();
@@ -2558,7 +2670,7 @@ impl Renderer {
         if let Some((_, target)) = still {
             encoder.copy_texture_to_texture(
                 target.texture.as_image_copy(),
-                gpu.shadow.texture.as_image_copy(),
+                gpu.shadow.as_ref().unwrap().texture.as_image_copy(),
                 wgpu::Extent3d {
                     width: SHADOW_SIZE,
                     height: SHADOW_SIZE,
@@ -2571,7 +2683,7 @@ impl Renderer {
                 label: Some("TP1 sun shadow map"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &gpu.shadow.view,
+                    view: &gpu.shadow.as_ref().unwrap().view,
                     depth_ops: Some(wgpu::Operations {
                         load: if still.is_some() {
                             wgpu::LoadOp::Load
@@ -2690,7 +2802,11 @@ impl Renderer {
             },
             wgpu::BindGroupEntry {
                 binding: 34,
-                resource: wgpu::BindingResource::TextureView(&gpu.shadow.view),
+                resource: wgpu::BindingResource::TextureView(
+                    gpu.shadow
+                        .as_ref()
+                        .map_or(&gpu.dummy_shadow.view, |s| &s.view),
+                ),
             },
             wgpu::BindGroupEntry {
                 binding: 35,
@@ -2890,49 +3006,8 @@ impl Renderer {
                 })
             })
             .collect();
-        // Per-pixel panes (`panes`): a record (rectangle and model slot) per instance of each
-        // glass draw, at its dynamic offset, and a pane group per draw. Draws with a tangent
-        // stream keep the raster (the pane shading builds vertices without tangents), and so do
-        // draws of more than `panes::MAX_INSTANCES` instances and films (below).
-        // Films (IOR one, no thickness) of programs that declare them blend in hardware:
-        // consecutive films share one pass, each draw's instances far to near (`film_ids`).
-        let films: Vec<bool> = transparent
-            .iter()
-            .map(|draw| {
-                let program = draw.material.map_or(default_program, |m| m.program.id());
-                draw.material
-                    .and_then(|m| m.transparency)
-                    .is_some_and(|t| t.ior <= 1.0 && t.thickness == 0.0)
-                    && self
-                        .transparency
-                        .glass
-                        .iter()
-                        .any(|g| g.program == program && g.films.is_some())
-            })
-            .collect();
-        let mut pane_records: Vec<Vec<(u32, [u32; 4])>> = vec![Vec::new(); transparent.len()];
         let mut pane_groups: Vec<Option<wgpu::BindGroup>> =
             (0..transparent.len()).map(|_| None).collect();
-        let mut pane_bytes = Vec::new();
-        if pixel_panes && targets.pane_ids.is_some() {
-            for (i, draw) in transparent.iter().enumerate() {
-                if films[i]
-                    || draw.mesh.tangent.is_some()
-                    || draw.instances.state.models.len() > panes::MAX_INSTANCES
-                {
-                    continue;
-                }
-                let state = &draw.instances.state;
-                for (model, slot) in state.models.iter().zip(&state.ids) {
-                    let rect =
-                        panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height]);
-                    let at = pane_bytes.len();
-                    pane_bytes.extend(panes::record(rect, *slot));
-                    pane_bytes.resize(at + panes::RECORD as usize, 0);
-                    pane_records[i].push((at as u32, rect));
-                }
-            }
-        }
         let pane_buffer = (!pane_bytes.is_empty()).then(|| {
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("TP pane records"),
@@ -2984,21 +3059,25 @@ impl Renderer {
         }
         // 4. Back to front. Each transparent draw first copies the colour behind it.
         let hdr_view = &hdr.resolved.view;
-        let aa_group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
-            label: Some("TP2 glass AA seed"),
-            layout: &gpu.aa_bindings,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 31,
-                resource: wgpu::BindingResource::TextureView(&targets.color.view),
-            }],
+        let aa_group = targets.aa.as_ref().map(|_| {
+            self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
+                label: Some("TP2 glass AA seed"),
+                layout: &gpu.aa_bindings,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 31,
+                    resource: wgpu::BindingResource::TextureView(&targets.color.view),
+                }],
+            })
         });
-        let resolve_group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
-            label: Some("TP bounded AA resolve"),
-            layout: &gpu.aa_resolve_bindings,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 31,
-                resource: wgpu::BindingResource::TextureView(&targets.aa.view),
-            }],
+        let resolve_group = targets.aa.as_ref().map(|aa_target| {
+            self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
+                label: Some("TP bounded AA resolve"),
+                layout: &gpu.aa_resolve_bindings,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 31,
+                    resource: wgpu::BindingResource::TextureView(&aa_target.view),
+                }],
+            })
         });
         // The colour behind a draw is the HDR target as the draws before it left it. After the
         // first full copy, only what those draws wrote can differ, so later draws copy just that
@@ -3496,7 +3575,11 @@ impl Renderer {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("TP1 transparent"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: if aa { &targets.aa.view } else { hdr_view },
+                        view: if aa {
+                            &targets.aa.as_ref().unwrap().view
+                        } else {
+                            hdr_view
+                        },
                         depth_slice: None,
                         resolve_target: (aa && !bounded_aa).then_some(hdr_view),
                         ops: wgpu::Operations {
@@ -3524,7 +3607,7 @@ impl Renderer {
                 }
                 if aa {
                     pass.set_pipeline(&gpu.aa_seed);
-                    pass.set_bind_group(0, &aa_group, &[]);
+                    pass.set_bind_group(0, aa_group.as_ref().unwrap(), &[]);
                     pass.draw(0..3, 0..1);
                 }
                 pass.set_bind_group(3, self.lighting.bind(), &[]);
@@ -3618,7 +3701,7 @@ impl Renderer {
                         ..Default::default()
                     });
                     pass.set_pipeline(&gpu.aa_resolve);
-                    pass.set_bind_group(0, &resolve_group, &[]);
+                    pass.set_bind_group(0, resolve_group.as_ref().unwrap(), &[]);
                     pass.set_scissor_rect(
                         resolve_rect[0],
                         resolve_rect[1],
