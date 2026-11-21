@@ -14,6 +14,22 @@
 @group(3) @binding(28) var<storage,read> rl_cache_outgoing:array<vec4<f32>>;
 const RL_CACHE_ROUGH:f32=RL_CACHE_ROUGH_MIN;
 
+// RENDERLAB_GI_BORROW (gi_cells.wgsl gi_borrow_*): what a cell `slot` at `level` without a bounce
+// of its own adds from the nearest coarser cell around `world` in `bin` that has one (not a split
+// cell), or 0. As gi_cache.wgsl gi_borrow_hit, on this module's binding.
+fn rl_cache_borrow(world:vec3<f32>, level:u32, bin:u32, slot:u32) -> vec3<f32> {
+    if !gi_borrow_on() { return vec3<f32>(0.0); }
+    let r=rl_cache_outgoing[gi_borrow_at(slot)];
+    if gi_borrow_own(r) { return vec3<f32>(0.0); }
+    let last=min(level+1u+GI_BORROW_LEVELS,gi_word(GI_H_LEVELS));
+    for(var l=level+1u;l<last;l+=1u) {
+        let p=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
+        if p==0xffffffffu || rl_cache_outgoing[p].w<=0.0 || (gi_word(gi_hot(p)+15u)&GI_SPLIT_HOT)!=0u { continue; }
+        let lender=rl_cache_outgoing[gi_borrow_at(p)];
+        if gi_borrow_own(lender) { return gi_borrow_radiance(r,lender); }
+    }
+    return vec3<f32>(0.0);
+}
 // The cached outgoing radiance (rgb, unexposed) and w 1, or w 0 to shade the hit: a hit
 // `record` a distance `t` along `d` from `origin`, whose ray cone is `cone` metres wide there.
 fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> {
@@ -36,7 +52,8 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
     // (0.75, gi_shade_entry.wgsl) and an absent or unshaded one has none.
     if slot==0xffffffffu { return vec4<f32>(0.0); }
     let o=rl_cache_outgoing[slot];
-    return select(vec4<f32>(0.0),vec4<f32>(o.rgb,1.0),o.w>=1.0);
+    if o.w<1.0 { return vec4<f32>(0.0); }
+    return vec4<f32>(o.rgb+rl_cache_borrow(world,level,bin,slot),1.0);
 }
 // The final gather's probe-hit read (gi_receiver_pass.wgsl), its only hit path: the outgoing
 // radiance (rgb, unexposed) of the hit's cell, settled or changing, w 0 when no cell there has a
@@ -91,7 +108,7 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
         // them. The cache's own lookup reads finer there too (gi_sample_refined).
         if l>own && (gi_word(gi_hot(slot)+15u)&GI_SPLIT_HOT)!=0u { continue; }
         let o=rl_cache_outgoing[slot];
-        if o.w>0.0 { rl_cache_slots=vec2<u32>(slot,at_start); return vec4<f32>(o.rgb,1.0); }
+        if o.w>0.0 { rl_cache_slots=vec2<u32>(slot,at_start); return vec4<f32>(o.rgb+rl_cache_borrow(world,l,bin,slot),1.0); }
     }
     rl_cache_slots.y=at_start;
     // The cell to ask for: the cone level's when it is absent; the hit's own level's when the cone
