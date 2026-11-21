@@ -395,7 +395,8 @@ impl Default for VirtualShadowSettings {
         Self {
             near: 0.002,
             texels_per_pixel_log2: 0.0,
-            pages: 16,
+            // Measurement: `RENDERLAB_VSM_PAGES=N` (the windows' side in pages).
+            pages: std::env::var("RENDERLAB_VSM_PAGES").ok().and_then(|v| v.parse().ok()).unwrap_or(16),
             march_samples: 10,
             finest_texel: 1.0 / 16384.0,
             bias_ulps: 4,
