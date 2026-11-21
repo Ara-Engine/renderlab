@@ -317,16 +317,18 @@ fn encode(bounds: &Aabb, children: &[Aabb; 8], meta: &[u8; 8], child_base: u32, 
 /// called from gi_traverse's seam, and with `RENDERLAB_GI_WIDE_COUNT=1` the per-ray node and
 /// triangle counts on both structures. Unchanged when the switch is off.
 pub(crate) fn shader_text(rays: String) -> String {
-    if !on() {
+    if !on() && !counting() {
         return rays;
     }
     const SEAM: &str = "    // gi_wide: the static world's flattened BVH (src/gi_wide_bvh.rs) seam\n";
     assert_eq!(rays.matches(SEAM).count(), 1, "gi_traverse's wide seam");
-    let mut text = rays.replacen(
-        SEAM,
-        "    gi_wide_traverse(origin,direction,world_inv,tmin,any_hit,&best);\n    if any_hit && best.hit { return best; }\n",
-        1,
-    );
+    // Counting alone (no flattened world) counts today's two-level traversal.
+    let call = if on() {
+        "    gi_wide_traverse(origin,direction,world_inv,tmin,any_hit,&best);\n    if any_hit && best.hit { return best; }\n"
+    } else {
+        ""
+    };
+    let mut text = rays.replacen(SEAM, call, 1);
     if counting() {
         for (from, to) in [
             ("        let n=nodes+child*16u;\n", "        gi_count_nodes+=1u;\n        let n=nodes+child*16u;\n"),
