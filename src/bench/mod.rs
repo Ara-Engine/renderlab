@@ -12,7 +12,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
 mod city;
+mod cause;
 mod dump;
+mod replay;
 pub(crate) mod edits;
 mod reload;
 mod fixtures;
@@ -550,6 +552,9 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
                     m("span"),
                     pass_text.join(" ")
                 );
+                if let Some(causes) = cause::line(&series, m) {
+                    println!("bench {name} {} cause | {causes}", rig.path.name());
+                }
                 let passes: Vec<(String, f64)> = stats.medians.into_iter().collect();
                 let cache_series: Vec<String> =
                     stats.cache_frames.iter().map(|v| v.map_or("null".into(), |v| format!("{v:.4}"))).collect();

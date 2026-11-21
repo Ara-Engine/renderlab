@@ -1000,6 +1000,12 @@ pub struct IndirectCounters {
     /// Of the cells movers re-traced, those whose cube a moved box overlaps (fully re-probed).
     pub invalidated_cube: u32,
     pub reshaded: [u32; 3],
+    /// Cells queued for cell shading by why (shaders/gi_cache.wgsl gi_queue_shade_cause, once a
+    /// cell): after a trace, the sky filter, a relight, a mover crossing a light ray, after a gather.
+    pub shade_causes: [u32; 5],
+    /// Cells the scan re-traced because they were untraced or partial (`created`, `invalidated`
+    /// and `refreshed` count the other traces).
+    pub trace_partial: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -3285,6 +3291,8 @@ impl Renderer {
             invalidated_read: [w[241], w[242]],
             invalidated_cube: w[246],
             reshaded: [w[243], w[244], w[245]],
+            shade_causes: [w[210], w[211], w[212], w[213], w[214]],
+            trace_partial: w[215],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires

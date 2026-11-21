@@ -424,6 +424,42 @@ impl Prepared {
         self.materials = materials;
         Ok(())
     }
+    /// `draws` without the batches `skip` marks, plus `extra` meshes, each drawn with the
+    /// material of the source mesh it names (the bench's posed copies of a scene dump's skinned
+    /// meshes, which replace their frozen batches).
+    #[allow(dead_code)]
+    pub fn draws_replacing<'a>(
+        &'a mut self,
+        visibility: Visibility,
+        skip: &[bool],
+        extra: impl IntoIterator<Item = (usize, &'a Mesh, &'a mut Instances)>,
+    ) -> Vec<Draw<'a>> {
+        let (source, materials, meshes, primitives) =
+            (&self.source, &self.materials, &self.meshes, &self.primitives);
+        let mut draws: Vec<Draw<'a>> = self
+            .instances
+            .iter_mut()
+            .zip(&self.batches)
+            .enumerate()
+            .filter(|(i, _)| !skip.get(*i).copied().unwrap_or(false))
+            .map(|(_, (instances, batch))| {
+                let (mesh, primitive) = primitives[batch.primitive];
+                let material = source.meshes[mesh].primitives[primitive].material;
+                Draw::new(&meshes[batch.primitive], instances)
+                    .with_material(&materials[material as usize])
+                    .with_visibility(visibility)
+            })
+            .collect();
+        for (mesh, posed, instances) in extra {
+            let material = source.meshes[mesh].primitives[0].material;
+            draws.push(
+                Draw::new(posed, instances)
+                    .with_material(&materials[material as usize])
+                    .with_visibility(visibility),
+            );
+        }
+        draws
+    }
     pub fn draws(&mut self, visibility: Visibility) -> Vec<Draw<'_>> {
         self.instances
             .iter_mut()
