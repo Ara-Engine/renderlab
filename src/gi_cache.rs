@@ -969,6 +969,9 @@ pub struct IndirectCounters {
     /// Gathers' aimed rays, and those at lights the cell holds occluded.
     pub aimed_rays: u32,
     pub aimed_occluded: u32,
+    /// `RENDERLAB_GI_WIDE_COUNT` (src/gi_wide_bvh.rs): closest-hit rays and the nodes and
+    /// triangles they visited, then the same for any-hit rays, over both structures.
+    pub wide: [u32; 6],
     /// Cells created in the secondary and tertiary bands, and live secondary cells evicted.
     pub created_secondary: u32,
     pub created_tertiary: u32,
@@ -1126,6 +1129,9 @@ struct Packed {
     near: Vec<Vec<u32>>,
     near_bytes: u64,
     head: Vec<u32>,
+    /// `RENDERLAB_GI_WIDE`: per instance record whether the flattened world holds it, and its
+    /// node and triangle bases (src/gi_wide_bvh.rs).
+    wide: Option<(Vec<bool>, (u32, u32))>,
     buffer: Owned<wgpu::Buffer>,
     bytes: u64,
     _allocation: Allocation,
@@ -2409,10 +2415,15 @@ fn kernel_source_base(software: bool, directions: u32) -> String {
     };
     use crate::program::gi_shader;
     let rays = if software {
-        gi_shader(
-            "gi_rays_software.wgsl",
-            include_str!("../shaders/gi_rays_software.wgsl"),
+        // RENDERLAB_GI_WIDE: the static world's flattened BVH composed in (src/gi_wide_bvh.rs).
+        crate::gi_wide_bvh::shader_text(
+            gi_shader(
+                "gi_rays_software.wgsl",
+                include_str!("../shaders/gi_rays_software.wgsl"),
+            )
+            .into_owned(),
         )
+        .into()
     } else {
         gi_shader(
             "gi_rays_hardware.wgsl",
@@ -3249,6 +3260,7 @@ impl Renderer {
             gather_cuts: [w[352], w[353]],
             aimed_rays: w[250],
             aimed_occluded: w[251],
+            wide: std::array::from_fn(|i| w[360 + i]),
             created_secondary: w[253],
             created_tertiary: w[254],
             evicted_secondary: w[255],
@@ -4040,6 +4052,68 @@ impl Renderer {
                     words.extend([*base, draw_identity(ids, d, i)]);
                 }
             }
+            // RENDERLAB_GI_WIDE: the static records' triangles, in world space, in one flattened
+            // BVH after everything else; movers, skinned meshes, cooked near fields, the merged
+            // world and meshes placed more than RENDERLAB_GI_WIDE_MAX_PLACEMENTS times stay
+            // two-level. The records are walked in instance-record order (below).
+            let wide = crate::gi_wide_bvh::on().then(|| {
+                let max = crate::gi_wide_bvh::max_placements();
+                let mut baked = vec![];
+                let mut tris = vec![];
+                if world.is_some() {
+                    baked.push(false);
+                }
+                let mut at = 0;
+                for ((d, blas), e) in draws.iter().zip(&blases).zip(&entry) {
+                    let n = d.instances.len();
+                    for (ii, model) in d.instances.state.models.iter().enumerate() {
+                        let cov = covered.get(at).copied().unwrap_or(false);
+                        at += 1;
+                        if cov {
+                            continue;
+                        }
+                        let e = e.unwrap();
+                        let bake = d.mesh.skin.is_none() && n <= max && blas.near_base(model, &near[e]) == 0;
+                        if bake {
+                            let inst = baked.len() as u32;
+                            let no_shadow = !d.instances.state.casts_shadows(ii);
+                            let world = |k: u32| {
+                                let p = blas.bvh.positions[k as usize];
+                                model.transform_point3(glam::Vec3::new(p[0], p[1], p[2]))
+                            };
+                            for (t, tri) in blas.bvh.indices.chunks_exact(3).enumerate() {
+                                tris.push(crate::gi_wide_bvh::Tri {
+                                    a: world(tri[0]),
+                                    b: world(tri[1]),
+                                    c: world(tri[2]),
+                                    inst,
+                                    index: offsets[e][3] + 3 * t as u32,
+                                    no_shadow,
+                                });
+                            }
+                        }
+                        baked.push(bake);
+                    }
+                }
+                if tris.is_empty() {
+                    return (baked, (0, 0));
+                }
+                let built = crate::gi_wide_bvh::build(&tris);
+                let base = words.len() as u32;
+                eprintln!(
+                    "gi_wide built {} of {} records, {} triangles in {} nodes: {} bytes beside {} bytes of two-level geometry, {:.3} s",
+                    baked.iter().filter(|&&b| b).count(),
+                    baked.len(),
+                    built.triangles,
+                    built.nodes,
+                    built.words.len() * 4,
+                    words.len() * 4,
+                    built.seconds
+                );
+                let bases = (base, base + built.tri_word as u32);
+                words.extend(built.words);
+                (baked, bases)
+            });
             let bytes = (words.len() * 4) as u64;
             let near_bytes = refs
                 .iter()
@@ -4068,6 +4142,7 @@ impl Renderer {
                 near,
                 near_bytes,
                 head: vec![],
+                wide,
                 buffer,
                 bytes,
                 _allocation: self.ledger.allocate(AllocationKind::Light, bytes),
@@ -4131,6 +4206,9 @@ impl Renderer {
             records.len(),
             &p.head,
         );
+        if let Some((baked, bases)) = &p.wide {
+            crate::gi_wide_bvh::place_movers(&mut head, gi_bvh::HEADER_WORDS, gi_bvh::INSTANCE_WORDS, baked, *bases);
+        }
         self.gi.stats.instances = records.len() as u32;
         if p.head != head {
             let raw: Vec<u8> = head.iter().flat_map(|w| w.to_le_bytes()).collect();

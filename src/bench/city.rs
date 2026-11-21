@@ -327,7 +327,9 @@ impl Fixture for City {
         let eye_y = -ROOM.y + if self.kind == Kind::Terrain { 4.5 } else { 1.7 };
         let start = Vec3::new(-14.0, eye_y, 1.0);
         let look = Vec3::new(1.0, -0.08, 0.35);
-        let mut series: [Vec<f64>; 3] = Default::default();
+        let mut series: [Vec<f64>; 4] = Default::default();
+        // RENDERLAB_GI_WIDE_COUNT: closest and any-hit rays and their nodes and triangles visited.
+        let mut visits = [0u64; 6];
         for frame in 0..settle + walked {
             let walking = frame >= settle;
             let at = start + Vec3::X * step * frame.saturating_sub(settle) as f32;
@@ -340,7 +342,10 @@ impl Fixture for City {
             Self::draw(r, loaded, &camera)?;
             if walking {
                 let c = r.indirect_counters()?.unwrap_or_default();
-                for (values, v) in series.iter_mut().zip([c.gather_rays, c.light_rays, c.aimed_rays]) {
+                for (s, v) in visits.iter_mut().zip(c.wide) {
+                    *s += u64::from(v);
+                }
+                for (values, v) in series.iter_mut().zip([c.gather_rays, c.light_rays, c.aimed_rays, c.rays]) {
                     values.push(f64::from(v));
                 }
             }
@@ -349,8 +354,15 @@ impl Fixture for City {
         let lum: Vec<f64> = pixels.iter().map(|&p| f64::from(kit::luminance(p))).collect();
         let n = lum.len() as f64;
         let answer = f64::from(kit::luminance([GLOW[0] / (1.0 - ALBEDO[0]); 3]));
-        self.series = ["gather_rays", "light_rays", "aimed_rays"].into_iter().map(str::to_owned).zip(series).collect();
+        self.series = ["gather_rays", "light_rays", "aimed_rays", "rays"].into_iter().map(str::to_owned).zip(series).collect();
         let stats = r.indirect_stats();
+        let per = |n: u64, d: u64| if d == 0 { 0.0 } else { n as f64 / d as f64 };
+        let visited = [
+            ("closest_nodes/ray", per(visits[1], visits[0])),
+            ("closest_tris/ray", per(visits[2], visits[0])),
+            ("anyhit_nodes/ray", per(visits[4], visits[3])),
+            ("anyhit_tris/ray", per(visits[5], visits[3])),
+        ];
         Ok(vec![
             ("energy".into(), lum.iter().sum::<f64>() / n / answer),
             ("err".into(), lum.iter().map(|l| (l / answer - 1.0).abs()).sum::<f64>() / n),
@@ -359,7 +371,10 @@ impl Fixture for City {
             ("triangles".into(), loaded.triangles as f64),
             ("placements".into(), loaded.placements as f64),
             ("frames_measured".into(), f64::from(walked)),
-        ])
+        ]
+        .into_iter()
+        .chain(visited.into_iter().filter(|_| visits[0] + visits[3] > 0).map(|(k, v)| (k.to_owned(), v)))
+        .collect())
     }
     fn series(&mut self) -> Vec<(String, Vec<f64>)> {
         std::mem::take(&mut self.series)

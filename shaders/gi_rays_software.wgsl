@@ -178,6 +178,7 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
     var best=GiHit(false,tmax,vec3<f32>(0.0),0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
     var stack:array<u32,GI_BVH_STACK>;
     let world_inv=gi_safe_inverse(direction);
+    // gi_wide: the static world's flattened BVH (src/gi_wide_bvh.rs) seam
     let instances=gi_geometry[0];
     let top=gi_geometry[1];
     if top==0u {

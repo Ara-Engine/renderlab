@@ -314,6 +314,8 @@ impl Fixture for Dump {
         };
         let mut metrics = vec![];
         let mut converge = -1.0;
+        // RENDERLAB_GI_WIDE_COUNT: closest and any-hit rays and their nodes and triangles visited.
+        let mut visits = [0u64; 6];
         for (frame, &(at, forward)) in frames.iter().enumerate() {
             let camera = Camera::look_at(at, at + forward, Vec3::Y, l.fov, 0.1, 2000.0)?;
             let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
@@ -330,6 +332,9 @@ impl Fixture for Dump {
             }
             if walking.contains(&frame) {
                 let c = r.indirect_counters()?.unwrap_or_default();
+                for (s, v) in visits.iter_mut().zip(c.wide) {
+                    *s += u64::from(v);
+                }
                 for (values, v) in series.iter_mut().zip([c.rays, c.gather_rays, c.light_rays, c.created, c.bounce_queued]) {
                     values.push(f64::from(v));
                 }
@@ -356,6 +361,16 @@ impl Fixture for Dump {
         }
         if l.reference.is_some() && !self.course {
             metrics.push(("converge_frames".into(), converge));
+        }
+        let per = |n: u64, d: u64| if d == 0 { 0.0 } else { n as f64 / d as f64 };
+        let visited = [
+            ("closest_nodes/ray", per(visits[1], visits[0])),
+            ("closest_tris/ray", per(visits[2], visits[0])),
+            ("anyhit_nodes/ray", per(visits[4], visits[3])),
+            ("anyhit_tris/ray", per(visits[5], visits[3])),
+        ];
+        if visits[0] + visits[3] > 0 {
+            metrics.extend(visited.map(|(k, v)| (k.to_owned(), v)));
         }
         metrics.push(("triangles".into(), l.triangles as f64));
         metrics.push(("geometry_bytes".into(), r.indirect_stats().geometry_bytes as f64));
