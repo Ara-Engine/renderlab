@@ -351,11 +351,17 @@ fn gi_sdf_edge(base:u32, p:vec3<f32>) -> f32 {
 fn gi_sdf_near(base:u32, p:vec3<f32>) -> f32 {
     return max(GI_SDF_NEAR,2.0*gi_sdf_edge(base,p));
 }
-fn gi_sdf_march(o:vec3<f32>, d:vec3<f32>, t0:f32, tmax:f32) -> GiHit {
+// GI_SDF_REFINE: a touched voxel is refined on the triangles over a few voxels around it (the
+// exact hit, or none and the march goes on past it); after GI_SDF_REFINES refinements a touched
+// voxel is taken as the hit.
+const GI_SDF_REFINE:bool=true;
+const GI_SDF_REFINES:u32=8u;
+fn gi_sdf_march(o:vec3<f32>, d:vec3<f32>, t0:f32, tmax:f32, any_hit:bool) -> GiHit {
     let base=gi_geometry[5];
     let miss=GiHit(false,tmax,vec3<f32>(0.0),0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
     let inv=gi_safe_inverse(d);
     var t=t0;
+    var refines=0u;
     for(var k=0u;k<512u;k+=1u) {
         if t>=tmax { break; }
         let p=fma(d,vec3<f32>(t),o);
@@ -366,6 +372,16 @@ fn gi_sdf_march(o:vec3<f32>, d:vec3<f32>, t0:f32, tmax:f32) -> GiHit {
         let l=(p-corner)/edge;
         let v=vec3<i32>(floor(l));
         let q=gi_sdf_q(base,c,v);
+        if q==0u && GI_SDF_REFINE && refines<GI_SDF_REFINES {
+            refines+=1u;
+            let h=gi_traverse(o,d,max(t-2.0*edge,t0),min(t+3.0*edge,tmax),any_hit);
+            if h.hit { return h; }
+            // No triangle there: past the voxel.
+            let face=(vec3<f32>(v)+select(vec3<f32>(0.0),vec3<f32>(1.0),d>vec3<f32>(0.0)))*edge+corner;
+            let f=(face-p)*inv;
+            t+=max(min(min(f.x,f.y),f.z),1e-3*edge);
+            continue;
+        }
         if q==0u {
             let g=vec3<f32>(f32(gi_sdf_q(base,c,v+vec3<i32>(1,0,0)))-f32(gi_sdf_q(base,c,v-vec3<i32>(1,0,0))),
                 f32(gi_sdf_q(base,c,v+vec3<i32>(0,1,0)))-f32(gi_sdf_q(base,c,v-vec3<i32>(0,1,0))),
@@ -397,7 +413,7 @@ fn gi_closest_far(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> 
     let near=gi_sdf_near(base,origin);
     let h=gi_closest(origin,direction,tmin,min(tmax,near));
     if h.hit || tmax<=near { return h; }
-    return gi_sdf_march(origin,direction,near,tmax);
+    return gi_sdf_march(origin,direction,near,tmax,false);
 }
 // Visibility within tmax through the field: the march stops two voxels short of its end, where
 // the target's own surface (an emitter's triangle) is fattened into the field.
@@ -408,7 +424,7 @@ fn gi_sdf_visible_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32) -> boo
     if tmax<=near { return true; }
     var end=tmax;
     if tmax<1e19 { end=tmax-2.0*gi_sdf_edge(base,fma(direction,vec3<f32>(tmax),origin)); }
-    return end<=near || !gi_sdf_march(origin,direction,near,end).hit;
+    return end<=near || !gi_sdf_march(origin,direction,near,end,true).hit;
 }
 // Sky visibility along an unbounded ray: any hit blocks it.
 fn gi_visible(origin:vec3<f32>, direction:vec3<f32>) -> bool {
