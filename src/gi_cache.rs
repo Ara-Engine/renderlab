@@ -2040,7 +2040,9 @@ impl Planner {
         if fixed_settled {
             return Finished { frame, plan: None };
         }
-        let busy = busy_relight || self.external_pending > 0;
+        let busy = busy_relight
+            || self.external_pending > 0
+            || (bounce && budget != 0 && self.fixed_quiet < 4);
         // A gather cap spreads a cut's gathers over more frames: still frames keep running
         // until a spread of up to 64 slot groups per gather generation can have drained.
         // Under the fixed budget, static views idle once fixed_settled triggers or after 64
@@ -4867,7 +4869,7 @@ pub(crate) fn cell_selector(id: u64) -> u32 {
     u32::try_from(id + 1).expect("program ids fit the cell selector")
 }
 const CELL_PLACEMENT_SEAM: &str = "    if p==0xffffffffu { return vec4<f32>(0.0,0.0,0.0,1.0); }\n";
-const CELL_STORE_SEAM: &str = "        gi_shade_out[slot]=gs_shade(slot);\n";
+const CELL_STORE_SEAM: &str = "        gi_shade_out[slot]=gs_shade(slot);\n        if gi_borrow_on() { gi_shade_out[gi_borrow_at(slot)]=gs_borrow; }\n";
 const CELL_EMISSION_SEAM: &str = "fn gs_owns_draw(batch:u32) -> i32 { return 1; }";
 /// A mixed frame's cell entry for program `id`: it shades only cells whose draw selects
 /// it, writes "reflects nothing" for draws whose program has no cell shading (every
@@ -4892,7 +4894,7 @@ pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
     );
     source.replacen(CELL_PLACEMENT_SEAM, &check, 1).replacen(
         CELL_STORE_SEAM,
-        "        let value=gs_shade(slot);\n        if value.w>=0.0 {gi_shade_out[slot]=value;}\n",
+        "        let value=gs_shade(slot);\n        if value.w>=0.0 {gi_shade_out[slot]=value; if gi_borrow_on() {gi_shade_out[gi_borrow_at(slot)]=gs_borrow;}}\n",
         1,
     )
 }
@@ -5470,6 +5472,7 @@ mod tests {
             // MP1: a mixed frame's cell entry selects its own draws' cells.
             let mixed = mixed_cell_entry(&cell.source, 3);
             assert!(mixed.contains("if gs_program!=4u"));
+            assert!(mixed.contains("if value.w>=0.0 {gi_shade_out[slot]=value; if gi_borrow_on() {gi_shade_out[gi_borrow_at(slot)]=gs_borrow;}}"));
             validate("mixed standard cell shading", &mixed);
             // Cell shading binds only its own group 0 (work, outgoing radiance, draw table):
             // nothing it reaches may read traced shading's group 0 (camera, hit records).
