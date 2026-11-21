@@ -268,7 +268,9 @@ impl Fixture for Dump {
             let map = kit::admitted(r, "bench sky map", |r| r.try_upload_environment(&map))?;
             r.set_environment(Some(&map), crate::EnvironmentParameters::default())?;
         }
-        r.set_reconstruction(Reconstruction::off())?;
+        // TR1 as the engine runs it (jittered, at the engine's default scale) for a replayed play session, whose
+        // game ran with it; off for the goal walk, scored against an unjittered reference.
+        r.set_reconstruction(if self.walk == Walk::Recorded && setting("LIGHTBENCH_DUMP_TR1", 1.0) != 0.0 { Reconstruction::default() } else { Reconstruction::off() })?;
         r.set_indirect(IndirectSettings::default())?;
         // The scene: each primitive's triangles kept for the cache's software rays (the
         // uploader moves them into the meshes), then uploaded.
@@ -347,13 +349,19 @@ impl Fixture for Dump {
         let (frames, walking) = match l.replay.as_mut() {
             Some(replay) => {
                 replay.rewind(&mut l.asset)?;
-                (vec![(l.eye, l.forward); settle + replay.frames()], settle + replay.still..settle + replay.frames())
+                // `LIGHTBENCH_DUMP_WINDOW=still`: measure the still steps instead of the walk (the gate's standing row).
+                let window = if std::env::var("LIGHTBENCH_DUMP_WINDOW").as_deref() == Ok("still") {
+                    settle..settle + replay.still
+                } else {
+                    settle + replay.still..settle + replay.frames()
+                };
+                (vec![(l.eye, l.forward); settle + replay.frames()], window)
             }
             None => cameras(self.walk, l.eye, l.forward, settle, hold),
         };
         let mut path = Vec::with_capacity(frames.len());
         let mut last = (l.eye, l.forward);
-        let mut series: [Vec<f64>; 18] = Default::default();
+        let mut series: [Vec<f64>; 19] = Default::default();
         let (w, h) = (l.size[0] as usize, l.size[1] as usize);
         let region = |p: &[[f32; 3]]| {
             let (x0, x1, y0, y1) = (w * 2 / 5, w * 3 / 5, h * 2 / 5, h * 3 / 5);
@@ -430,6 +438,7 @@ impl Fixture for Dump {
                     c.shade_causes[2],
                     c.shade_causes[3],
                     c.shade_causes[4],
+                    c.moved_boxes,
                 ]) {
                     values.push(f64::from(v));
                 }
@@ -464,7 +473,7 @@ impl Fixture for Dump {
         metrics.push(("walk_frames".into(), walking.len() as f64));
         // The bench's pass window: the walking frames, before the held ones.
         metrics.push(("frames_measured".into(), walking.len() as f64));
-        metrics.push(("frames_after".into(), hold as f64));
+        metrics.push(("frames_after".into(), (frames.len() - walking.end) as f64));
         self.series = [
             "rays",
             "gather_rays",
@@ -484,6 +493,7 @@ impl Fixture for Dump {
             "shade_relight",
             "shade_mover",
             "shade_gather",
+            "moved_boxes",
         ]
             .into_iter()
             .map(str::to_owned)
