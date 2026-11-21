@@ -116,7 +116,9 @@ Kernels whose SPIR-V did not change are cache hits.
 | pass (file edited) | modules reached | save to numbers, nort | nort and RT | reload | longest kernel |
 |---|---:|---:|---:|---:|---|
 | `shading` (programs/standard.wgsl) | 28 / 64 | 6.0-7.5 s | 7.2-8.3 s | 5.5-7.5 s | traced program shading 2.6-3.1 s |
-| `reflections` (reflections_resolve.wgsl) | 0 | (old kernels: the edited line is not in any composed module) | | | |
+| `reflections` (reflections_trace.wgsl) | 2 | | 0.8 s | 0.5 s | reflection trace 0.19 s |
+| `reflections` (reflection_hits.wgsl) | 14 | | 8.8 s | 8.5 s | the hit shading composes the program: traced program shading 3.3 s |
+| (reflections_resolve.wgsl) | 0 | composed only with `RENDERLAB_RL_RESOLVE_PASS=1` (off): the bench rightly warns | | | |
 | `transparency` (transparency.wgsl) | 4 | 2.9 s | 3.9 s | 0.3 s | TP1 pipelines compile in the fixture's first frame |
 | `gi_receiver` (gi_receiver_pass.wgsl) | 70 / 140 | 4.2 s | 7.9 s | 1.3-1.4 s | the receiver composes into traced shading; `walk` takes 2.9-6.4 s |
 | `tr1` (temporal_resolve.wgsl) | 5 / 10 | 2.1 s | 3.9 s | 1.0-1.2 s | tr1_resolve 0.7-0.9 s |
