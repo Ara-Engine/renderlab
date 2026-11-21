@@ -22,6 +22,7 @@ mod furnace;
 mod glass;
 pub(crate) mod kit;
 mod reflect;
+mod report;
 mod shadow_edges;
 mod tr1_edge;
 
@@ -209,8 +210,11 @@ const PASSES: &[Pass] = &[Pass {
 
 struct Options {
     once: bool,
+    memory: bool,
     paths: Vec<BenchPath>,
     only: Option<Vec<String>>,
+    save: Option<PathBuf>,
+    compare: Option<PathBuf>,
     shaders: PathBuf,
     hold: PathBuf,
     gpu_lock: PathBuf,
@@ -221,9 +225,12 @@ fn options() -> Result<Options, String> {
     let env = |k: &str, default: &str| PathBuf::from(std::env::var(k).unwrap_or_else(|_| default.to_owned()));
     let mut o = Options {
         once: false,
+        memory: false,
         // Without ray hardware by default: the walking-cost goal's path. `--paths nort,rt` adds RT.
         paths: vec![BenchPath::NoRt],
         only: None,
+        save: None,
+        compare: None,
         shaders: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders"),
         hold: env("LIGHTBENCH_HOLD", "D:/Coding/renderlab-work/timing-hold"),
         gpu_lock: env("LIGHTBENCH_GPU_LOCK", "D:/Coding/renderlab-work/gpu-slot.lock"),
@@ -234,6 +241,7 @@ fn options() -> Result<Options, String> {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--once" => o.once = true,
+            "--memory" => o.memory = true,
             "--paths" => {
                 o.paths = args
                     .next()
@@ -247,6 +255,13 @@ fn options() -> Result<Options, String> {
                     .collect::<Result<_, _>>()?
             }
             "--fixtures" => o.only = Some(args.next().ok_or("--fixtures a,b")?.split(',').map(str::to_owned).collect()),
+            "--window" => {
+                let w = args.next().ok_or("--window walk|still")?;
+                // SAFETY: called at startup before any worker thread is spawned.
+                unsafe { std::env::set_var("LIGHTBENCH_DUMP_WINDOW", w) };
+            }
+            "--save" => o.save = Some(PathBuf::from(args.next().ok_or("--save <file.jsonl>")?)),
+            "--compare" => o.compare = Some(PathBuf::from(args.next().ok_or("--compare <file.jsonl>")?)),
             "--shaders" => o.shaders = PathBuf::from(args.next().ok_or("--shaders <dir>")?),
             other => return Err(format!("unknown argument {other}; see docs/bench.md")),
         }
@@ -269,9 +284,12 @@ struct Rig {
     stale: Vec<&'static Pass>,
 }
 impl Rig {
-    /// Whether a reload of `pass` runs this rig's fixture.
+    /// Whether a reload of `pass` runs this rig's fixture. Real-size scenes explicitly selected
+    /// via `--fixtures` always run on any pass edit so shader iteration works on game scenes too.
     fn reads(&self, pass: &Pass) -> bool {
-        pass.fixtures.is_empty() || pass.fixtures.contains(&self.fixture.name())
+        pass.fixtures.is_empty()
+            || pass.fixtures.contains(&self.fixture.name())
+            || fixtures::NAMED_ONLY.contains(&self.fixture.name())
     }
     fn build(&mut self, refs: &Path) -> Result<(), Error> {
         // SAFETY: the bench's threads never read the environment; renderers read it as they are created.
@@ -482,11 +500,19 @@ impl Clock {
 }
 
 /// Runs the rigs `run` picks once and prints their lines, first rebuilding the passes they are
-/// stale in, then the round's GPU clock. Returns the seconds the fixtures took.
-fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bool) -> f64 {
+/// stale in, then the round's GPU clock. Returns the seconds the fixtures took and the round's
+/// collected entries and JSON lines.
+fn run_round(
+    rigs: &mut [Rig],
+    o: &Options,
+    round: u32,
+    run: impl Fn(&Rig) -> bool,
+) -> (f64, BTreeMap<(String, String), report::Entry>, Vec<String>) {
     wait_quiet(o);
     let clock = Clock::start();
     let started = Instant::now();
+    let mut entries: BTreeMap<(String, String), report::Entry> = BTreeMap::new();
+    let mut json_lines: Vec<String> = Vec::new();
     for rig in rigs.iter_mut().filter(|rig| run(rig)) {
         if rig.r.is_none() {
             if let Err(error) = rig.build(&o.refs) {
@@ -505,6 +531,7 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
         let mut busy = leases(o);
         let result = rig.fixture.run(r, rig.path, rig.reference.as_ref());
         let _ = kit::drain(r);
+        let mem = o.memory.then(|| report::memory_by_owner(r.device())).flatten();
         busy.extend(leases(o));
         busy.sort();
         busy.dedup();
@@ -518,7 +545,18 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
                 // `frames_after`: frames after that window (a hold after a walk) are left out too.
                 let last = take("frames_measured");
                 let after = take("frames_after").unwrap_or(0);
-                let (stats, end) = pass_stats(&rig.pass_log, rig.read_to, last, after);
+                let still_len = take("frames_still");
+                let prev_offset = rig.read_to;
+                let (mut stats, end) = pass_stats(&rig.pass_log, prev_offset, last, after);
+                if let (Some(still_n), Some(walk_n)) = (still_len, last) {
+                    let (still_stats, _) = pass_stats(&rig.pass_log, prev_offset, Some(still_n), after + walk_n);
+                    if let Some(&s) = still_stats.medians.get("span") {
+                        stats.medians.insert("still_span".to_owned(), s);
+                    }
+                    if let Some(&c) = still_stats.medians.get("cache") {
+                        stats.medians.insert("still_cache".to_owned(), c);
+                    }
+                }
                 rig.read_to = end;
                 let cache: Vec<f64> = stats.cache_frames.iter().flatten().copied().collect();
                 let cache_max = cache.iter().copied().fold(0.0, f64::max);
@@ -532,7 +570,7 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
                     }
                 }
                 let pass_text: Vec<String> =
-                    stats.medians.iter().filter(|(k, _)| *k != "cache" && *k != "span").map(|(k, v)| format!("{k}={v:.2}")).collect();
+                    stats.medians.iter().filter(|(k, _)| !matches!(k.as_str(), "cache" | "span" | "still_span" | "still_cache")).map(|(k, v)| format!("{k}={v:.2}")).collect();
                 // The cache's cost by the walking-cost budget's three parts: new-cell tracing (update,
                 // claim, probe), gather and integrate; the rest is cell shading and the receivers.
                 let m = |k: &str| stats.medians.get(k).copied().unwrap_or(0.0);
@@ -543,8 +581,13 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
                     m("gi_integrate"),
                     m("cache") - trace - m("gi_gather") - m("gi_integrate")
                 );
+                let still_text = stats
+                    .medians
+                    .get("still_span")
+                    .map(|s| format!(", still {s:.2} (cache {:.2})", m("still_cache")))
+                    .unwrap_or_default();
                 println!(
-                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames ({split}), span {:.2} | ms {} | {seconds:.2} s{contended}",
+                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames ({split}), span {:.2}{still_text} | ms {} | {seconds:.2} s{contended}",
                     rig.path.name(),
                     shown.join(" "),
                     m("cache"),
@@ -555,11 +598,17 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
                 if let Some(causes) = cause::line(&series, m) {
                     println!("bench {name} {} cause | {causes}", rig.path.name());
                 }
-                let passes: Vec<(String, f64)> = stats.medians.into_iter().collect();
+                if let Some(mem) = &mem {
+                    println!("bench {name} {} mem | {}", rig.path.name(), report::format_memory(mem));
+                }
+                let passes_map = stats.medians;
+                let passes: Vec<(String, f64)> = passes_map.iter().map(|(k, &v)| (k.clone(), v)).collect();
+                let mem_vec: Vec<(String, f64)> = mem.as_ref().map(|m| m.iter().map(|(k, &v)| (k.clone(), v)).collect()).unwrap_or_default();
                 let cache_series: Vec<String> =
                     stats.cache_frames.iter().map(|v| v.map_or("null".into(), |v| format!("{v:.4}"))).collect();
-                println!(
-                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"cache_ms_frames\":[{}],\"series\":{{{}}},\"contended\":{},\"run_s\":{seconds:.3}}}",
+                let mem_json = if mem_vec.is_empty() { String::new() } else { format!(",\"memory_mib\":{}", json_map(&mem_vec)) };
+                let json_line = format!(
+                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{}{mem_json},\"cache_ms_frames\":[{}],\"series\":{{{}}},\"contended\":{},\"run_s\":{seconds:.3}}}",
                     json_string(&name),
                     rig.path.name(),
                     json_map(&metrics),
@@ -571,6 +620,16 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
                         .collect::<Vec<_>>()
                         .join(","),
                     if busy.is_empty() { "null".to_owned() } else { json_string(&busy.join("; ")) }
+                );
+                println!("{json_line}");
+                json_lines.push(json_line);
+                entries.insert(
+                    (name, rig.path.name().to_owned()),
+                    report::Entry {
+                        metrics: metrics.into_iter().collect(),
+                        pass_ms: passes_map,
+                        memory_mib: mem.unwrap_or_default(),
+                    },
                 );
             }
             Err(error) => {
@@ -587,7 +646,7 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
     if let Some((median, lowest)) = clock.finish() {
         println!("lightbench: round {round} GPU clock median {median:.0} MHz, lowest {lowest:.0}");
     }
-    seconds
+    (seconds, entries, json_lines)
 }
 
 /// The watched shader files (shaders/*.wgsl and shaders/programs/*.wgsl) and their times.
@@ -681,9 +740,29 @@ pub fn main() -> i32 {
     }
     let (built, mut compiled_to) = compiles(&compile_log, 0);
     println!("lightbench: {} fixtures on {} paths built in {:.1} s ({built}); watching {}", rigs.len() / o.paths.len().max(1), o.paths.len(), started.elapsed().as_secs_f64(), o.shaders.display());
+    let baseline = match &o.compare {
+        Some(path) => match report::load_baseline(path) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("lightbench: --compare {e}");
+                return 2;
+            }
+        },
+        None => None,
+    };
     let mut round = 0;
-    let seconds = run_round(&mut rigs, &o, round, |_| true);
+    let (seconds, entries, json_lines) = run_round(&mut rigs, &o, round, |_| true);
     println!("lightbench: round {round}: fixtures {seconds:.2} s");
+    if let Some(path) = &o.save {
+        if let Err(e) = std::fs::write(path, format!("{}\n", json_lines.join("\n"))) {
+            eprintln!("lightbench: --save {}: {e}", path.display());
+        } else {
+            println!("lightbench: saved {} records to {}", json_lines.len(), path.display());
+        }
+    }
+    if let Some(base) = &baseline {
+        report::print_comparison(base, &entries);
+    }
     // The paths' pipeline caches on disk (each facade is shared, so once per path).
     let save = |rigs: &[Rig]| rigs.iter().for_each(|rig| rig.device.0.save_cache());
     save(&rigs);
@@ -784,7 +863,10 @@ pub fn main() -> i32 {
         let (summary, end) = compiles(&compile_log, compiled_to);
         compiled_to = end;
         println!("lightbench: reloaded in {reload_s:.2} s: {summary}");
-        let fixtures_s = run_round(&mut rigs, &o, round, |rig| reload.iter().any(|p| rig.reads(p)));
+        let (fixtures_s, round_entries, _) = run_round(&mut rigs, &o, round, |rig| reload.iter().any(|p| rig.reads(p)));
+        if let Some(base) = &baseline {
+            report::print_comparison(base, &round_entries);
+        }
         // Counted after the round: some kernels compile on first use in the fixtures' frames.
         let reached: Vec<String> = edited.iter().map(|f| format!("{f} reached {} modules", edits::reached(f))).collect();
         if !reached.is_empty() {

@@ -166,7 +166,15 @@ impl Dump {
         Self::new("glint-course", "LIGHTBENCH_GLINT", "glint-goal", Walk::Course)
     }
     pub(crate) fn outpost() -> Self {
-        Self::new("outpost", "LIGHTBENCH_OUTPOST", "outpost-play", Walk::Recorded)
+        let dir = std::env::var("LIGHTBENCH_OUTPOST").unwrap_or_else(|_| {
+            let with_see_through = "D:/Coding/renderlab-work/bench-scenes/outpost-play-new";
+            if std::path::Path::new(with_see_through).join("scene.json").exists() {
+                with_see_through.to_owned()
+            } else {
+                "D:/Coding/renderlab-work/bench-scenes/outpost-play".to_owned()
+            }
+        });
+        Self { name: "outpost", walk: Walk::Recorded, dir: dir.into(), loaded: None, series: vec![] }
     }
     pub(crate) fn glint_play() -> Self {
         Self::new("glint-play", "LIGHTBENCH_GLINT_PLAY", "glint-play", Walk::Recorded)
@@ -488,6 +496,11 @@ impl Fixture for Dump {
         // The bench's pass window: the walking frames, before the held ones.
         metrics.push(("frames_measured".into(), walking.len() as f64));
         metrics.push(("frames_after".into(), (frames.len() - walking.end) as f64));
+        if let Some(replay) = l.replay.as_ref() {
+            if std::env::var("LIGHTBENCH_DUMP_WINDOW").as_deref() != Ok("still") {
+                metrics.push(("frames_still".into(), replay.still as f64));
+            }
+        }
         self.series = [
             "rays",
             "gather_rays",
