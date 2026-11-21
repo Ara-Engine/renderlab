@@ -188,26 +188,46 @@ pub(crate) fn trickle_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_TRICKLE").as_deref() != Ok("0"))
 }
+/// RENDERLAB_GI_BORROW=0 turns off borrowed coarser bounce for ungathered cells (on by default).
 pub(crate) fn borrow_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BORROW").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BORROW").as_deref() != Ok("0"))
 }
-pub(crate) fn fixed_rays() -> u32 {
-    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+/// Default whole-cache ray budgets (gathers + new-cell tracing share the budget).
+/// `RENDERLAB_GI_FIXED=N` overrides (0 restores the legacy event-driven gather queue).
+const FIXED_RAYS_SOFTWARE: u32 = 128_000;
+const FIXED_RAYS_HARDWARE: u32 = 256_000;
+pub(crate) fn fixed_rays(software: bool) -> u32 {
+    static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let forced = *OVERRIDE
+        .get_or_init(|| std::env::var("RENDERLAB_GI_FIXED").ok().and_then(|v| v.parse().ok()));
+    forced.unwrap_or(if software { FIXED_RAYS_SOFTWARE } else { FIXED_RAYS_HARDWARE })
 }
-fn stale_budget() -> u32 {
-    static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *B.get_or_init(|| {
+/// New-cell tracing shares the fixed ray budget (on by default; `RENDERLAB_GI_FIXED_TRACE=0` off).
+fn fixed_trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED_TRACE").as_deref() != Ok("0"))
+}
+/// Per-cell settling + still-view idle under the fixed budget (on by default; `RENDERLAB_GI_FIXED_REST=0` off).
+fn fixed_rest_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED_REST").as_deref() != Ok("0"))
+}
+/// Stale cells re-traced per frame from movers (`RENDERLAB_GI_STALE_BUDGET=N`, `RENDERLAB_GI_STALE=0` uncapped).
+const STALE_BUDGET_SOFTWARE: u32 = 512;
+const STALE_BUDGET_HARDWARE: u32 = 1024;
+fn stale_budget(software: bool) -> u32 {
+    static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let forced = *OVERRIDE.get_or_init(|| {
         if std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "0") {
-            return 0;
+            return Some(0);
         }
-        std::env::var("RENDERLAB_GI_STALE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(STALE_BUDGET)
-    })
+        std::env::var("RENDERLAB_GI_STALE_BUDGET").ok().and_then(|v| v.parse().ok())
+    });
+    forced.unwrap_or(if software { STALE_BUDGET_SOFTWARE } else { STALE_BUDGET_HARDWARE })
 }
-const STALE_BUDGET: u32 = 2048;
 /// Longest turn of a read stale cell, in frames.
-const STALE_TURN_MAX: u32 = 32;
+const STALE_TURN_MAX: u32 = 64;
 /// Which moved boxes may reach each cell of an 8 x 8 x 8 grid over them (shaders/gi_cache.wgsl
 /// gi_box_mask): each box grown by `reach` of its diagonals. The scan tested every slot against
 /// every box (Glint's play: about a million slots and 107 boxes a frame); with the grid a slot
@@ -1100,10 +1120,11 @@ struct Pipelines {
     emitters_cdf: Owned<wgpu::ComputePipeline>,
     gather_count: Owned<wgpu::ComputePipeline>,
     gather_select: Owned<wgpu::ComputePipeline>,
-    /// The fixed update budget's ranking, cut and listing (shaders/gi_cache.wgsl gi_fixed_*).
+    /// The fixed update budget's ranking, cut, listing and convergence check (shaders/gi_cache.wgsl gi_fixed_*).
     fixed_rank: Owned<wgpu::ComputePipeline>,
     fixed_select: Owned<wgpu::ComputePipeline>,
     fixed_list: Owned<wgpu::ComputePipeline>,
+    fixed_after: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
     filter: Owned<wgpu::ComputePipeline>,
     /// The kernels built on the lean layout (`lean`): their passes bind the lean group 1.
@@ -1319,6 +1340,8 @@ pub(crate) struct Plan {
     pub(crate) next_queue_at: u64,
     /// The cell-space filter (G3) runs this frame (bounce on, a filter bit set).
     pub(crate) filter: bool,
+    /// Fixed whole-cache ray budget active for this frame (0: legacy event queue).
+    pub(crate) fixed_rays: u32,
 }
 /// What a frame's plan is computed from, apart from the planner's own history: the
 /// settings, the allocated table's shape, and the view.
@@ -1334,6 +1357,8 @@ pub(crate) struct PlanConfig {
     pub(crate) emitters: u32,
     /// Software rays (the non-RT path) rather than hardware ray queries.
     pub(crate) software: bool,
+    /// Backend supports the fixed whole-cache ranking passes (`gi_fixed_*`).
+    pub(crate) fixed_budget: bool,
     /// An environment map is selected.
     pub(crate) field: bool,
     pub(crate) profiling: bool,
@@ -1424,6 +1449,10 @@ pub(crate) struct Planner {
     bounce_busy: u32,
     /// Last collected frame's stale cells (shaders/gi_cache.wgsl GI_W_STALE_CELLS).
     pub(crate) stale_cells: u32,
+    /// Consecutive quiet frames under the fixed budget (no cell created and none moved > 1/2048).
+    pub(crate) fixed_quiet: u32,
+    /// Last collected ranked rays under the fixed budget (GI_W_FIXED_RANKED).
+    pub(crate) fixed_ranked: u32,
     /// Requests readers outside the cache appended on a recent frame (the external list's
     /// count, read back without waiting): while any is unanswered the cache does not idle.
     pub(crate) external_pending: u32,
@@ -1453,6 +1482,8 @@ impl Default for Planner {
             bounce_last: None,
             bounce_busy: 0,
             stale_cells: 0,
+            fixed_quiet: 0,
+            fixed_ranked: 0,
             external_pending: 0,
             parity: false,
             tick_queues: [0; 2],
@@ -1476,17 +1507,31 @@ impl Planner {
     pub(crate) fn reset(&mut self) {
         self.pending_clear = true;
         self.frame = 0;
+        self.fixed_quiet = 0;
+        self.fixed_ranked = 0;
     }
     /// A camera cut that keeps the table (`Engine::cut_view`): with `cut_refill`, the next
     /// frames refill as after a clear (coarse cells first, capped claims, cut phases).
     pub(crate) fn camera_cut(&mut self) {
         self.since_cut = 0;
+        self.fixed_quiet = 0;
     }
     /// A new table: forget what the old one was planned from and start it empty.
     pub(crate) fn reallocated(&mut self) {
         self.environment = None;
         self.bounds.clear();
         self.pending_clear = true;
+        self.fixed_quiet = 0;
+        self.fixed_ranked = 0;
+    }
+    /// Still-view convergence check for the fixed budget: a static view where a full sweep
+    /// of ranked cells passed with zero cells created and zero cells moving by > 1/2048.
+    fn fixed_settled(&self, still: bool, budget: u32) -> bool {
+        if !fixed_rest_on() || !still || budget == 0 {
+            return false;
+        }
+        let turn = self.fixed_ranked.div_ceil(budget).max(4) + 4;
+        self.fixed_quiet >= turn
     }
     /// Frames since the cache was last emptied.
     #[cfg(test)]
@@ -1500,9 +1545,9 @@ impl Planner {
     /// Stale cells' turns [read, sweep] (shaders/gi_cache.wgsl GI_STALE): with a budget, the
     /// power of two that spreads last frame's stale cells to about the budget a frame (1 below
     /// it), unread ones four times slower; else the fixed periods.
-    fn stale_turns(&self) -> [u32; 2] {
+    fn stale_turns(&self, software: bool) -> [u32; 2] {
         let [read, sweep] = stale_periods();
-        let budget = stale_budget();
+        let budget = stale_budget(software);
         if budget == 0 {
             return [read, sweep];
         }
@@ -1600,7 +1645,7 @@ impl Planner {
         // The cache's own gathers sample the list (and subtract emission at hits) only with
         // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
         header[43] = u32::from(!emitters_on());
-        let [read, sweep] = self.stale_turns();
+        let [read, sweep] = self.stale_turns(software);
         header[62] = read;
         header[63] = sweep;
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
@@ -1619,23 +1664,34 @@ impl Planner {
         // (unless claims are set explicitly); steady frames keep main's uncapped claims.
         // Software rays' gathers are held to GATHER_RAYS_SOFTWARE estimated rays a frame
         // instead of a cell count (shaders/gi_cache.wgsl gi_gather_rays).
+        let budget = if c.fixed_budget && bounce { fixed_rays(software) } else { 0 };
+        let fixed_trace = budget != 0 && fixed_trace_on();
+        let fixed_settle = budget != 0 && fixed_rest_on();
         let since_fill = since_clear.min(self.since_cut);
         let fill = first_fill_on(software) && s.claim_cells == u32::MAX && since_fill < FILL_CLAIM_FRAMES;
         let ray_budget = first_fill_on(software) && software && s.gather_cells == 0 && !cut_window;
-        header[20] = match s.gather_cells {
-            _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
-            0 => GATHER_CELLS,
-            u32::MAX => 0,
-            cells => cells,
+        header[20] = if budget != 0 {
+            0
+        } else {
+            match s.gather_cells {
+                _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
+                0 => GATHER_CELLS,
+                u32::MAX => 0,
+                cells => cells,
+            }
         };
         header[21] = s.gather_stride;
-        header[22] = match s.claim_cells {
-            0 if software => CLAIM_CELLS_SOFTWARE,
-            0 => CLAIM_CELLS_HARDWARE,
-            u32::MAX if cut_capped && software => CLAIM_CELLS_SOFTWARE,
-            u32::MAX if cut_capped => CLAIM_CELLS_HARDWARE,
-            u32::MAX => 0,
-            cells => cells,
+        header[22] = if fixed_trace {
+            0
+        } else {
+            match s.claim_cells {
+                0 if software => CLAIM_CELLS_SOFTWARE,
+                0 => CLAIM_CELLS_HARDWARE,
+                u32::MAX if cut_capped && software => CLAIM_CELLS_SOFTWARE,
+                u32::MAX if cut_capped => CLAIM_CELLS_HARDWARE,
+                u32::MAX => 0,
+                cells => cells,
+            }
         };
         // The cell-space filter (G3) runs over cell shading's queue, so only with bounce, and
         // only once its sources are allocated.
@@ -1672,9 +1728,11 @@ impl Planner {
         };
         header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
         header[54] = u32::from(fill && since_fill == 0);
-        header[53] = if ray_budget && fixed_rays() == 0 { GATHER_RAYS_SOFTWARE } else { 0 };
-        // The fixed update budget (shaders/gi_cache.wgsl GI_H_FIXED_RAYS, estimated gather rays a frame); 0 keeps the event queue.
-        header[45] = fixed_rays();
+        header[53] = if ray_budget && budget == 0 { GATHER_RAYS_SOFTWARE } else { 0 };
+        // Fixed whole-cache update budget (shaders/gi_cache.wgsl GI_H_FIXED_*): 0 keeps the event queue.
+        header[44] = u32::from(fixed_trace);
+        header[45] = budget;
+        header[51] = u32::from(fixed_settle);
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
@@ -1772,7 +1830,7 @@ impl Planner {
         } else {
             0
         };
-        let [_, sweep] = self.stale_turns();
+        let [_, sweep] = self.stale_turns(c.software);
         if sweep > 1 && self.since_movers < sweep {
             flags |= 64;
         }
@@ -1855,12 +1913,8 @@ impl Planner {
         if tick {
             self.light_key = light_key;
         }
-        // Gathers scheduled by a relight run on the frames after it, even where the view is
-        // otherwise idle.
-        // A reader outside the cache with unanswered requests (the final gather's probes) keeps
-        // the cache running: idle means nobody waits on a cell.
-        // The fixed update budget works every frame, standing or walking.
-        let busy = (bounce && (self.bounce_busy > 0 || fixed_rays() != 0)) || self.external_pending > 0;
+        let budget = begun.header[45];
+        let busy_relight = bounce && self.bounce_busy > 0;
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
                 s.gathers + 2
@@ -1968,6 +2022,21 @@ impl Planner {
             view.view_frames = 0;
         }
         view.view_key = Some(view_key);
+        let still = view.idle_frames >= 8
+            && flags == 0
+            && !clear
+            && !busy_relight
+            && self.external_pending == 0;
+        if !still {
+            self.fixed_quiet = 0;
+        }
+        let fixed_settled = budget != 0 && self.fixed_settled(still, budget);
+        // Once a static view has converged across a full sweep with zero created/moved cells,
+        // idle the cache immediately instead of waiting out legacy gather-queue idle_after.
+        if fixed_settled {
+            return Finished { frame, plan: None };
+        }
+        let busy = busy_relight || (bounce && budget != 0) || self.external_pending > 0;
         // A gather cap spreads a cut's gathers over more frames: still frames keep running
         // until a spread of up to 64 slot groups per gather generation can have drained.
         let idle_after = match (bounce, s.gather_cells) {
@@ -2027,6 +2096,7 @@ impl Planner {
                 bounce,
                 next_queue_at: u64::from(next) * 4,
                 filter: bounce && filter != 0,
+                fixed_rays: if bounce { budget } else { 0 },
             }),
         }
     }
@@ -2110,6 +2180,8 @@ pub(super) struct GiState {
     probe_log: Option<ProbeWatch>,
     /// The still-view batch: misses plus queued gathers of recent cache frames.
     stale_watch: Option<FullWatch>,
+    /// Fixed budget convergence readback (GI_W_FIXED_MOVED, GI_W_FIXED_RANKED, GI_W_CREATED).
+    fixed_watch: Option<FullWatch>,
     /// The external list's count (word 0) at the start of each encode, idle or not: what
     /// readers appended on the frame before (`Planner::external_pending`).
     external_watch: Option<FullWatch>,
@@ -2275,6 +2347,35 @@ impl FullWatch {
         }
         largest
     }
+    /// Per-word maxima across ready ring entries (after a device poll), if any.
+    fn collect_words(&mut self) -> Option<Vec<u32>> {
+        let mut out: Option<Vec<u32>> = None;
+        for (buffer, state) in &mut self.ring {
+            let WatchState::Mapping(done) = state else {
+                continue;
+            };
+            let Some(&ok) = done.get() else { continue };
+            if ok {
+                let n = self.words.len();
+                if let Ok(v) = buffer.slice(..).get_mapped_range() {
+                    let vals: Vec<u32> = (0..n)
+                        .map(|i| u32::from_le_bytes(v[4 * i..4 * i + 4].try_into().unwrap()))
+                        .collect();
+                    match &mut out {
+                        Some(acc) => {
+                            for (a, b) in acc.iter_mut().zip(vals) {
+                                *a = (*a).max(b);
+                            }
+                        }
+                        None => out = Some(vals),
+                    }
+                }
+                buffer.unmap();
+            }
+            *state = WatchState::Free;
+        }
+        out
+    }
 }
 
 /// `auto_slots`' starting size: about a quarter as many slots as the scene's drawn triangles
@@ -2342,6 +2443,7 @@ impl GiState {
             grow: false,
             probe_log: None,
             stale_watch: None,
+            fixed_watch: None,
             external_watch: None,
             emitters_max: EMITTERS_MAX,
             emitter_watch: None,
@@ -2353,6 +2455,9 @@ impl GiState {
             watch.submitted();
         }
         if let Some(watch) = &mut self.stale_watch {
+            watch.submitted();
+        }
+        if let Some(watch) = &mut self.fixed_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.external_watch {
@@ -3783,7 +3888,7 @@ impl Renderer {
             "gi_resolve", "gi_resolve_last", "gi_scan", "gi_setup", "gi_rays", "gi_finish", "gi_integrate",
             if priority { "gi_priority_gather_empty" } else if software { "gi_gather_batched" } else { "gi_gather" },
             "gi_fill_count", "gi_fill_select", "gi_emitters_build", "gi_emitters_publish", "gi_emitters_cdf",
-            "gi_gather_count", "gi_gather_select", "gi_fixed_rank", "gi_fixed_select", "gi_fixed_list",
+            "gi_gather_count", "gi_gather_select", "gi_fixed_rank", "gi_fixed_select", "gi_fixed_list", "gi_fixed_after",
             "gi_light", "gi_filter",
         ];
         let mut first_error = None;
@@ -3834,6 +3939,7 @@ impl Renderer {
             fixed_rank: kernel("gi_fixed_rank"),
             fixed_select: kernel("gi_fixed_select"),
             fixed_list: kernel("gi_fixed_list"),
+            fixed_after: kernel("gi_fixed_after"),
             light: kernel("gi_light"),
             filter: kernel("gi_filter"),
             lean: vec![],
@@ -4244,13 +4350,6 @@ impl Renderer {
                 self.gi.planner.external_pending = pending;
             }
         }
-        if stale_budget() != 0 {
-            let device = &self.device;
-            let watch = self.gi.stale_watch.get_or_insert_with(|| FullWatch::of_words(device, &[247]));
-            if let Some(stale) = watch.collect() {
-                self.gi.planner.stale_cells = stale;
-            }
-        }
         if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
             self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
             self.gi.grow |= full > 0;
@@ -4281,6 +4380,29 @@ impl Renderer {
         let hardware = self.hardware_shadows.is_some() && !self.gi.settings.force_software;
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
         let software = !hardware;
+        if stale_budget(software) != 0 {
+            let device = &self.device;
+            let watch = self.gi.stale_watch.get_or_insert_with(|| FullWatch::of_words(device, &[247]));
+            if let Some(stale) = watch.collect() {
+                self.gi.planner.stale_cells = stale;
+            }
+        }
+        if fixed_rays(software) != 0 && fixed_rest_on() {
+            let device = &self.device;
+            let watch = self
+                .gi
+                .fixed_watch
+                .get_or_insert_with(|| FullWatch::of_words(device, &[355, 356, 7]));
+            if let Some(vals) = watch.collect_words() {
+                let (moved, ranked, created) = (vals[0], vals[1], vals[2]);
+                self.gi.planner.fixed_ranked = ranked;
+                if moved == 0 && created == 0 {
+                    self.gi.planner.fixed_quiet = self.gi.planner.fixed_quiet.saturating_add(1);
+                } else {
+                    self.gi.planner.fixed_quiet = 0;
+                }
+            }
+        }
         let ids = self.gi_draw_ids(draws);
         let geometry_start = std::time::Instant::now();
         let run = run && (hardware || self.prepare_gi_geometry(draws, &ids)?);
@@ -4318,6 +4440,7 @@ impl Renderer {
             raw_slots: r.raw_slots,
             emitters: r.emitters,
             software,
+            fixed_budget: !(software && priority::on()),
             field: self.environment.selected.is_some(),
             profiling: self.gi.profile.is_some() || probe_log_path().is_some(),
             near_bins: self.gi.near_bins,
@@ -4818,13 +4941,15 @@ impl GiState {
         }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
-            if fixed_rays() != 0 {
-                // The fixed update budget: rank every slot, cut, list this frame's gathers.
-                let slots = plan.bounce.then_some([r.slots.div_ceil(64).min(65535), 1]);
+            let fixed = plan.fixed_rays != 0;
+            if fixed {
+                // Compacted fixed update budget: rank active cells into layout.items, cut, list gathers.
+                let rank_groups = plan.bounce.then_some([r.slots.div_ceil(64).min(4096), 1]);
+                let list_groups = plan.bounce.then_some([1024, 1]);
                 mark(encoder, "gi_fixed");
-                main_pass(encoder, "indirect fixed rank", &p.fixed_rank, u32::MAX, slots);
+                main_pass(encoder, "indirect fixed rank", &p.fixed_rank, u32::MAX, rank_groups);
                 main_pass(encoder, "indirect fixed select", &p.fixed_select, u32::MAX, grid.map(|_| [1, 1]));
-                main_pass(encoder, "indirect fixed list", &p.fixed_list, u32::MAX, slots);
+                main_pass(encoder, "indirect fixed list", &p.fixed_list, u32::MAX, list_groups);
                 mark(encoder, "gi_gather");
             } else {
                 // The gather ray budget's admission (no-ops without it).
@@ -4855,6 +4980,9 @@ impl GiState {
                 main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,legacy_grid);
             } else {
                 main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
+            }
+            if fixed {
+                main_pass(encoder, "indirect fixed after", &p.fixed_after, u32::MAX, plan.bounce.then_some([256, 1]));
             }
         }
         if let Some(feedback) = &self.refill_feedback {
@@ -4982,6 +5110,9 @@ impl GiState {
         if let (Some(watch), Some(r)) = (self.stale_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
+        if let (Some(watch), Some(r)) = (self.fixed_watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
+        }
         if let (Some(watch), Some(r)) = (self.emitter_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
@@ -5040,6 +5171,7 @@ mod tests {
             raw_slots: 1 << 20,
             emitters: EMITTERS_MAX,
             software: true,
+            fixed_budget: false,
             field: false,
             profiling: false,
             near_bins: 0,
@@ -5065,6 +5197,69 @@ mod tests {
                 planner.advance(&begun, false);
             }
         }
+    }
+
+    #[test]
+    fn fixed_budget_headers_and_settle_idle() {
+        let mut settings = IndirectSettings::default();
+        settings.enabled = true;
+        settings.bounce = true;
+        let config = PlanConfig {
+            settings,
+            slots: 1 << 18,
+            misses: 1 << 16,
+            cold_words: 24,
+            raw_slots: 1 << 18,
+            emitters: EMITTERS_MAX,
+            software: true,
+            fixed_budget: true,
+            field: false,
+            profiling: false,
+            near_bins: 0,
+            eye: Vec3::ZERO,
+            fov_y: 1.0,
+            size: [1920, 1080],
+        };
+        let mut planner = Planner::default();
+        let mut view = ViewPlan::default();
+        let inputs = |bounds: Vec<[f32; 6]>| FrameInputs {
+            bounds,
+            poses: vec![],
+            environment: [0; 32],
+            light_key: Some([1; 32]),
+            region: [0, 0, 1920, 1080],
+            still_matrix: [0; 64],
+            still_extent: vec![],
+            instances: &[],
+            skin_revisions: vec![],
+        };
+        let begun = planner.begin(&config, true, true, true);
+        assert_eq!(begun.header[45], FIXED_RAYS_SOFTWARE);
+        assert_eq!(begun.header[44], 1);
+        assert_eq!(begun.header[51], 1);
+        // Active work before settling: not idle.
+        let finished = planner.finish(&config, &begun, true, true, &mut view, inputs(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]));
+        let plan = finished.plan.expect("first frame must run");
+        assert_eq!(plan.fixed_rays, FIXED_RAYS_SOFTWARE);
+        planner.advance(&begun, false);
+
+        // Once the view is still for 8+ frames and GPU watch reports quiet sweeps with no
+        // remaining ranked work, the planner idles the cache (0 ms) and wakes immediately on motion.
+        for _ in 0..8 {
+            let b = planner.begin(&config, true, true, true);
+            let f = planner.finish(&config, &b, true, true, &mut view, inputs(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]));
+            planner.advance(&b, f.plan.is_none());
+        }
+        planner.fixed_quiet = 7;
+        planner.fixed_ranked = 0;
+        let begun_idle = planner.begin(&config, true, true, true);
+        let warming = planner.finish(&config, &begun_idle, true, true, &mut view, inputs(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]));
+        assert!(warming.plan.is_some(), "should still run before turn quiet frames");
+        planner.fixed_quiet = 8;
+        let idle = planner.finish(&config, &begun_idle, true, true, &mut view, inputs(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]));
+        assert!(idle.plan.is_none(), "settled static view should idle");
+        let moved = planner.finish(&config, &begun_idle, true, true, &mut view, inputs(vec![[2.0, 0.0, 0.0, 3.0, 1.0, 1.0]]));
+        assert!(moved.plan.is_some(), "mover must wake the cache immediately");
     }
 
     /// More moved boxes than the frame holds become at most that many unions, each box inside
