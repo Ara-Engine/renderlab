@@ -176,10 +176,10 @@ const STALE_SWEEP: u32 = 16;
 /// and terrain price a hardware ray only 1.2-1.6x below a software one). Unset or 0 keeps the
 /// event-driven gather queue.
 /// The ara-gpu port does not encode the ranking passes: leave it unset there.
-/// RENDERLAB_GI_BORROW=1: readers of a cell's outgoing radiance add, to a cell without a bounce
-/// value of its own yet, its albedo times the nearest coarser cell's bounce (gi_cells.wgsl
-/// gi_borrow_*), and pixels fill missing bounce from further coarser levels (gi_api.wgsl). Off by
-/// default; independent of RENDERLAB_GI_FIXED.
+/// RENDERLAB_GI_BORROW=1: readers of a cell's outgoing radiance (gather hits, the final gather,
+/// cache-terminated reflections) add, to a cell without a bounce value of its own yet, its albedo
+/// times the nearest coarser cell's own bounce (gi_cells.wgsl gi_borrow_*). Off by default;
+/// independent of RENDERLAB_GI_FIXED.
 pub(crate) fn borrow_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BORROW").as_deref() == Ok("1"))
