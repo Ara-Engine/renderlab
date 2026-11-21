@@ -2528,7 +2528,8 @@ impl Renderer {
                 size: work_bytes,
                 usage: wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::INDIRECT
-                    | wgpu::BufferUsages::COPY_DST,
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }),
             ResourceKind::Buffer,
