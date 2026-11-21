@@ -133,7 +133,7 @@ impl Engine {
             };
             self.dump_scene(&label, camera, [output.width(), output.height()], stops, motion)?;
         } else if let Some(dump) = self.dump.as_mut() {
-            dump.record_motion(camera, self.state.batches.values().map(|b| (b.objects.as_slice(), b.models.as_slice())));
+            dump.record_motion(report.frame.0, camera, self.state.batches.values().map(|b| (b.objects.as_slice(), b.models.as_slice())));
         }
         if let Some(label) = self.live.as_ref().and_then(|l| l.armed(report.frame.0)) {
             let at = self.view_index(view)?;

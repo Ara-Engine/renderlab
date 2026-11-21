@@ -13,10 +13,10 @@
 //! An arm file whose second line is `motion` also records how the scene moves from that dump on
 //! (the bench replays it, src/bench/dump.rs): `skins.rla` (each skinned mesh's rest primitive,
 //! in `skins.bin` order) and `skins.bin` (per skinned mesh: its scene.rla mesh index, joint
-//! count and vertex influences), then `motion.bin`, one record per frame in which anything moved:
-//! the camera, each dumped placement whose model changed (its scene.rla placement index) and
-//! each skinned mesh whose palette changed. Recording stops when `<dir>/motion-stop` appears. An
-//! embedder that pauses its world between steps (Ara's play.step) writes one record per step.
+//! count and vertex influences), then `motion.bin`, one record per rendered frame: its renderer
+//! frame id, the camera, each dumped placement whose model changed since the last record (its
+//! scene.rla placement index) and each skinned mesh whose palette changed. Records are deltas:
+//! a replay applies every record up to a frame. Recording stops when `<dir>/motion-stop` appears.
 use super::*;
 use std::{collections::HashMap, fmt::Write as _, io::Write as _, path::PathBuf};
 
@@ -64,7 +64,6 @@ struct Motion {
     objects: HashMap<ObjectId, (u32, Mat4)>,
     /// Each dumped skinned mesh: its index in skins.bin and its last palette.
     skins: HashMap<MeshId, (u32, Vec<Mat4>)>,
-    camera: [f32; 6],
 }
 
 fn put_f32s(out: &mut Vec<u8>, values: impl IntoIterator<Item = f32>) {
@@ -139,9 +138,9 @@ impl Recorder {
         Some((label, lines.next().is_some_and(|l| l.trim() == "motion")))
     }
 
-    /// Writes this frame's motion record when a recording runs and anything moved since the
-    /// last one (module doc); stops the recording once `<dir>/motion-stop` exists.
-    pub(super) fn record_motion<'a>(&mut self, camera: &Camera, batches: impl Iterator<Item = (&'a [ObjectId], &'a [Mat4])>) {
+    /// Writes this frame's motion record when a recording runs (module doc); stops the
+    /// recording once `<dir>/motion-stop` exists.
+    pub(super) fn record_motion<'a>(&mut self, frame: u64, camera: &Camera, batches: impl Iterator<Item = (&'a [ObjectId], &'a [Mat4])>) {
         let Some(m) = self.motion.as_mut() else { return };
         let stop = self.dir.join("motion-stop");
         if stop.exists() {
@@ -173,11 +172,7 @@ impl Recorder {
                 }
             }
         }
-        if cam == m.camera && models.is_empty() && skins.is_empty() {
-            return;
-        }
-        m.camera = cam;
-        let mut rec = vec![];
+        let mut rec = frame.to_le_bytes().to_vec();
         put_f32s(&mut rec, cam);
         rec.extend((models.len() as u32).to_le_bytes());
         for (index, model) in models {
@@ -363,9 +358,7 @@ impl Engine {
                 Recorded::Skinned { palette, .. } => palette.clone(),
                 Recorded::Static { .. } => vec![],
             })))).collect();
-            let inverse = camera.view().inverse();
-            let (eye, target) = (inverse.w_axis.truncate(), inverse.w_axis.truncate() - inverse.z_axis.truncate());
-            let motion = Motion { out: std::io::BufWriter::new(file), objects, skins, camera: [eye.x, eye.y, eye.z, target.x, target.y, target.z] };
+            let motion = Motion { out: std::io::BufWriter::new(file), objects, skins };
             if let Some(rec) = self.dump.as_mut() {
                 rec.motion = Some(motion);
             }
