@@ -12,7 +12,7 @@ selection-oracle = ["renderlab-asset/selection-oracle"]
 selection-shadow = ["selection-oracle"]
 selection-profile = ["renderlab-asset/selection-profile"]
 # The test bench binary (`lightbench`, docs/bench.md); no default behaviour changes.
-bench = []
+bench = ["dep:serde_json"]
 
 [workspace]
 resolver = "3"

@@ -801,6 +801,16 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     }
     gi_shader_variant(name, builtin)
 }
+/// An engine shader file's text (`name` under shaders/): with the bench (feature `bench`,
+/// docs/bench.md), the copy it read from disk; otherwise the built-in text.
+pub(crate) fn engine_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'static, str> {
+    #[cfg(feature = "bench")]
+    if let Some(text) = crate::renderer::bench::shader_text(name) {
+        return text.into();
+    }
+    let _ = name;
+    builtin.into()
+}
 /// `gi_shader`'s switches, applied to the built-in text or the bench's.
 fn gi_shader_variant<'a>(name: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
     // RENDERLAB_GI_BUCKET=0: the cache's table searches walk a bucket one key word at a time.

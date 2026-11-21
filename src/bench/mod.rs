@@ -11,9 +11,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 
+mod city;
+mod dump;
 mod fixtures;
 mod furnace;
 pub(crate) mod kit;
+mod shadow_edges;
 
 /// The two device paths every fixture runs on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -57,6 +60,11 @@ pub(crate) trait Fixture {
     fn reference(&mut self, _r: &mut Renderer) -> Option<Result<RefImage, Error>> {
         None
     }
+    /// Per-frame values from the last `run` (rays per frame, ...): the JSON line carries them
+    /// whole (`series`), the text line their median and largest value.
+    fn series(&mut self) -> Vec<(String, Vec<f64>)> {
+        vec![]
+    }
 }
 
 /// Shader text read from disk by the bench, by file name under shaders/: `program::gi_shader`
@@ -87,6 +95,16 @@ const PASSES: &[Pass] = &[Pass {
         "gi_shade_entry.wgsl",
     ],
     reload: Renderer::bench_reload_gi,
+}, Pass {
+    name: "vsm",
+    files: &[
+        "virtual_shadow.wgsl",
+        "virtual_shadow_records.wgsl",
+        "virtual_shadow_hybrid.wgsl",
+        "virtual_shadow_lookup.wgsl",
+        "virtual_shadow_disk.wgsl",
+    ],
+    reload: Renderer::bench_reload_vsm,
 }];
 
 struct Options {
@@ -234,7 +252,7 @@ struct PassStats {
     medians: BTreeMap<String, f64>,
     cache_frames: Vec<Option<f64>>,
 }
-fn pass_stats(log: &Path, offset: u64, last: Option<usize>) -> (PassStats, u64) {
+fn pass_stats(log: &Path, offset: u64, last: Option<usize>, after: usize) -> (PassStats, u64) {
     let Ok(text) = std::fs::read(log) else {
         return (PassStats { medians: BTreeMap::new(), cache_frames: vec![] }, offset);
     };
@@ -265,6 +283,8 @@ fn pass_stats(log: &Path, offset: u64, last: Option<usize>) -> (PassStats, u64) 
         stages.insert("cache".to_owned(), cache);
         frames.push(Some(stages));
     }
+    // The window: the `last` frames before the final `after` ones.
+    frames.truncate(frames.len().saturating_sub(after));
     if let Some(last) = last {
         frames.drain(..frames.len().saturating_sub(last));
     }
@@ -344,33 +364,59 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
         match result {
             Ok(mut metrics) => {
                 // `frames_measured`: the pass times cover only the fixture's last frames.
-                let last = metrics.iter().position(|(k, _)| k == "frames_measured").map(|i| metrics.remove(i).1 as usize);
-                let (stats, end) = pass_stats(&rig.pass_log, rig.read_to, last);
+                let mut take = |name: &str| metrics.iter().position(|(k, _)| k == name).map(|i| metrics.remove(i).1 as usize);
+                // `frames_after`: frames after that window (a hold after a walk) are left out too.
+                let last = take("frames_measured");
+                let after = take("frames_after").unwrap_or(0);
+                let (stats, end) = pass_stats(&rig.pass_log, rig.read_to, last, after);
                 rig.read_to = end;
                 let cache: Vec<f64> = stats.cache_frames.iter().flatten().copied().collect();
                 let cache_max = cache.iter().copied().fold(0.0, f64::max);
-                let shown: Vec<String> = metrics.iter().map(|(k, v)| format!("{k}={v:.4}")).collect();
+                let series = rig.fixture.series();
+                let mut shown: Vec<String> = metrics.iter().map(|(k, v)| format!("{k}={v:.4}")).collect();
+                for (k, values) in &series {
+                    let mut sorted = values.clone();
+                    sorted.sort_by(f64::total_cmp);
+                    if let (Some(median), Some(max)) = (sorted.get(sorted.len() / 2), sorted.last()) {
+                        shown.push(format!("{k}/frame={median:.0} (max {max:.0})"));
+                    }
+                }
                 let pass_text: Vec<String> =
                     stats.medians.iter().filter(|(k, _)| *k != "cache" && *k != "span").map(|(k, v)| format!("{k}={v:.2}")).collect();
+                // The cache's cost by the walking-cost budget's three parts: new-cell tracing (update,
+                // claim, probe), gather and integrate; the rest is cell shading and the receivers.
+                let m = |k: &str| stats.medians.get(k).copied().unwrap_or(0.0);
+                let trace = m("gi_update") + m("gi_claim") + m("gi_probe");
+                let split = format!(
+                    "trace {trace:.2} gather {:.2} integrate {:.2} other {:.2}",
+                    m("gi_gather"),
+                    m("gi_integrate"),
+                    m("cache") - trace - m("gi_gather") - m("gi_integrate")
+                );
                 println!(
-                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames, span {:.2} | ms {} | {seconds:.2} s{contended}",
+                    "bench {name} {} {} | cache ms/frame median {:.2} max {cache_max:.2} over {} frames ({split}), span {:.2} | ms {} | {seconds:.2} s{contended}",
                     rig.path.name(),
                     shown.join(" "),
-                    stats.medians.get("cache").copied().unwrap_or(0.0),
+                    m("cache"),
                     cache.len(),
-                    stats.medians.get("span").copied().unwrap_or(0.0),
+                    m("span"),
                     pass_text.join(" ")
                 );
                 let passes: Vec<(String, f64)> = stats.medians.into_iter().collect();
-                let series: Vec<String> =
+                let cache_series: Vec<String> =
                     stats.cache_frames.iter().map(|v| v.map_or("null".into(), |v| format!("{v:.4}"))).collect();
                 println!(
-                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"cache_ms_frames\":[{}],\"contended\":{},\"run_s\":{seconds:.3}}}",
+                    "{{\"bench\":\"lightbench\",\"round\":{round},\"fixture\":{},\"path\":\"{}\",\"metrics\":{},\"pass_ms\":{},\"cache_ms_frames\":[{}],\"series\":{{{}}},\"contended\":{},\"run_s\":{seconds:.3}}}",
                     json_string(&name),
                     rig.path.name(),
                     json_map(&metrics),
                     json_map(&passes),
-                    series.join(","),
+                    cache_series.join(","),
+                    series
+                        .iter()
+                        .map(|(k, v)| format!("{}:[{}]", json_string(k), v.iter().map(|x| format!("{x}")).collect::<Vec<_>>().join(",")))
+                        .collect::<Vec<_>>()
+                        .join(","),
                     if busy.is_empty() { "null".to_owned() } else { json_string(&busy.join("; ")) }
                 );
             }
