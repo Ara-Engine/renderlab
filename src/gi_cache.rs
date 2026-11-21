@@ -176,9 +176,24 @@ const STALE_SWEEP: u32 = 16;
 /// and terrain price a hardware ray only 1.2-1.6x below a software one). Unset or 0 keeps the
 /// event-driven gather queue.
 /// The ara-gpu port does not encode the ranking passes: leave it unset there.
+/// RENDERLAB_GI_FIXED_TRACE=1 (with RENDERLAB_GI_FIXED): new cells' tracing comes out of the
+/// same ray budget, ahead of the gathers (shaders/gi_cache.wgsl gi_fixed_select).
+fn fixed_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED_TRACE").is_ok_and(|v| v == "1"))
+}
 pub(crate) fn fixed_rays() -> u32 {
     static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *N.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+impl Planner {
+    /// The fixed budget's rest: a still view (`still`) where no gather moved a value by more
+    /// than 1/256 over a full turn of the ranked cells (their rays over the budget, plus the
+    /// readback's lag), at least 8 frames.
+    fn fixed_settled(&self, still: bool) -> bool {
+        let turn = self.fixed_ranked.div_ceil(fixed_rays().max(1)).max(8) + 4;
+        still && self.fixed_quiet >= turn
+    }
 }
 fn stale_budget() -> u32 {
     static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
@@ -1400,6 +1415,15 @@ pub(crate) struct Planner {
     /// Requests readers outside the cache appended on a recent frame (the external list's
     /// count, read back without waiting): while any is unanswered the cache does not idle.
     pub(crate) external_pending: u32,
+    /// The fixed budget's idle test (`fixed_settled`): the last collected frame's gathers that
+    /// moved a value (GI_W_FIXED_MOVED) and ranked rays (GI_W_FIXED_RANKED), and frames since a
+    /// collected frame moved one.
+    pub(crate) fixed_moved: u32,
+    pub(crate) fixed_ranked: u32,
+    fixed_quiet: u32,
+    /// The last planned frame's view was still (STILL_BATCH identical frames): the next frame's
+    /// budget is a quarter (`begin`), spent in the still-view batch.
+    fixed_still: bool,
     parity: bool,
     /// The gather queues (this frame's, next frame's) the tick's first frame used: later
     /// views of the tick trace into the same next queue.
@@ -1427,6 +1451,10 @@ impl Default for Planner {
             bounce_busy: 0,
             stale_cells: 0,
             external_pending: 0,
+            fixed_moved: 0,
+            fixed_ranked: 0,
+            fixed_quiet: 0,
+            fixed_still: false,
             parity: false,
             tick_queues: [0; 2],
             light_key: None,
@@ -1592,6 +1620,8 @@ impl Planner {
         let fill = first_fill_on(software) && s.claim_cells == u32::MAX && since_fill < FILL_CLAIM_FRAMES;
         let ray_budget = first_fill_on(software) && software && s.gather_cells == 0 && !cut_window;
         header[20] = match s.gather_cells {
+            // The fixed budget lists what fits: no gather period on top of it.
+            _ if fixed_rays() != 0 => 0,
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
             0 => GATHER_CELLS,
             u32::MAX => 0,
@@ -1627,7 +1657,10 @@ impl Planner {
         header[27] = spread.to_bits();
         header[29] = s.mover_hit_levels;
         // The most cells pixels read in a frame: the view's pixels over a cell's.
+        // With the fixed budget the first fill admits new cells every frame, its cap from the
+        // budget (shaders/gi_cache.wgsl GI_W_FIXED_FILL; any nonzero word turns the admission on).
         header[48] = match (fill, software) {
+            (false, _) if fixed_rays() != 0 && fixed_trace() => 1,
             (false, _) => 0,
             (true, true) => FILL_CELLS_SOFTWARE,
             (true, false) => FILL_CELLS_HARDWARE,
@@ -1643,7 +1676,9 @@ impl Planner {
         header[54] = u32::from(fill && since_fill == 0);
         header[53] = if ray_budget && fixed_rays() == 0 { GATHER_RAYS_SOFTWARE } else { 0 };
         // The fixed update budget (shaders/gi_cache.wgsl GI_H_FIXED_RAYS, estimated gather rays a frame); 0 keeps the event queue.
-        header[45] = fixed_rays();
+        // A quarter of it on a still view (the still-view batch's frames): a ceiling, not a floor.
+        header[45] = if self.fixed_still { (fixed_rays() / 4).max(1) } else { fixed_rays() };
+        header[44] = u32::from(fixed_trace());
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
@@ -1828,8 +1863,10 @@ impl Planner {
         // otherwise idle.
         // A reader outside the cache with unanswered requests (the final gather's probes) keeps
         // the cache running: idle means nobody waits on a cell.
-        // The fixed update budget works every frame, standing or walking.
-        let busy = (bounce && (self.bounce_busy > 0 || fixed_rays() != 0)) || self.external_pending > 0;
+        let busy = (bounce && self.bounce_busy > 0) || self.external_pending > 0;
+        if tick {
+            self.fixed_quiet = if self.fixed_moved > 0 { 0 } else { self.fixed_quiet.saturating_add(1) };
+        }
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
                 s.gathers + 2
@@ -1946,7 +1983,12 @@ impl Planner {
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
-        if view.idle_frames >= idle_after && flags == 0 && !busy {
+        // The fixed budget works until the view is still and settled, then idles as the event
+        // queue does; on a still view before that it runs in the still-view batch below (one frame
+        // in STILL_BATCH): the budget is a ceiling, not a floor.
+        let fixed_awake = bounce && fixed_rays() != 0 && !self.fixed_settled(view.idle_frames >= idle_after);
+        self.fixed_still = still_batch_on() && view.idle_frames >= STILL_BATCH;
+        if view.idle_frames >= idle_after && flags == 0 && !busy && !fixed_awake {
             return Finished { frame, plan: None };
         }
         // The still-view batch: a still view with nothing changing still creates and gathers a
@@ -2082,6 +2124,8 @@ pub(super) struct GiState {
     /// The external list's count (word 0) at the start of each encode, idle or not: what
     /// readers appended on the frame before (`Planner::external_pending`).
     external_watch: Option<FullWatch>,
+    /// The fixed budget's moved gathers and ranked rays (`Planner::fixed_moved`, `fixed_ranked`).
+    fixed_watch: Option<(FullWatch, FullWatch)>,
     /// The emitter list's capacity the next allocation takes (EMITTERS_MAX, grown by
     /// `grow_emitters`), and its listed + dropped triangles of recent builds.
     emitters_max: u32,
@@ -2312,6 +2356,7 @@ impl GiState {
             probe_log: None,
             stale_watch: None,
             external_watch: None,
+            fixed_watch: None,
             emitters_max: EMITTERS_MAX,
             emitter_watch: None,
         }
@@ -2326,6 +2371,10 @@ impl GiState {
         }
         if let Some(watch) = &mut self.external_watch {
             watch.submitted();
+        }
+        if let Some((moved, ranked)) = &mut self.fixed_watch {
+            moved.submitted();
+            ranked.submitted();
         }
         if let Some(watch) = &mut self.emitter_watch {
             watch.submitted();
@@ -4210,6 +4259,19 @@ impl Renderer {
                 self.gi.planner.external_pending = pending;
             }
         }
+        if fixed_rays() != 0 {
+            let device = &self.device;
+            let (moved, ranked) = self
+                .gi
+                .fixed_watch
+                .get_or_insert_with(|| (FullWatch::of_words(device, &[355]), FullWatch::of_words(device, &[356])));
+            if let Some(n) = moved.collect() {
+                self.gi.planner.fixed_moved = n;
+            }
+            if let Some(n) = ranked.collect() {
+                self.gi.planner.fixed_ranked = n;
+            }
+        }
         if stale_budget() != 0 {
             let device = &self.device;
             let watch = self.gi.stale_watch.get_or_insert_with(|| FullWatch::of_words(device, &[247]));
@@ -4947,6 +5009,10 @@ impl GiState {
         }
         if let (Some(watch), Some(r)) = (self.stale_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
+        }
+        if let (Some((moved, ranked)), Some(r)) = (self.fixed_watch.as_mut(), self.resources.as_ref()) {
+            moved.record(encoder, &r.work);
+            ranked.record(encoder, &r.work);
         }
         if let (Some(watch), Some(r)) = (self.emitter_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);

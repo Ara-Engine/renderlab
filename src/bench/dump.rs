@@ -293,7 +293,7 @@ impl Fixture for Dump {
         let settle = setting("LIGHTBENCH_DUMP_SETTLE", 30.0) as usize;
         let hold = if self.course { 0 } else { setting("LIGHTBENCH_DUMP_HOLD", 90.0) as usize };
         let (frames, walking) = cameras(self.course, l.eye, l.forward, settle, hold);
-        let mut series: [Vec<f64>; 5] = Default::default();
+        let mut series: [Vec<f64>; 6] = Default::default();
         let (w, h) = (l.size[0] as usize, l.size[1] as usize);
         let region = |p: &[[f32; 3]]| {
             let (x0, x1, y0, y1) = (w * 2 / 5, w * 3 / 5, h * 2 / 5, h * 3 / 5);
@@ -330,7 +330,7 @@ impl Fixture for Dump {
             }
             if walking.contains(&frame) {
                 let c = r.indirect_counters()?.unwrap_or_default();
-                for (values, v) in series.iter_mut().zip([c.rays, c.gather_rays, c.light_rays, c.created, c.bounce_queued]) {
+                for (values, v) in series.iter_mut().zip([c.rays, c.gather_rays, c.light_rays, c.created, c.bounce_queued, c.gathers]) {
                     values.push(f64::from(v));
                 }
             }
@@ -339,7 +339,10 @@ impl Fixture for Dump {
                 // Scored at arrival, until the region converges, and on the last held frame.
                 let last = k + 1 == hold;
                 let k = k as u32;
-                if k == 0 || last || converge < 0.0 {
+                // The held window's timing reads back only arrival and the last frame (a readback a
+                // frame downclocks the GPU and inflates the very passes measured).
+                let timing = std::env::var("LIGHTBENCH_DUMP_WINDOW").as_deref() == Ok("hold");
+                if k == 0 || last || (converge < 0.0 && !timing) {
                     let pixels = kit::capture_radiance(r, l.exposure)?;
                     if converge < 0.0 && (region(&pixels) / region(&reference.rgb) - 1.0).abs() <= 0.02 {
                         converge = f64::from(k);
@@ -363,9 +366,14 @@ impl Fixture for Dump {
         metrics.push(("walked_m".into(), f64::from(walked_m)));
         metrics.push(("walk_frames".into(), walking.len() as f64));
         // The bench's pass window: the walking frames, before the held ones.
-        metrics.push(("frames_measured".into(), walking.len() as f64));
-        metrics.push(("frames_after".into(), hold as f64));
-        self.series = ["rays", "gather_rays", "light_rays", "created", "queued"].into_iter().map(str::to_owned).zip(series).collect();
+        // LIGHTBENCH_DUMP_WINDOW=hold: the pass window is the held frames instead (standing cost).
+        if std::env::var("LIGHTBENCH_DUMP_WINDOW").as_deref() == Ok("hold") && hold > 0 {
+            metrics.push(("frames_measured".into(), hold as f64));
+        } else {
+            metrics.push(("frames_measured".into(), walking.len() as f64));
+            metrics.push(("frames_after".into(), hold as f64));
+        }
+        self.series = ["rays", "gather_rays", "light_rays", "created", "queued", "gathers"].into_iter().map(str::to_owned).zip(series).collect();
         Ok(metrics)
     }
     fn series(&mut self) -> Vec<(String, Vec<f64>)> {
