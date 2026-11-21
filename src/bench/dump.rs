@@ -416,7 +416,7 @@ impl Fixture for Dump {
         let settle = setting("LIGHTBENCH_DUMP_SETTLE", if self.walk == Walk::Recorded { 300.0 } else { 30.0 }) as usize;
         let hold = if self.walk == Walk::IntoView { setting("LIGHTBENCH_DUMP_HOLD", 90.0) as usize } else { 0 };
         let (frames, walking) = cameras(self.walk, &l.recorded, l.eye, l.forward, settle, hold);
-        let mut series: [Vec<f64>; 11] = Default::default();
+        let mut series: [Vec<f64>; 12] = Default::default();
         let (w, h) = (l.size[0] as usize, l.size[1] as usize);
         let region = |p: &[[f32; 3]]| {
             let (x0, x1, y0, y1) = (w * 2 / 5, w * 3 / 5, h * 2 / 5, h * 3 / 5);
@@ -469,6 +469,7 @@ impl Fixture for Dump {
                     c.gathers,
                     c.invalidated,
                     c.reshaded[0],
+                    c.reshade_skipped,
                 ]) {
                     values.push(f64::from(v));
                 }
@@ -504,7 +505,7 @@ impl Fixture for Dump {
         // The bench's pass window: the walking frames, before the held ones.
         metrics.push(("frames_measured".into(), walking.len() as f64));
         metrics.push(("frames_after".into(), hold as f64));
-        self.series = ["rays", "gather_rays", "light_rays", "created", "queued", "shades", "integrates", "traces", "gathers", "invalidated", "reshaded"]
+        self.series = ["rays", "gather_rays", "light_rays", "created", "queued", "shades", "integrates", "traces", "gathers", "invalidated", "reshaded", "reshade_skipped"]
             .into_iter()
             .map(str::to_owned)
             .zip(series)
