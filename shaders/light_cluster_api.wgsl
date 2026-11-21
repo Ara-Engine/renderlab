@@ -99,8 +99,15 @@ fn rl_local_matrix(layer:u32) -> mat4x4<f32> {
 // (RENDERLAB_LOCAL_GATHER=0: four rl_local_tap calls a tap; RENDERLAB_LOCAL_PCF=skip: no filter).
 const RL_LOCAL_GATHER:bool=true;
 const RL_LOCAL_SKIP:bool=false;
+// Physical array layer in rl_local_depth: cube lights use their cube face (0..5),
+// single-face spot lights read the packed slice stored in kind.w bits 17..19.
+fn rl_local_slice(kind_w:u32, layer:u32) -> i32 {
+    if (kind_w&0x10000u)!=0u { return i32(layer%6u); }
+    return i32((kind_w>>17u)&7u);
+}
 fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
-    // kind.w: pooled slot + 1 in the low 16 bits; bit 16 marks a six-face (cube) slot.
+    // kind.w: pooled slot + 1 in the low 16 bits; bit 16 marks a six-face (cube) slot;
+    // bits 17..19 hold a single-face spot light's physical atlas array slice (0..5).
     let slot=(light.kind.w&0xffffu)-1u;
     if slot>=LC_SLOTS { return 1.0; }
     let biased=fma(l,vec3<f32>(receiver.epsilon),shadow_origin(receiver,l));
@@ -168,7 +175,7 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
                         let coordinate=corner+vec2<i32>(i32(i),i32(j));
                         let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
                         let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
-                        let stored=textureLoad(rl_local_depth,origin+vec2<i32>(i32(i),i32(j)),i32(layer%6u),0);
+                        let stored=textureLoad(rl_local_depth,origin+vec2<i32>(i32(i),i32(j)),rl_local_slice(light.kind.w,layer),0);
                         soft+=weight*select(0.0,1.0,reference>=stored);
                     }
                 }
@@ -197,9 +204,10 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
         // Fixed components keep the 4x4 PCF block in registers. Preserve the
         // original row-major comparisons and accumulation (including each weight).
         var gathered=0.0;
+        let slice=rl_local_slice(light.kind.w,layer);
         let centre0=(vec2<f32>(first+vec2<i32>(0,0))+tile.xy+vec2<f32>(1.0))/atlas;
-        let left0=textureGather(rl_local_depth,dfg_sampler,centre0,i32(layer%6u));
-        let right0=textureGather(rl_local_depth,dfg_sampler,centre0+vec2<f32>(2.0/atlas.x,0.0),i32(layer%6u));
+        let left0=textureGather(rl_local_depth,dfg_sampler,centre0,slice);
+        let right0=textureGather(rl_local_depth,dfg_sampler,centre0+vec2<f32>(2.0/atlas.x,0.0),slice);
         {
             let coordinate=origin+vec2<i32>(0-1,0-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
@@ -257,8 +265,8 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
             gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(1,f.y);
         }
         let centre2=(vec2<f32>(first+vec2<i32>(0,2))+tile.xy+vec2<f32>(1.0))/atlas;
-        let left2=textureGather(rl_local_depth,dfg_sampler,centre2,i32(layer%6u));
-        let right2=textureGather(rl_local_depth,dfg_sampler,centre2+vec2<f32>(2.0/atlas.x,0.0),i32(layer%6u));
+        let left2=textureGather(rl_local_depth,dfg_sampler,centre2,slice);
+        let right2=textureGather(rl_local_depth,dfg_sampler,centre2+vec2<f32>(2.0/atlas.x,0.0),slice);
         {
             let coordinate=origin+vec2<i32>(0-1,2-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
@@ -380,7 +388,7 @@ fn rl_local_tap(light:Light,receiver:Receiver,biased:vec3<f32>,layer:u32,ndc:vec
         depth_scale=dot(forward,ray)/dot(other_forward,ray);
     }
     coordinate=clamp(coordinate,vec2<i32>(0),size-vec2<i32>(1));
-    let stored=textureLoad(rl_local_depth,coordinate+vec2<i32>(tile.xy),i32(use_layer%6u),0);
+    let stored=textureLoad(rl_local_depth,coordinate+vec2<i32>(tile.xy),rl_local_slice(light.kind.w,use_layer),0);
     let depth=near*far/max(near+stored*(far-near),1e-10);
     return vec2<f32>(select(0.0,1.0,reference>=stored),depth*depth_scale);
 }

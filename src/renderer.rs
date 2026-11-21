@@ -3267,6 +3267,7 @@ impl Renderer {
     fn prepare_cache_and_post(
         &mut self,
         draws: &[PreparedDraw<'_>],
+        transparent: &[Draw<'_>],
         camera: &Camera,
         color: &wgpu::Texture,
         eligible: bool,
@@ -3283,6 +3284,7 @@ impl Renderer {
         let gi_start = Instant::now();
         let result = self.prepare_gi(
             draws,
+            transparent,
             camera,
             [color.width(), color.height()],
             eligible,
@@ -3601,6 +3603,7 @@ impl Renderer {
         if lit && !split {
             self.prepare_cache_and_post(
                 draws,
+                transparent,
                 camera,
                 color,
                 traced && !temporal,
@@ -3836,7 +3839,7 @@ impl Renderer {
                     mark(&mut encoder, "cpu:late_prepare");
                     let prepare_start = Instant::now();
                     late_start = Some(prepare_start);
-                    self.prepare_cache_and_post(draws, camera, color, true, true)?;
+                    self.prepare_cache_and_post(draws, transparent, camera, color, true, true)?;
                     late_prepare = prepare_start.elapsed();
                 }
                 if streaming && !material {

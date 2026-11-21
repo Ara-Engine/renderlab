@@ -32,6 +32,14 @@ override FRESH_DIRECTIONS:u32=256u;
 const FRESH_LANES:u32=8u;
 // Receiver outside every cascade or light-space box: shaded as fully visible.
 const FRESH_SKIP:u32=0xffffffffu;
+// Opaque receiver whose viewed geometric tangent plane hides the entire sun disk:
+// every shadow ray leaves below the surface and self-intersects, so visibility is 0.
+fn fresh_back_facing(receiver:Receiver, l:vec3<f32>, slope:f32) -> bool {
+    if receiver.thin {return false;}
+    let n=select(-receiver.geometric,receiver.geometric,dot(receiver.geometric,lighting.eye-receiver.world)>=0.0);
+    let nl=dot(n,l);
+    return nl<0.0 && nl*nl>=max(1.0-nl*nl,0.0)*slope*slope;
+}
 // Visible rays among this lane's share, or FRESH_SKIP. Every lane takes the same exits.
 fn fresh_estimate(receiver:Receiver, pixel:vec2<u32>, width:u32, lane:u32) -> u32 {
     let world=receiver.world;
@@ -49,6 +57,7 @@ fn fresh_estimate(receiver:Receiver, pixel:vec2<u32>, width:u32, lane:u32) -> u3
     let origin=shadow_origin(receiver,l);
     let projected=(view.world_to_clip*vec4<f32>(origin,1.0)).xyz;
     if any(abs(projected.xy)>vec2<f32>(1.0)) || projected.z<0.0 || projected.z>1.0 {return FRESH_SKIP;}
+    if fresh_back_facing(receiver,l,view.texel.z) {return 0u;}
     let rows=transpose(view.world_to_clip);let u=normalize(rows[0].xyz);let v=normalize(rows[1].xyz);
     let seed=fresh_hash(pixel.x+pixel.y*width);
     let shift=vec2<f32>(f32(seed>>8u),f32(fresh_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);

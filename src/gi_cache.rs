@@ -1110,9 +1110,13 @@ struct Pipelines {
     scan: Owned<wgpu::ComputePipeline>,
     setup: Owned<wgpu::ComputePipeline>,
     rays: Owned<wgpu::ComputePipeline>,
+    /// Software-only specialization with `GI_SW_SEE_THROUGH = true` for scenes with static
+    /// see-through draws; opaque scenes run `rays`/`gather` with the branch folded out.
+    rays_clear: Option<Owned<wgpu::ComputePipeline>>,
     finish: Owned<wgpu::ComputePipeline>,
     integrate: Owned<wgpu::ComputePipeline>,
     gather: Owned<wgpu::ComputePipeline>,
+    gather_clear: Option<Owned<wgpu::ComputePipeline>>,
     fill_count: Owned<wgpu::ComputePipeline>,
     fill_select: Owned<wgpu::ComputePipeline>,
     emitters_build: Owned<wgpu::ComputePipeline>,
@@ -3851,34 +3855,39 @@ impl Renderer {
             ResourceKind::ShaderModule,
         );
         let layouts = self.gi.layouts.as_ref().unwrap();
-        let compute = |entry: &str, layout: &wgpu::PipelineLayout| {
-            self.ledger.own(
-                self.device
-                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(entry),
-                        layout: Some(layout),
-                        module: &module,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        cache: None,
-                    }),
-                ResourceKind::ComputePipeline,
-            )
-        };
+        let compute_with =
+            |entry: &str, layout: &wgpu::PipelineLayout, constants: &[(&str, f64)]| {
+                self.ledger.own(
+                    self.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(entry),
+                            layout: Some(layout),
+                            module: &module,
+                            entry_point: Some(entry),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants,
+                                ..Default::default()
+                            },
+                            cache: None,
+                        }),
+                    ResourceKind::ComputePipeline,
+                )
+            };
         let main = &layouts.pipelines[usize::from(software)];
         let lean_layout = &layouts.lean_pipelines[usize::from(software)];
         let lean_list = std::cell::RefCell::new(Vec::new());
         // A kernel goes on the lean layout when it validates there (it reads neither array).
-        let build = |entry: &str| {
+        let build_with = |entry: &str, constants: &[(&str, f64)]| {
             if lean() {
                 let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-                let pipeline = compute(entry, lean_layout);
+                let pipeline = compute_with(entry, lean_layout, constants);
                 if pollster::block_on(scope.pop()).is_none() {
                     return (pipeline, true);
                 }
             }
-            (compute(entry, main), false)
+            (compute_with(entry, main, constants), false)
         };
+        let build = |entry: &str| build_with(entry, &[]);
         let priority = software && priority::on();
         // The set's kernels are created at once, as many together as the process's compile slots
         // allow (one in frames; four in prepare and the bench's reload), then taken by name below.
@@ -3908,6 +3917,20 @@ impl Renderer {
             }
             pipeline
         };
+        let clear_kernel = |entry: &str| {
+            let (pipeline, lean) = build_with(entry, &[("GI_SW_SEE_THROUGH", 1.0)]);
+            if lean {
+                lean_list.borrow_mut().push((*pipeline).clone());
+            }
+            pipeline
+        };
+        let gather_entry = if priority {
+            "gi_priority_gather_empty"
+        } else if software {
+            "gi_gather_batched"
+        } else {
+            "gi_gather"
+        };
         let mut pipelines = Pipelines {
             software,
             priority: priority.then(|| priority::Pipelines::new(|name| kernel(name))),
@@ -3920,15 +3943,11 @@ impl Renderer {
             scan: kernel("gi_scan"),
             setup: kernel("gi_setup"),
             rays: kernel("gi_rays"),
+            rays_clear: software.then(|| clear_kernel("gi_rays")),
             finish: kernel("gi_finish"),
             integrate: kernel("gi_integrate"),
-            gather: kernel(if priority {
-                "gi_priority_gather_empty"
-            } else if software {
-                "gi_gather_batched"
-            } else {
-                "gi_gather"
-            }),
+            gather: kernel(gather_entry),
+            gather_clear: (software && !priority).then(|| clear_kernel(gather_entry)),
             fill_count: kernel("gi_fill_count"),
             fill_select: kernel("gi_fill_select"),
             emitters_build: kernel("gi_emitters_build"),
@@ -4122,12 +4141,13 @@ impl Renderer {
         Ok(())
     }
 
-    /// Packs every draw's software geometry; false when a draw has none.
-    /// Packs every draw's software geometry; false when a draw has none. `ids` are the draws'
+    /// Packs every draw's software geometry (plus static see-through draws for non-RT
+    /// transmission occlusion); false when an opaque draw has none. `ids` are the draws'
     /// stable ids (`gi_draw_ids`), which name each instance's material (G2).
     fn prepare_gi_geometry(
         &mut self,
         draws: &[PreparedDraw<'_>],
+        transparent: &[Draw<'_>],
         ids: &[u32],
     ) -> Result<bool, Error> {
         let mut blases = vec![];
@@ -4138,7 +4158,24 @@ impl Renderer {
             };
             blases.push(blas.clone());
         }
-        let meshes: Vec<wgpu::Buffer> = draws.iter().map(|d| (**d.mesh.vertex).clone()).collect();
+        let see_through_on = std::env::var("RENDERLAB_GI_SEE_THROUGH").as_deref() != Ok("0");
+        let mut clear_draws: Vec<(&Draw<'_>, Arc<Blas>)> = vec![];
+        if see_through_on {
+            for d in transparent {
+                if d.mesh.skin.is_some() {
+                    continue;
+                }
+                let key: &wgpu::Buffer = &d.mesh.vertex;
+                if let Some((_, blas)) = self.gi.meshes.iter().find(|(k, _)| k == key) {
+                    clear_draws.push((d, blas.clone()));
+                }
+            }
+        }
+        let meshes: Vec<wgpu::Buffer> = draws
+            .iter()
+            .map(|d| (**d.mesh.vertex).clone())
+            .chain(clear_draws.iter().map(|(d, _)| (**d.mesh.vertex).clone()))
+            .collect();
         let (covered, drawn) = self
             .gi
             .world
@@ -4149,7 +4186,8 @@ impl Renderer {
         // The world BVH is one identity instance in place of the instances it covers.
         let instances: usize = draws.iter().map(|d| d.instances.len()).sum::<usize>()
             - covered.iter().filter(|&&c| c).count()
-            + usize::from(!covered.is_empty());
+            + usize::from(!covered.is_empty())
+            + clear_draws.iter().map(|(d, _)| d.instances.len()).sum::<usize>();
         if super::change_log::enabled() {
             let why = match self.gi.packed.as_ref() {
                 None => "none".to_owned(),
@@ -4171,7 +4209,8 @@ impl Renderer {
         if self.gi.packed.as_ref().is_none_or(|p| {
             p.meshes != meshes || p.instances != instances || p.covered != covered || p.ids != ids
         }) {
-            // Pack each draw's mesh unless the world covers all its instances, then the world.
+            // Pack each draw's mesh unless the world covers all its instances, then static
+            // see-through meshes, then the world last.
             let mut entry = vec![];
             let mut refs: Vec<&Blas> = vec![];
             let mut at = 0;
@@ -4183,6 +4222,10 @@ impl Renderer {
                     refs.push(&**blas);
                     refs.len() - 1
                 }));
+            }
+            for (_, blas) in &clear_draws {
+                refs.push(&**blas);
+                entry.push(Some(refs.len() - 1));
             }
             let world = self.gi.world.as_ref().filter(|_| !covered.is_empty());
             if let Some(w) = world {
@@ -4246,13 +4289,14 @@ impl Renderer {
         let p = self.gi.packed.as_mut().unwrap();
         let mut records = vec![];
         // Per record, instance words 24-26 (G2): its material identity + 1, or for the merged
-        // world zero and its placement map's offset and length; word 27, 1 if it casts no
-        // shadow (light visibility passes through it, bounce rays still hit it).
-        let mut identities = vec![];
+        // world zero and its placement map's offset and length; word 27: bit 0 if it casts no
+        // shadow (light visibility skips it), bit 1 if see-through (words 28-30 carry packed
+        // base colour, coverage and IOR, matching hardware_shadow_gpu::write_see_through).
+        let mut extra: Vec<[u32; 8]> = vec![];
         if !p.covered.is_empty() {
             let w = &self.gi.world.as_ref().unwrap().blas;
             records.push((Mat4::IDENTITY, &**w, *p.offsets.last().unwrap(), 0));
-            identities.push([0, p.map.0, p.map.1, 0]);
+            extra.push([0, p.map.0, p.map.1, 0, 0, 0, 0, 0]);
         }
         let mut at = 0;
         for (di, ((d, blas), entry)) in draws.iter().zip(&blases).zip(&p.entry).enumerate() {
@@ -4269,19 +4313,56 @@ impl Renderer {
                     p.offsets[e],
                     blas.near_base(model, &p.near[e]),
                 ));
-                identities.push([
+                extra.push([
                     draw_identity(ids, di, ii),
                     0,
                     0,
                     u32::from(!d.instances.state.casts_shadows(ii)),
+                    0,
+                    0,
+                    0,
+                    0,
                 ]);
+            }
+        }
+        let opaque_count = records.len();
+        let pack_f16 = |a: f32, b: f32| {
+            u32::from(crate::transparency::f16_bits(a))
+                | (u32::from(crate::transparency::f16_bits(b)) << 16)
+        };
+        for ((d, blas), entry) in clear_draws.iter().zip(&p.entry[draws.len()..]) {
+            let e = entry.unwrap();
+            let (rgb, coverage, ior) = d.material.map_or(([1.0; 3], 1.0, 1.0), |m| {
+                (
+                    [m.base_color[0], m.base_color[1], m.base_color[2]],
+                    m.see_through_coverage().unwrap_or(1.0),
+                    m.transparency.map_or(1.0, |t| t.ior),
+                )
+            });
+            let words = [
+                0,
+                0,
+                0,
+                2,
+                pack_f16(rgb[0], rgb[1]),
+                pack_f16(rgb[2], coverage),
+                ior.to_bits(),
+                0,
+            ];
+            for model in &d.instances.state.models {
+                records.push((*model, &**blas, p.offsets[e], 0));
+                extra.push(words);
             }
         }
         self.gi.stats.near_instances = records.iter().filter(|r| r.3 != 0).count() as u32;
         let mut head = gi_bvh::instance_words(&records)?;
-        for (i, words) in identities.iter().enumerate() {
+        // Opaque instances live in `0..head[0]` (and feed the top-level BVH); static see-through
+        // placements sit after them in `head[0]..head[4]`, checked only when present.
+        head[0] = opaque_count as u32;
+        head[4] = records.len() as u32;
+        for (i, words) in extra.iter().enumerate() {
             let r = gi_bvh::HEADER_WORDS + i * gi_bvh::INSTANCE_WORDS + 24;
-            head[r..r + 4].copy_from_slice(words);
+            head[r..r + 8].copy_from_slice(words);
         }
         // U-RTVIS: the top level over the records (rebuilt only when they change).
         crate::instance_bvh::place(
@@ -4306,6 +4387,7 @@ impl Renderer {
     pub(super) fn prepare_gi(
         &mut self,
         draws: &[PreparedDraw<'_>],
+        transparent: &[Draw<'_>],
         camera: &Camera,
         size: [u32; 2],
         eligible: bool,
@@ -4405,7 +4487,7 @@ impl Renderer {
         }
         let ids = self.gi_draw_ids(draws);
         let geometry_start = std::time::Instant::now();
-        let run = run && (hardware || self.prepare_gi_geometry(draws, &ids)?);
+        let run = run && (hardware || self.prepare_gi_geometry(draws, transparent, &ids)?);
         if super::change_log::enabled() {
             super::change_log::report(
                 self.frames + 1,
@@ -4850,6 +4932,19 @@ impl GiState {
         let g = self.groups.as_ref().unwrap();
         let arrays = &self.arrays.as_ref().unwrap().bind;
         let lean_arrays = &self.arrays.as_ref().unwrap().lean;
+        let has_clear = self.packed.as_ref().is_some_and(|pk| {
+            pk.head.get(4).copied().unwrap_or(0) > pk.head.first().copied().unwrap_or(0)
+        });
+        let gather_pipe = if has_clear {
+            p.gather_clear.as_ref().unwrap_or(&p.gather)
+        } else {
+            &p.gather
+        };
+        let rays_pipe = if has_clear {
+            p.rays_clear.as_ref().unwrap_or(&p.rays)
+        } else {
+            &p.rays
+        };
         let layout = WorkLayout::of(r);
         if plan.clear {
             encoder.clear_buffer(&r.table, HEADER_WORDS * 4, None);
@@ -4969,7 +5064,7 @@ impl GiState {
                     if let Some(feedback) = &self.refill_feedback { feedback.after_first(encoder,&r.work); }
                     main_pass(encoder,"indirect refresh gather",&priority.gather_refresh,PROFILE_STAMPS/2,grid);
                 } else {
-                    main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
+                    main_pass(encoder,"indirect cache gather",gather_pipe,b,grid);
                 }
                 let legacy_grid = if self.priority_hold || self.priority_compact { None } else {grid};
                 main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
@@ -4979,7 +5074,7 @@ impl GiState {
                 main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
                 main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,legacy_grid);
             } else {
-                main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
+                main_pass(encoder,"indirect cache gather",gather_pipe,b,grid);
             }
             if fixed {
                 main_pass(encoder, "indirect fixed after", &p.fixed_after, u32::MAX, plan.bounce.then_some([256, 1]));
@@ -5032,7 +5127,7 @@ impl GiState {
             let setup = traced.then_some([SETUP_GROUPS, 1]);
             main_pass(encoder, "indirect cache setup", &p.setup, s + 1, setup);
             let rays = traced.then_some([RAY_GROUPS, 1]);
-            main_pass(encoder, "indirect cache rays", &p.rays, s + 2, rays);
+            main_pass(encoder, "indirect cache rays", rays_pipe, s + 2, rays);
             let finish = cells.filter(|_| traced);
             main_pass(encoder, "indirect cache finish", &p.finish, s + 3, finish);
         }

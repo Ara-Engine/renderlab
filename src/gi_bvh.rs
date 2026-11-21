@@ -12,13 +12,16 @@
 use crate::asset::cluster_bvh::Bvh;
 use crate::{Error, Mat4};
 
-/// Words before the instance records; shaders/gi_rays_software.wgsl reads the count at 0 and
-/// the top level's base and root at 1 and 2 (src/instance_bvh.rs).
+/// Words before the instance records; shaders/gi_rays_software.wgsl reads the opaque
+/// instance count at 0, the top level's base and root at 1 and 2 (src/instance_bvh.rs;
+/// word 3 is CPU refit count), and the total instance count (including trailing
+/// see-through placements in `words[0]..words[4]`) at 4.
 pub(crate) const HEADER_WORDS: usize = 16;
 /// One instance record; WGSL GI_INSTANCE_WORDS must match. Words 0-11 world-to-object
 /// rows, 12-17 world bounds, 18-21 the mesh's array offsets, 22 its root, 23 the
 /// instance's near-field mask base (0: none, the instance is traced over whole rays); 24-26
-/// its material identity (src/gi_cache.rs), 27 1 if it casts no shadow (any-hit rays skip it).
+/// its material identity (src/gi_cache.rs), 27 flags (bit 0 casts no shadow, bit 1
+/// see-through placement with packed rg, bc/coverage and ior in words 28-30).
 pub(crate) const INSTANCE_WORDS: usize = 32;
 const NODE_WORDS: usize = 16;
 const LEAF_WORDS: usize = 2;

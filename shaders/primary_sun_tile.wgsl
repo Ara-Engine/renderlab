@@ -18,20 +18,23 @@ var<workgroup> tr1_tile_votes:atomic<u32>;
 var<workgroup> tr1_tile_hints:atomic<u32>;
 // Called once per invocation in uniform control flow, before the entry's estimate. Hints:
 // 1 no usable history, 2 history lit, 4 history shadowed. Votes: 1 every probe blocked,
-// 2 every probe clear, 4 anything else. Receivers that skip (outside every cascade) or miss
-// neither hint nor vote.
+// 2 every probe clear, 4 anything else. Receivers that skip (outside every cascade), miss,
+// or are opaque back-facing (fresh_back_facing, visibility 0 without tracing) neither hint
+// nor vote so corner/silhouette tiles stay unanimous for their lit pixels.
 fn tr1_tile_vote(hit:bool,receiver:Receiver,slot:u32,pixel:vec2<u32>,width:u32) {
+    let bf=hit && lighting.count>0u && lights[0].kind.z!=0u
+        && fresh_back_facing(receiver,-lights[0].travel_outer.xyz,shadow_views[lights[0].kind.y].texel.z);
     var hint=0u;
-    if hit {hint=tr1_tile_hint(receiver,slot);atomicOr(&tr1_tile_hints,max(hint,1u));}
+    if hit && !bf {hint=tr1_tile_hint(receiver,slot);atomicOr(&tr1_tile_hints,max(hint,1u));}
     workgroupBarrier();
     let hints=atomicLoad(&tr1_tile_hints);
     tr1_tile_pause=select(TR1_TILE_PROBES,tr1_tile_hint_probes(),hints==2u || hints==4u);
     var vote=0u;
-    if hit && hint!=0u && tr1_tile_reuse() {
+    if hit && !bf && hint!=0u && tr1_tile_reuse() {
         tr1_tile_state=4u;
         tr1_tile_count=select(0u,1u,hint==2u);
         vote=select(1u,2u,hint==2u);
-    } else if hit {
+    } else if hit && !bf {
         tr1_tile_state=1u;
         let v=fresh_estimate(receiver,pixel,width,0u);
         if tr1_tile_state==2u {

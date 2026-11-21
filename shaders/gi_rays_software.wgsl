@@ -68,13 +68,38 @@ fn gi_near_base(inst:u32) -> u32 {
 fn gi_limit(best:GiHit, i:u32) -> f32 {
     return select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.hit && i<best.inst);
 }
-// One instance's part of gi_traverse: its world box, then its BVH, updating best. True when an
-// any-hit ray found a blocker.
+// See-through occlusion (docs/design-see-through-occlusion.md): static transparent placements
+// sit after the opaque records in `gi_geometry[0]..gi_geometry[4]` with packed (rg, bc, ior) in
+// words 28-30. Specialized off on scenes with no see-through placements so opaque kernels fold
+// `gi_hit_transmission = vec3(1.0)` and pay zero register/code-size overhead; when on, reuses
+// `gi_instance` and its stack after opaque traversal so no hit arrays or extra stack exist.
+override GI_SW_SEE_THROUGH:bool=false;
+var<private> gi_hit_transmission:vec3<f32>;
+fn gi_fresnel(n:f32, c:f32) -> f32 {
+    let f0=((n-1.0)/(n+1.0))*((n-1.0)/(n+1.0));
+    let u=1.0-clamp(c,0.0,1.0);
+    let u2=u*u;
+    return f0+(1.0-f0)*u2*u2*u;
+}
+fn gi_st_share(r:u32, direction:vec3<f32>, ng:vec3<f32>) -> vec3<f32> {
+    let rg=unpack2x16float(gi_geometry[r+28u]);
+    let bc=unpack2x16float(gi_geometry[r+29u]);
+    let ior=bitcast<f32>(gi_geometry[r+30u]);
+    var share=vec3<f32>(1.0-bc.y);
+    if ior>1.0 {
+        share*=(1.0-gi_fresnel(ior,abs(dot(ng,direction))))*vec3<f32>(rg,bc.x);
+    }
+    return share;
+}
+// One instance's part of gi_traverse: its world box, then its BVH. For opaque instances
+// (`st_mode == false`), updates `best` (returning true on `any_hit`). For trailing see-through
+// instances (`st_mode == true`, invoked after opaque traversal with `best.t` holding the opaque
+// hit bound), returns true on `any_hit` or multiplies pane transmission into `gi_hit_transmission`.
 fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>, tmin:f32, any_hit:bool,
-    best:ptr<function,GiHit>, stack:ptr<function,array<u32,GI_BVH_STACK>>) -> bool {
+    st_mode:bool, best:ptr<function,GiHit>, stack:ptr<function,array<u32,GI_BVH_STACK>>) -> bool {
     let r=16u+i*GI_INSTANCE_WORDS;
-    // Word 27: casts no shadow (src/gi_bvh.rs). Light visibility passes through it.
-    if any_hit && gi_geometry[r+27u]!=0u { return false; }
+    // Word 27 bit 0: instance casts no shadow (visibility rays skip it).
+    if any_hit && (gi_geometry[r+27u]&1u)!=0u { return false; }
     if !gi_slab(origin,world_inv,gi_gv(r+12u),gi_gv(r+15u),tmin,gi_limit(*best,i)) { return false; }
     let r0=vec4<f32>(gi_gv(r),gi_gf(r+3u));let r1=vec4<f32>(gi_gv(r+4u),gi_gf(r+7u));let r2=vec4<f32>(gi_gv(r+8u),gi_gf(r+11u));
     // Unnormalized object-space direction: t is the same parameter in both spaces.
@@ -114,15 +139,25 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
                     // The source-winding normal through the inverse transpose. r0-r2 are
                     // the world-to-object rows, so the matrix with them as columns is it.
                     let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b-a,c-a);
-                    *best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(ia,ib,ic),h.yz);
-                    if any_hit { return true; }
+                    if GI_SW_SEE_THROUGH && st_mode {
+                        if any_hit { (*best).hit=true; return true; }
+                        gi_hit_transmission*=gi_st_share(r,direction,unit_normal(n));
+                    } else {
+                        *best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(ia,ib,ic),h.yz);
+                        if any_hit { return true; }
+                    }
                 }
                 if two {
                     let h2=gi_triangle(o,d,a2,b2,c2,tmin,gi_limit(*best,i));
                     if h2.x>=0.0 {
                         let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b2-a2,c2-a2);
-                        *best=GiHit(true,h2.x,unit_normal(n),i,vec3<u32>(ja,jb,jc),h2.yz);
-                        if any_hit { return true; }
+                        if GI_SW_SEE_THROUGH && st_mode {
+                            if any_hit { (*best).hit=true; return true; }
+                            gi_hit_transmission*=gi_st_share(r,direction,unit_normal(n));
+                        } else {
+                            *best=GiHit(true,h2.x,unit_normal(n),i,vec3<u32>(ja,jb,jc),h2.yz);
+                            if any_hit { return true; }
+                        }
                     }
                 }
             }
@@ -171,79 +206,83 @@ const GI_TOP_STACK:u32=48u;
 const GI_TOP_WIDE:bool=true;
 const GI_TOP_NODE:u32=32u;
 fn gi_g4(i:u32) -> vec4<f32> { return vec4<f32>(gi_gf(i),gi_gf(i+1u),gi_gf(i+2u),gi_gf(i+3u)); }
-// Closest hit (or, with `any`, the first found) in (tmin, tmax) over every instance: through
-// the top-level BVH over the instances' world boxes (src/instance_bvh.rs, header word 1 its
-// base, 2 its root), or the flat list when there is none (RENDERLAB_INSTANCE_BVH=0).
-fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hit:bool) -> GiHit {
+// Closest hit (mode 0) or any hit (mode 1 sky including see-through, mode 2 opaque casters)
+// in (tmin, tmax): traverses opaque instances through the top-level BVH (src/instance_bvh.rs,
+// header word 1 its base, 2 its root) or flat list, then trailing see-through placements if any.
+fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, mode:u32) -> GiHit {
+    let any_hit=mode!=0u;
     var best=GiHit(false,tmax,vec3<f32>(0.0),0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
+    if !any_hit { gi_hit_transmission=vec3<f32>(1.0); }
     var stack:array<u32,GI_BVH_STACK>;
     let world_inv=gi_safe_inverse(direction);
     let instances=gi_geometry[0];
     let top=gi_geometry[1];
     if top==0u {
         for(var i=0u;i<instances;i+=1u) {
-            if gi_instance(i,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
+            if gi_instance(i,origin,direction,world_inv,tmin,any_hit,false,&best,&stack) { return best; }
         }
-        return best;
+    } else {
+        var nodes:array<u32,GI_TOP_STACK>;
+        nodes[0]=gi_geometry[2];
+        var sp=1u;
+        while sp>0u {
+            sp-=1u;
+            let item=nodes[sp];
+            if (item&GI_BVH_LEAF)!=0u {
+                if gi_instance(item&~GI_BVH_LEAF,origin,direction,world_inv,tmin,any_hit,false,&best,&stack) { return best; }
+                continue;
+            }
+            // The children's boxes against a bound that keeps equal-distance ties (gi_limit).
+            let n=top+item*GI_TOP_NODE;
+            let bound=select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.hit);
+            if GI_TOP_WIDE {
+                // All four boxes at once (gi_slab_near's arithmetic a lane), sorted, pushed far to near.
+                let ax=(gi_g4(n)-origin.x)*world_inv.x;let bx=(gi_g4(n+12u)-origin.x)*world_inv.x;
+                let ay=(gi_g4(n+4u)-origin.y)*world_inv.y;let by=(gi_g4(n+16u)-origin.y)*world_inv.y;
+                let az=(gi_g4(n+8u)-origin.z)*world_inv.z;let bz=(gi_g4(n+20u)-origin.z)*world_inv.z;
+                let near=max(max(max(min(ax,bx),min(ay,by)),min(az,bz)),vec4<f32>(tmin));
+                let far=min(min(min(max(ax,bx),max(ay,by)),max(az,bz)),vec4<f32>(bound));
+                var ids=vec4<u32>(gi_geometry[n+24u],gi_geometry[n+25u],gi_geometry[n+26u],gi_geometry[n+27u]);
+                var dist=select(vec4<f32>(3.4028235e38),near,(near<=far)&(ids!=vec4<u32>(GI_BVH_EMPTY)));
+                if dist.y<dist.x { dist=dist.yxzw;ids=ids.yxzw; }
+                if dist.w<dist.z { dist=dist.xywz;ids=ids.xywz; }
+                if dist.z<dist.x { dist=dist.zyxw;ids=ids.zyxw; }
+                if dist.w<dist.y { dist=dist.xwzy;ids=ids.xwzy; }
+                if dist.z<dist.y { dist=dist.xzyw;ids=ids.xzyw; }
+                if dist.w<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.w;sp+=1u; }
+                if dist.z<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.z;sp+=1u; }
+                if dist.y<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.y;sp+=1u; }
+                if dist.x<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.x;sp+=1u; }
+                continue;
+            }
+            let t0=gi_slab_near(origin,world_inv,gi_gv(n),gi_gv(n+3u),tmin,bound);
+            let t1=gi_slab_near(origin,world_inv,gi_gv(n+6u),gi_gv(n+9u),tmin,bound);
+            let c0=gi_geometry[n+12u];let c1=gi_geometry[n+13u];
+            // The nearer child is popped first.
+            let near=t0<=t1;
+            if select(t0,t1,near)<=bound && sp<GI_TOP_STACK { nodes[sp]=select(c0,c1,near);sp+=1u; }
+            if select(t1,t0,near)<=bound && sp<GI_TOP_STACK { nodes[sp]=select(c1,c0,near);sp+=1u; }
+        }
     }
-    var nodes:array<u32,GI_TOP_STACK>;
-    nodes[0]=gi_geometry[2];
-    var sp=1u;
-    while sp>0u {
-        sp-=1u;
-        let item=nodes[sp];
-        if (item&GI_BVH_LEAF)!=0u {
-            if gi_instance(item&~GI_BVH_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
-            continue;
+    if GI_SW_SEE_THROUGH && mode!=2u {
+        let st_end=gi_geometry[4];
+        for(var i=instances;i<st_end;i+=1u) {
+            if gi_instance(i,origin,direction,world_inv,tmin,any_hit,true,&best,&stack) { return best; }
         }
-        // The children's boxes against a bound that keeps equal-distance ties (gi_limit).
-        let n=top+item*GI_TOP_NODE;
-        let bound=select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.hit);
-        if GI_TOP_WIDE {
-            // All four boxes at once (gi_slab_near's arithmetic a lane), sorted, pushed far to near.
-            let ax=(gi_g4(n)-origin.x)*world_inv.x;let bx=(gi_g4(n+12u)-origin.x)*world_inv.x;
-            let ay=(gi_g4(n+4u)-origin.y)*world_inv.y;let by=(gi_g4(n+16u)-origin.y)*world_inv.y;
-            let az=(gi_g4(n+8u)-origin.z)*world_inv.z;let bz=(gi_g4(n+20u)-origin.z)*world_inv.z;
-            let near=max(max(max(min(ax,bx),min(ay,by)),min(az,bz)),vec4<f32>(tmin));
-            let far=min(min(min(max(ax,bx),max(ay,by)),max(az,bz)),vec4<f32>(bound));
-            var ids=vec4<u32>(gi_geometry[n+24u],gi_geometry[n+25u],gi_geometry[n+26u],gi_geometry[n+27u]);
-            var dist=select(vec4<f32>(3.4028235e38),near,(near<=far)&(ids!=vec4<u32>(GI_BVH_EMPTY)));
-            if dist.y<dist.x { dist=dist.yxzw;ids=ids.yxzw; }
-            if dist.w<dist.z { dist=dist.xywz;ids=ids.xywz; }
-            if dist.z<dist.x { dist=dist.zyxw;ids=ids.zyxw; }
-            if dist.w<dist.y { dist=dist.xwzy;ids=ids.xwzy; }
-            if dist.z<dist.y { dist=dist.xzyw;ids=ids.xzyw; }
-            if dist.w<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.w;sp+=1u; }
-            if dist.z<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.z;sp+=1u; }
-            if dist.y<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.y;sp+=1u; }
-            if dist.x<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.x;sp+=1u; }
-            continue;
-        }
-        let t0=gi_slab_near(origin,world_inv,gi_gv(n),gi_gv(n+3u),tmin,bound);
-        let t1=gi_slab_near(origin,world_inv,gi_gv(n+6u),gi_gv(n+9u),tmin,bound);
-        let c0=gi_geometry[n+12u];let c1=gi_geometry[n+13u];
-        // The nearer child is popped first.
-        let near=t0<=t1;
-        if select(t0,t1,near)<=bound && sp<GI_TOP_STACK { nodes[sp]=select(c0,c1,near);sp+=1u; }
-        if select(t1,t0,near)<=bound && sp<GI_TOP_STACK { nodes[sp]=select(c1,c0,near);sp+=1u; }
     }
     return best;
 }
-// The share of light the last gi_closest's ray kept through see-through surfaces before its hit:
-// always 1 on software rays until their structure carries see-through instances
-// (docs/design-see-through-occlusion.md, step 6).
-var<private> gi_hit_transmission:vec3<f32>;
 fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
-    gi_hit_transmission=vec3<f32>(1.0);
-    return gi_traverse(origin,direction,tmin,tmax,false);
+    return gi_traverse(origin,direction,tmin,tmax,0u);
 }
-// Sky visibility along an unbounded ray: any hit blocks it.
+// Sky visibility along an unbounded ray: any opaque caster or see-through pane blocks it,
+// so pane-occluded sky directions are gathered with their transmission in gi_gather.
 fn gi_visible(origin:vec3<f32>, direction:vec3<f32>) -> bool {
-    return !gi_traverse(origin,direction,0.0,1e20,true).hit;
+    return !gi_traverse(origin,direction,0.0,1e20,1u).hit;
 }
-// Visibility within tmax (a light's distance): any hit blocks it.
+// Visibility within tmax (a light's distance): opaque casters only.
 fn gi_visible_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32) -> bool {
-    return !gi_traverse(origin,direction,0.0,tmax,true).hit;
+    return !gi_traverse(origin,direction,0.0,tmax,2u).hit;
 }
 // A hit's material identity + 1 (G2), from instance word 24 (src/gi_bvh.rs instance_words);
 // a merged world (word 24 zero) maps its positions to placements through the table at word
