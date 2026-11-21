@@ -43,7 +43,7 @@ const MAX_RECTS: usize = 48;
 const PAGE: u32 = 128;
 /// The Disk mark pass's receiver counters (WGSL `vsm_reach`): four words, then (copied after
 /// the page work) the sparse pool's header words 4..11 (`POOL_*`).
-const REACH_BYTES: u64 = 48;
+const REACH_BYTES: u64 = 64;
 
 // Sparse clipmap (U-CLIPMAP, opt-in with the Disk lookup: `RENDERLAB_VSM_SPARSE=1`; the dense
 // windows are the default). It gives receivers the level their footprint wants, about 450 MiB
@@ -746,7 +746,7 @@ pub(super) struct VirtualState {
     /// The Disk mark pass's receiver counters (`Resources::reach`), read back a frame or two
     /// late (recorded while encoding, which borrows the renderer shared), tagged with the eye
     /// and the view epoch of their frame.
-    reach: std::sync::Mutex<ReadbackRing<(glam::DVec3, u32)>>,
+    reach: std::sync::Mutex<ReadbackRing<(glam::DVec3, u32, u64)>>,
     /// Exact hard edges: the edge counts' readback (`RENDERLAB_VD_EDGE_LOG`).
     edge_counts: std::sync::Mutex<ReadbackRing<()>>,
     /// The nearest receiver's distance in the current view epoch and the eye it was measured
@@ -2661,7 +2661,20 @@ impl Renderer {
         }
         // The newest mark-pass counters mapped since the last frame (the ladder's finest level
         // follows the nearest receiver when the nearest caster cannot place it).
-        if let Some(((at, epoch), words)) = state.reach.get_mut().unwrap().collect().pop() {
+        let mut collected = state.reach.get_mut().unwrap().collect();
+        // Measurement (`RENDERLAB_VSM_PAGE_LOG=<file>`): a line a page-work frame: the renderer
+        // frame, then pages rasterized because never resident or cleared, because their level's
+        // epoch moved on, and partially for moved casters, with those partial redraws' texels.
+        if let Some(path) = std::env::var_os("RENDERLAB_VSM_PAGE_LOG") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                for ((_, _, frame), words) in &collected {
+                    let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
+                    let _ = writeln!(f, "{frame} {} {} {} {}", word(12), word(13), word(14), word(15));
+                }
+            }
+        }
+        if let Some(((at, epoch, _), words)) = collected.pop() {
             let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
             state.stats.nearest_receiver = (word(0) != 0).then(|| f32::from_bits(!word(0)));
             state.stats.receivers = word(1);
@@ -4270,6 +4283,8 @@ impl Renderer {
             encoder.clear_buffer(&r.reach, 0, None);
         }
         encoder.clear_buffer(&r.render, 0, Some(slots * 4));
+        // Measurement: the page cache's redraw reasons (pool words 12..15).
+        encoder.clear_buffer(&r.pool, 48, Some(16));
         encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
         encoder.clear_buffer(&r.cull_args, 0, None);
         {
@@ -4327,7 +4342,9 @@ impl Renderer {
                 // The pool's counters ride along with the receiver counters (`REACH_BYTES`).
                 encoder.copy_buffer_to_buffer(&r.pool, 16, &r.reach, 16, 32);
             }
-            let tag = (state.eye, state.epoch);
+            encoder.copy_buffer_to_buffer(&r.pool, 48, &r.reach, 48, 16);
+            let frame = self.pass_timeline.as_ref().map_or(0, |t| t.frame());
+            let tag = (state.eye, state.epoch, frame);
             state
                 .reach
                 .lock()

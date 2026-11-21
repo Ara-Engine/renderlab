@@ -201,6 +201,11 @@ impl PassTimeline {
         })
     }
 
+    /// The frame being encoded (the log's `renderer_frame`).
+    pub(crate) fn frame(&self) -> u64 {
+        self.frame
+    }
+
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };
