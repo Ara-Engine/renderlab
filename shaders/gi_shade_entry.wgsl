@@ -258,11 +258,18 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
         if slot==0xffffffffu { continue; }
         gi_shade_out[slot]=gs_shade(slot);
         if gi_borrow_on() { gi_shade_out[gi_borrow_at(slot)]=gs_borrow; }
-        // GC1 (shared with G2c's cell shading; the line above is MP1's seam): a value whose
-        // cell still has gathers scheduled is marked as changing (w 0.75), so gathers that read
-        // it repeat (gi_gather). It depends only on the cell's state, so a mixed frame's
-        // dispatches agree whichever stored the value.
+        // GC1 (shared with G2c's cell shading; the line above is MP1's seam): encode both
+        // pending gathers and whether the cell still needs borrowed bounce in w so readers
+        // skip the gi_borrow_at(slot) load on 99%+ of hits:
+        //   0.75 / 1.0 = own bounce (changing / settled)
+        //   0.5  / 1.5 = needs borrow (changing / settled)
+        // Both depend only on the cell's state, so mixed-frame dispatches agree.
         let gs_out=gi_shade_out[slot];
-        if gs_out.w>0.0 && (gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED))!=0u { gi_shade_out[slot]=vec4<f32>(gs_out.xyz,0.75); }
+        if gs_out.w>0.0 {
+            let changing=(gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED))!=0u;
+            let needs_borrow=gi_borrow_on() && gi_word(gi_hot(slot)+GI_HOT_BOUNCE)==0u;
+            let w=select(select(1.0,0.75,changing),select(1.5,0.5,changing),needs_borrow);
+            gi_shade_out[slot]=vec4<f32>(gs_out.xyz,w);
+        }
     }
 }

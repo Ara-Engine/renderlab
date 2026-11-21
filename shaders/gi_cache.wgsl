@@ -2180,7 +2180,9 @@ fn gi_borrow_hit(world:vec3<f32>, level:u32, bin:u32, slot:u32) -> vec3<f32> {
     let last=min(level+1u+GI_BORROW_LEVELS,gi_word(GI_H_LEVELS));
     for(var l=level+1u;l<last;l+=1u) {
         let p=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
-        if p==0xffffffffu || gi_outgoing[p].w<=0.0 || (gi_table[gi_hot(p)+15u]&GI_SPLIT_HOT)!=0u { continue; }
+        if p==0xffffffffu || (gi_table[gi_hot(p)+15u]&GI_SPLIT_HOT)!=0u { continue; }
+        let lw=gi_outgoing[p].w;
+        if lw<=0.0 || lw==0.5 || lw==1.5 { continue; }
         let lender=gi_outgoing[gi_borrow_at(p)];
         if gi_borrow_own(lender) { return gi_borrow_radiance(r,lender); }
     }
@@ -2219,7 +2221,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             // A hit on an emitting draw sends its reflected light only: its emission is the
             // emitter list's (gi_emitters.wgsl), sampled as a light by every gather.
             var rgb=o.rgb;
-            if gi_borrow_on() { rgb+=gi_borrow_hit(world,l,bin,slot); }
+            if o.w==0.5 || o.w==1.5 { rgb+=gi_borrow_hit(world,l,bin,slot); }
             let reflected=max(rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
             if l>base { atomicAdd(&gi_work[select(GI_W_GATHER_COARSE_ABSENT,GI_W_GATHER_COARSE_ORPHAN,orphan)],1u); }
             return vec4<f32>(reflected,select(GI_HIT_MISSING,settled,l==base || orphan));
@@ -2328,9 +2330,9 @@ fn gi_fixed_bin(slot:u32) -> u32 {
     if gi_bounce_raw_word(slot,0u)==0u { return GI_FIXED_NONE; }
     if (state&GI_DIRTY)!=0u { return GI_FIXED_DIRTY; }
     if (state&GI_SETTLED)!=0u {
-        // On scenes with active events (movers/relights), wake 1/256 of settled cells at lowest
+        // On scenes with active events (movers/relights), wake 1/1024 of settled cells at lowest
         // priority so indirect bounce from indirect changes stays fresh; static views stay quiet.
-        if gi_frame.counts.z==0u || ((slot+frame)&255u)!=0u { return 0xffffffffu; }
+        if gi_frame.counts.z==0u || ((slot+frame)&1023u)!=0u { return 0xffffffffu; }
         return 0u;
     }
     return min((frame-(state>>GI_STAMP_SHIFT))&0xfffu,GI_FIXED_AGES);
@@ -2430,7 +2432,7 @@ var<workgroup> gi_wg_rank_buf:array<u32,64>;
         var moved=kept==GI_FIXED_UNSET && now!=GI_FIXED_UNSET;
         if kept!=GI_FIXED_UNSET && now!=GI_FIXED_UNSET {
             let a=bitcast<f32>(kept); let b=bitcast<f32>(now);
-            moved=abs(a-b)*2048.0>max(max(a,b),1e-6);
+            moved=abs(a-b)*256.0>max(max(a,b),1e-6);
         }
         if !moved { continue; }
         atomicAdd(&gi_work[GI_W_FIXED_MOVED],1u);
