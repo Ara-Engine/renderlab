@@ -633,6 +633,8 @@ struct Resources {
     pool: Owned<wgpu::Buffer>,
     /// Both layers: one 64-bit word per texel per level (normalized height << 32 | id).
     top: Owned<wgpu::Buffer>,
+    /// Measurement (`RENDERLAB_VSM_SPACER_KB`): a buffer allocated between the two layers.
+    _spacer: Option<Owned<wgpu::Buffer>>,
     peel: Owned<wgpu::Buffer>,
     /// Max-mips of the top layer's heights per level (mips 1..log2(side)).
     mips: Owned<wgpu::Buffer>,
@@ -2322,6 +2324,10 @@ impl VirtualState {
             pool,
             // COPY_SRC: the dump (`RENDERLAB_VD_DUMP`).
             top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE | B::COPY_SRC),
+            _spacer: std::env::var("RENDERLAB_VSM_SPACER_KB")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|kb| buffer("N8c clipmap spacer (measurement)", kb * 1024, B::STORAGE)),
             peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
             mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
             outline: buffer("Disk lookup outline bits", outline_bytes, B::STORAGE),
