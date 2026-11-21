@@ -3598,6 +3598,20 @@ impl Renderer {
             && s.lookup == VirtualLookup::Disk
             && !created
             && held_key == state.requests_key;
+        // Measurement (`RENDERLAB_VD_HOLD_LOG=<file>`): a line a frame: held (0/1), then the
+        // indices of the held key's words that changed since last frame (0-15 the unjittered
+        // view-projection, then the size, caster generation, rungs, sun bits, slope, receiver
+        // producer and each level's origin and epoch).
+        if let Some(path) = std::env::var_os("RENDERLAB_VD_HOLD_LOG") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let changed: Vec<String> = (0..held_key.len().max(state.requests_key.len()))
+                    .filter(|&i| held_key.get(i) != state.requests_key.get(i))
+                    .map(|i| i.to_string())
+                    .collect();
+                let _ = writeln!(f, "{} {} {}", u8::from(state.requests_held), created as u8, changed.join(","));
+            }
+        }
         state.requests_key = held_key;
         // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.
         let casters_only = !created && !rects.is_empty() && key == state.key;
