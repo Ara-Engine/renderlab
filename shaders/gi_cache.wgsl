@@ -1632,7 +1632,6 @@ fn gi_parent_bounce(slot:u32) {
     if (gi_table[ph]&GI_VALID)==0u || gi_table[ph+GI_HOT_BOUNCE]==0u { return; }
     for(var w=GI_HOT_BOUNCE;w<GI_HOT_BOUNCE+7u;w+=1u) {
         gi_table[hot+w]=gi_table[ph+w];
-        if gi_filter_on(GI_FILTER_BOUNCE) { gi_raw[gi_raw_at(slot,w)]=gi_raw[gi_raw_at(parent,w)]; }
     }
 }
 // A queue length as a uniform value: the workgroup's first invocation reads it.
@@ -2292,10 +2291,11 @@ fn gi_fixed_on() -> bool { return gi_word(GI_H_FIXED_RAYS)!=0u; }
 fn gi_fixed_trace_on() -> bool { return gi_fixed_on() && gi_word(GI_H_FIXED_TRACE)!=0u; }
 fn gi_fill_share(room:u32, h:u32) -> u32 { return select(0u,u32(f32(room)/f32(max(h,1u))*65536.0),gi_fixed_trace_on()); }
 // New cells admitted this frame under the budget: what the gathers' actual rays left of it, in
-// cells (GI_DIRECTIONS rays each), at least 64 so moving cameras always make forward progress.
+// cells (GI_DIRECTIONS rays each), reserving at least a quarter of the budget so cuts and moving
+// cameras never starve new-cell tracing.
 fn gi_fixed_fill_cap() -> u32 {
     let rays=gi_word(GI_H_FIXED_RAYS);
-    return max((rays-min(atomicLoad(&gi_work[GI_W_GATHER_RAYS]),rays))/GI_DIRECTIONS,64u);
+    return max((rays-min(atomicLoad(&gi_work[GI_W_GATHER_RAYS]),rays))/GI_DIRECTIONS,max(rays/(4u*GI_DIRECTIONS),64u));
 }
 // Unfiltered bounce word `off` (0: scale, 1..6: halves): from gi_raw while bounce filtering
 // rewrites gi_table, so GI_FILTER_FILL never hides ungathered cells and gi_fixed_after compares
@@ -2432,7 +2432,7 @@ var<workgroup> gi_wg_rank_buf:array<u32,64>;
         var moved=kept==GI_FIXED_UNSET && now!=GI_FIXED_UNSET;
         if kept!=GI_FIXED_UNSET && now!=GI_FIXED_UNSET {
             let a=bitcast<f32>(kept); let b=bitcast<f32>(now);
-            moved=abs(a-b)*256.0>max(max(a,b),1e-6);
+            moved=abs(a-b)*512.0>max(max(a,b),1e-6);
         }
         if !moved { continue; }
         atomicAdd(&gi_work[GI_W_FIXED_MOVED],1u);
@@ -2722,7 +2722,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             // Aimed rays and emitters are their own estimates and are added as they are.
             let hits=atomicLoad(&gi_wg_hits);
             let valued=atomicLoad(&gi_wg_valued);
-            let scale=select(1.0,f32(hits)/f32(valued),valued>0u && hits>valued);
+            let scale=select(1.0,min(f32(hits)/f32(valued),4.0),valued>0u && hits>valued);
             for(var j=0u;j<12u;j+=1u) {
                 gi_wg_bounce[j*GI_GATHER_LANES]=gi_wg_bounce[j*GI_GATHER_LANES]*scale+gi_wg_bounce[(12u+j)*GI_GATHER_LANES];
             }

@@ -252,6 +252,13 @@ impl TraceAbi {
     }
 }
 
+/// Edge-aware bilateral spatial filter over listed glossy pixels before additive HDR composite
+/// (`RENDERLAB_RL_DENOISE=0` falls back to the unfiltered single-pass composite).
+pub(super) fn denoise() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DENOISE").map_or(true, |v| v != "0"))
+}
+
 /// The pass's per-view resources: L (the glossy-pixel list) and its indirect arguments, the pass
 /// uniform, H and R (the room), the counters and the composite's uniform.
 pub(in crate::renderer) struct PassTargets {
@@ -262,6 +269,10 @@ pub(in crate::renderer) struct PassTargets {
     pub frame: Buffer,
     pub hits: Buffer,
     pub samples: Depth,
+    /// Scratch screen targets for the two-pass denoised composite (`denoise()`): raw strata mean
+    /// + GGX alpha (`Rgba16Float`) and octahedral lobe normal (`R32Uint`).
+    pub glossy_raw: Option<Depth>,
+    pub glossy_meta: Option<Depth>,
     /// The view's size (the room's cap is ROOM_PER_PIXEL of its pixels).
     pub size: [u32; 2],
     pub stats: Buffer,
@@ -279,6 +290,15 @@ pub(in crate::renderer) struct Readback {
     frame: std::sync::atomic::AtomicU64,
 }
 
+#[derive(Clone)]
+pub(super) struct CompositeKit {
+    scatter_layout: Owned<wgpu::BindGroupLayout>,
+    raw_pipeline: Owned<wgpu::RenderPipeline>,
+    scatter_pipeline: Owned<wgpu::RenderPipeline>,
+    filter_layout: Owned<wgpu::BindGroupLayout>,
+    filter_pipeline: Owned<wgpu::RenderPipeline>,
+}
+
 /// `rl_list_args`, `rl_trace_pixels` and `rl_hit_args`, compiled from a head's standard-program
 /// traced module, and the composite.
 #[derive(Clone)]
@@ -289,8 +309,8 @@ pub(super) struct TracePipelines {
     args: Owned<wgpu::ComputePipeline>,
     /// Which of list_args, owners, pixels and args are on the lean layouts (`lean`).
     lean: [bool; 4],
-    /// The deferred composite: its group layout and additive point pipeline.
-    composite: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>),
+    /// The deferred composite: single-pass raw fallback + two-pass denoised pipelines.
+    composite: CompositeKit,
 }
 
 impl Renderer {
@@ -326,6 +346,8 @@ impl Renderer {
                     | wgpu::BufferUsages::COPY_SRC,
             ),
             samples: self.rl_room_samples(room),
+            glossy_raw: denoise().then(|| self.rl_scratch_target(size, wgpu::TextureFormat::Rgba16Float, 8, "reflection glossy raw")),
+            glossy_meta: denoise().then(|| self.rl_scratch_target(size, wgpu::TextureFormat::R32Uint, 4, "reflection glossy meta")),
             size: [size.width, size.height],
             stats: Buffer::new(
                 self,
@@ -820,35 +842,64 @@ impl Renderer {
 
 // ---- the deferred reflection composite (RENDERLAB_RL_DEFERRED=1 with RENDERLAB_RL_PASS=1) ----
 impl Renderer {
-    /// The composite's group layout and its additive render pipeline into the HDR target.
-    fn rl_composite_kit(&self) -> (Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>) {
+    fn rl_scratch_target(&self, size: wgpu::Extent3d, format: wgpu::TextureFormat, bpp: u64, label: &'static str) -> Depth {
+        let texture = self.ledger.own(
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: size.width, height: size.height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }),
+            ResourceKind::Texture,
+        );
+        let view = self.ledger.own(texture.create_view(&Default::default()), ResourceKind::TextureView);
+        Depth {
+            texture,
+            view,
+            _allocation: self.ledger.allocate(
+                AllocationKind::Target,
+                u64::from(size.width) * u64::from(size.height) * bpp,
+            ),
+        }
+    }
+
+    /// The composite's group layouts and render pipelines (single-pass raw fallback + two-pass
+    /// edge-aware bilateral denoise into HDR).
+    fn rl_composite_kit(&self) -> CompositeKit {
         let both = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT;
-        let texture = |binding, visibility| wgpu::BindGroupLayoutEntry {
+        let texture = |binding, visibility, sample_type| wgpu::BindGroupLayoutEntry {
             binding,
             visibility,
             ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                sample_type,
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
             count: None,
         };
-        let group = self.ledger.own(
+        let float = wgpu::TextureSampleType::Float { filterable: false };
+        let uint = wgpu::TextureSampleType::Uint;
+        let glossy_list = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: both,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(LIST_HEADER + LIST_ENTRY_BYTES),
+            },
+            count: None,
+        };
+        let scatter_layout = self.ledger.own(
             self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("reflection composite"),
                 entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: both,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(LIST_HEADER + LIST_ENTRY_BYTES),
-                        },
-                        count: None,
-                    },
-                    texture(1, wgpu::ShaderStages::FRAGMENT),
-                    texture(2, both),
+                    glossy_list,
+                    texture(1, wgpu::ShaderStages::FRAGMENT, float),
+                    texture(2, both, float),
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -863,10 +914,31 @@ impl Renderer {
             }),
             ResourceKind::BindGroupLayout,
         );
-        let layout = self.ledger.own(
+        let filter_layout = self.ledger.own(
+            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("reflection composite filter"),
+                entries: &[
+                    glossy_list,
+                    texture(2, both, float),
+                    texture(4, wgpu::ShaderStages::FRAGMENT, float),
+                    texture(5, wgpu::ShaderStages::FRAGMENT, uint),
+                    texture(6, wgpu::ShaderStages::FRAGMENT, uint),
+                ],
+            }),
+            ResourceKind::BindGroupLayout,
+        );
+        let scatter_pl = self.ledger.own(
             self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("reflection composite ABI"),
-                bind_group_layouts: &[Some(&group)],
+                bind_group_layouts: &[Some(&scatter_layout)],
+                immediate_size: 0,
+            }),
+            ResourceKind::PipelineLayout,
+        );
+        let filter_pl = self.ledger.own(
+            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflection composite filter ABI"),
+                bind_group_layouts: &[Some(&filter_layout)],
                 immediate_size: 0,
             }),
             ResourceKind::PipelineLayout,
@@ -880,56 +952,78 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        let pipeline = self.ledger.own(
-            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("reflection composite"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("rl_composite_vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
+        // Colour adds; alpha (TR1's view hint) stays.
+        let additive_hdr = Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba16Float,
+            blend: Some(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
                 },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("rl_composite_fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        // Colour adds; alpha (TR1's view hint) stays.
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::Zero,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                // One point a list entry, at its pixel's centre.
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::PointList,
-                    ..Default::default()
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
                 },
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
             }),
-            ResourceKind::RenderPipeline,
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        let make_pipeline = |label, layout: &wgpu::PipelineLayout, entry, targets: &[Option<wgpu::ColorTargetState>]| {
+            self.ledger.own(
+                self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("rl_composite_vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        targets,
+                    }),
+                    // One point a list entry, at its pixel's centre.
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::PointList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+                ResourceKind::RenderPipeline,
+            )
+        };
+        let raw_pipeline = make_pipeline("reflection composite", &scatter_pl, "rl_composite_fs", &[additive_hdr.clone()]);
+        let scatter_pipeline = make_pipeline(
+            "reflection composite scatter",
+            &scatter_pl,
+            "rl_scatter_fs",
+            &[
+                Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+            ],
         );
-        (group, pipeline)
+        let filter_pipeline = make_pipeline("reflection composite filter", &filter_pl, "rl_filter_fs", &[additive_hdr]);
+        CompositeKit { scatter_layout, raw_pipeline, scatter_pipeline, filter_layout, filter_pipeline }
     }
 
-    /// The composite after reflection_hits: each listed glossy pixel's strata mean, times its
-    /// reflectance and w, added into the HDR target before TR1 (one point an entry, the draw's
-    /// count from the list's arguments).
+    /// The composite after reflection_hits: each listed glossy pixel's strata mean, optionally
+    /// edge-aware filtered across same-surface glossy neighbours, times its reflectance and w,
+    /// added into the HDR target before TR1.
     pub(crate) fn encode_reflection_composite(&self, encoder: &mut wgpu::CommandEncoder, shading: Shading) {
         let Some(state) = self.view.primary.as_ref() else {
             return;
@@ -937,13 +1031,13 @@ impl Renderer {
         let (Some(pipelines), Some(t)) = (state.rl_pipelines[shading as usize].as_ref(), state.targets.as_ref()) else {
             return;
         };
-        let (layout, pipeline) = &pipelines.composite;
+        let kit = &pipelines.composite;
         let (Some(pass), Some(deferred), Some(hdr)) = (t.rl_pass.as_ref(), t.deferred.as_ref(), self.view.hdr.as_ref()) else {
             return;
         };
-        let group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
+        let scatter_group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("reflection composite"),
-            layout,
+            layout: &kit.scatter_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: pass.list.value.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&pass.samples.view) },
@@ -951,6 +1045,62 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: pass.composite.value.as_entire_binding() },
             ],
         });
+        if let (Some(glossy_raw), Some(glossy_meta)) = (pass.glossy_raw.as_ref(), pass.glossy_meta.as_ref()) {
+            {
+                let mut scatter = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("reflection composite scatter"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &glossy_raw.view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &glossy_meta.view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                        }),
+                    ],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                scatter.set_pipeline(&kit.scatter_pipeline);
+                scatter.set_bind_group(0, &scatter_group, &[]);
+                scatter.draw_indirect(&pass.list_args.value, 16);
+            }
+            let filter_group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
+                label: Some("reflection composite filter"),
+                layout: &kit.filter_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: pass.list.value.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&deferred.0.view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&glossy_raw.view) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&glossy_meta.view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&t.hit.view) },
+                ],
+            });
+            let mut filter = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("reflection composite filter"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &hdr.resolved.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            filter.set_pipeline(&kit.filter_pipeline);
+            filter.set_bind_group(0, &filter_group, &[]);
+            filter.draw_indirect(&pass.list_args.value, 16);
+            return;
+        }
         let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("reflection composite"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -964,8 +1114,8 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        render.set_pipeline(pipeline);
-        render.set_bind_group(0, &group, &[]);
+        render.set_pipeline(&kit.raw_pipeline);
+        render.set_bind_group(0, &scatter_group, &[]);
         render.draw_indirect(&pass.list_args.value, 16);
     }
 }

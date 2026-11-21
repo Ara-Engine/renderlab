@@ -565,8 +565,12 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
 // interpolation to the pixel centre (the own sample alone at zero jitter). A surface the
 // tent misses (shown only farther out in the 3x3) starts from the radius-2 tent.
 fn tr1_spatial(p:vec2<i32>,id:u32,size:vec2<u32>)->vec4<f32> {
-    let radius=tr1.starts.z;
-    if radius<=0.0 && tr1_id(p)==id {return vec4<f32>(textureLoad(tr1_sample,tr1_map(p),0).xyz,1.0);}
+    let base_radius=tr1.starts.z;
+    if base_radius<=0.0 && tr1_id(p)==id {return vec4<f32>(textureLoad(tr1_sample,tr1_map(p),0).xyz,1.0);}
+    // On live frames (flags.x == 0), disoccluded and moving-shadow-restarted pixels start from a
+    // wider same-surface 3x3 tent to suppress 1-sample shadow/reflection grain; cold frame 0
+    // keeps tr1.starts.z unchanged.
+    let radius=select(base_radius,max(base_radius,1.85),tr1.flags.x==0u && base_radius>0.0);
     var sum=vec3<f32>(0.0);
     var w1=0.0;
     var w2=0.0;

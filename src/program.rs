@@ -1109,12 +1109,11 @@ pub(crate) struct Composed {
     pub program: Range<usize>,
 }
 
-/// The final gather (`RENDERLAB_FINAL_GATHER=1`, src/gi_receiver_pass.rs): screen probes trace
-/// the scene and pixels integrate them; no pixel reads a lighting-cache cell. Off by default
-/// until its pictures hold.
+/// The final gather (`RENDERLAB_FINAL_GATHER=0` disables, src/gi_receiver_pass.rs): screen probes
+/// trace the scene and pixels integrate them; no pixel reads a lighting-cache cell. On by default.
 pub(crate) fn final_gather() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_FINAL_GATHER").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_FINAL_GATHER").map_or(true, |v| v.trim() != "0"))
 }
 /// One module: `head` (the prelude with its visibility variant and, for traced stages,
 /// the ray helpers), the shared API, the stage API, the parameter binding when

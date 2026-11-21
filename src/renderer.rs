@@ -3863,7 +3863,7 @@ impl Renderer {
                     early_submit += self.submit_part(&mut encoder, "mesh frame, late shading");
                 }
                 mark(&mut encoder, "cpu:gi_receiver_ensure");
-                self.ensure_gi_receiver_pass(shading)?;
+                self.ensure_gi_receiver_pass(shading, camera)?;
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading, &mut mark);
                 // Visibility feeds both the optional detail probes and final shading.

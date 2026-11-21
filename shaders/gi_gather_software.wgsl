@@ -176,7 +176,7 @@ var<workgroup> gi_drain_base:u32;
             // Aimed rays and emitters are their own estimates and are added as they are.
             let hits=atomicLoad(&gi_wg_hits);
             let valued=atomicLoad(&gi_wg_valued);
-            let scale=select(1.0,f32(hits)/f32(valued),valued>0u && hits>valued);
+            let scale=select(1.0,min(f32(hits)/f32(valued),4.0),valued>0u && hits>valued);
             for(var j=0u;j<12u;j+=1u) {
                 gi_wg_bounce[j*GI_GATHER_LANES]=gi_wg_bounce[j*GI_GATHER_LANES]*scale+gi_wg_bounce[(12u+j)*GI_GATHER_LANES];
             }
@@ -217,6 +217,7 @@ var<workgroup> gi_drain_base:u32;
             } else {
                 retry=0u;
             }
+            if gi_fixed_on() && (missing!=0u || atomicLoad(&gi_wg_changing)!=0u) { left=1u; }
             gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
             gi_queue_shade(slot);
             gi_gather_done(slot,left);

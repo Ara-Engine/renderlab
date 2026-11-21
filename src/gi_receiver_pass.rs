@@ -333,13 +333,17 @@ pub(super) struct Targets {
     /// read-only in the lighting group): four words, no room for an entry.
     requests_stand_in: Option<Buffer>,
     /// The gather's own probe state (binding 31, gi_receiver_pass.wgsl fg_state), written each
-    /// frame: word 0 set while every probe traces at its full rate (`GiState::recently_changed`),
-    /// word 1 the gather's frame count (`gather_frame`); then two words a probe, zero at creation.
+    /// frame: 20-word header (recently_changed, gather_frame, bank parity, has_prev, previous VP),
+    /// then two words a probe, zero at creation.
     probe_state: Option<Buffer>,
     gather_frame: u32,
+    previous_vp: Option<glam::Mat4>,
+    size: [u32; 2],
     tiles: [u32; 2],
     blocks: [u32; 2],
 }
+/// Header words at the start of `probe_state` (gi_receiver_pass.wgsl FG_STATE_HEAD).
+const FG_STATE_HEAD: u64 = 20;
 /// The final gather's probe tile in pixels and probe size in bytes (gi_receiver_pass.wgsl
 /// FG_TILE, FgProbe).
 const FG_TILE: u32 = 16;
@@ -365,8 +369,8 @@ impl Renderer {
                 "GI prepared receiver",
                 u64::from(size.width) * u64::from(size.height) * BYTES
                     + if program::final_gather() {
-                        (u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS * 2
-                            + u64::from(size.width.div_ceil(FG_BLOCK)) * u64::from(size.height.div_ceil(FG_BLOCK)))
+                        (u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS * 3
+                            + u64::from(size.width.div_ceil(FG_BLOCK)) * u64::from(size.height.div_ceil(FG_BLOCK)) * 2)
                             * FG_PROBE_BYTES
                     } else {
                         0
@@ -406,16 +410,18 @@ impl Renderer {
                 Buffer::new(
                     self,
                     "final gather probe state",
-                    8 + probes * 8,
+                    FG_STATE_HEAD * 4 + probes * 8,
                     wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 )
             }),
             gather_frame: 0,
+            previous_vp: None,
+            size: [size.width, size.height],
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
             blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
         }
     }
-    pub(crate) fn ensure_gi_receiver_pass(&mut self, shading: Shading) -> Result<(), Error> {
+    pub(crate) fn ensure_gi_receiver_pass(&mut self, shading: Shading, camera: &Camera) -> Result<(), Error> {
         if !enabled(&self.device) {
             return Ok(());
         }
@@ -455,17 +461,33 @@ impl Renderer {
             let reuse = built && !moved && still && lean && target.computed && table.is_some() && target.table == table;
             self.queue.write_buffer(&keys.value, 0, &u32::from(reuse).to_ne_bytes());
         }
+        let current_vp = camera.matrix(target.size[0], target.size[1]);
         if gathers {
             self.gi.request_external();
             self.gi.request_emitters();
             if let Some(state) = &target.probe_state {
-                let words = [u32::from(self.gi.recently_changed()), target.gather_frame];
+                let reset = self
+                    .view
+                    .reconstruction_state
+                    .as_ref()
+                    .is_some_and(|s| s.plan.reset);
+                let prev = target.previous_vp.filter(|_| !reset && !moved);
+                let mut words = [0u32; FG_STATE_HEAD as usize];
+                words[0] = u32::from(self.gi.recently_changed());
+                words[1] = target.gather_frame;
+                words[2] = target.gather_frame & 1;
+                words[3] = u32::from(prev.is_some());
+                let m = prev.unwrap_or(current_vp).to_cols_array();
+                for (i, f) in m.iter().enumerate() {
+                    words[4 + i] = f.to_bits();
+                }
                 self.queue.write_buffer(&state.value, 0, &words.iter().flat_map(|w| w.to_ne_bytes()).collect::<Vec<_>>());
             }
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
         target.gather_frame = target.gather_frame.wrapping_add(1);
+        target.previous_vp = Some(current_vp);
         target.table = table;
         target.clear_keys = moved && target.keys.is_some();
         target.region = region;
@@ -583,7 +605,7 @@ impl Renderer {
             let group = self.ledger.own(
                 self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("final gather, group 2"),
-                    entries: &[storage(30, 16), storage(31, 8)],
+                    entries: &[storage(30, 16), storage(31, FG_STATE_HEAD * 4)],
                 }),
                 ResourceKind::BindGroupLayout,
             );

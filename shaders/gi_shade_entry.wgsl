@@ -266,7 +266,7 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
         // Both depend only on the cell's state, so mixed-frame dispatches agree.
         let gs_out=gi_shade_out[slot];
         if gs_out.w>0.0 {
-            let changing=(gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED))!=0u;
+            let changing=(gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED|GI_DIRTY))!=0u;
             let needs_borrow=gi_borrow_on() && gi_word(gi_hot(slot)+GI_HOT_BOUNCE)==0u;
             let w=select(select(1.0,0.75,changing),select(1.5,0.5,changing),needs_borrow);
             gi_shade_out[slot]=vec4<f32>(gs_out.xyz,w);

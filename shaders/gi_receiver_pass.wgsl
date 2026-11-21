@@ -134,15 +134,26 @@ const FG_SH_VECS:u32=10u;
 const FG_BOUNCE:u32=28u;
 struct FgProbe { sh:array<vec4<f32>,10>, point:vec4<f32>, normal:vec4<f32> };
 fn fg_at(index:u32,size:vec2<u32>)->u32 { return size.x*size.y+4u*index; }
-fn fg_adaptive(block:vec2<u32>,size:vec2<u32>)->u32 {
+// Double-buffered unfiltered probes (bank 0 and bank 1) followed by one filtered copy of the
+// current frame's tile probes, so fg_trace and fg_adapt can reproject from the previous frame's
+// bank without racing writes to the current frame's bank.
+fn fg_bank_stride(size:vec2<u32>)->u32 {
     let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
     let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
-    return tiles.x*tiles.y*FG_SLOTS+block.y*blocks.x+block.x;
+    return tiles.x*tiles.y*FG_SLOTS+blocks.x*blocks.y;
 }
-fn fg_filtered(index:u32,size:vec2<u32>)->u32 {
+fn fg_write_bank()->u32 { return fg_state[2]&1u; }
+fn fg_read_bank()->u32 { return 1u-(fg_state[2]&1u); }
+fn fg_tile_at(tile_slot:u32,size:vec2<u32>,bank:u32)->u32 {
+    return bank*fg_bank_stride(size)+tile_slot;
+}
+fn fg_adaptive_in(block:vec2<u32>,size:vec2<u32>,bank:u32)->u32 {
     let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
     let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
-    return tiles.x*tiles.y*FG_SLOTS+blocks.x*blocks.y+index;
+    return bank*fg_bank_stride(size)+tiles.x*tiles.y*FG_SLOTS+block.y*blocks.x+block.x;
+}
+fn fg_filtered(tile_slot:u32,size:vec2<u32>)->u32 {
+    return 2u*fg_bank_stride(size)+tile_slot;
 }
 fn fg_load(index:u32,size:vec2<u32>)->FgProbe {
     let at=fg_at(index,size);
@@ -192,9 +203,10 @@ const FG_ANSWERED:u32=27u;
 fn fg_hash(x:u32)->u32 {
     var h=x*0x9e3779b1u;h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;h*=0xc2b2ae35u;h^=h>>16u;return h;
 }
-// A covered pixel's receiver for the gather: point, viewed geometric normal, shading normal,
-// trace epsilon and placement + 1 (0: none).
-struct FgSurface { world:vec3<f32>, normal:vec3<f32>, shading:vec3<f32>, epsilon:f32, placement:u32 };
+// A covered pixel's receiver for the gather: point, previous-frame world point (for motion
+// reprojection), viewed geometric normal, shading normal, trace epsilon, placement + 1 (0: none),
+// and whether the placement moved or is skinned this frame.
+struct FgSurface { world:vec3<f32>, prev_world:vec3<f32>, normal:vec3<f32>, shading:vec3<f32>, epsilon:f32, placement:u32, moved:bool };
 fn fg_surface(id:vec2<u32>,size:vec2<u32>)->FgSurface { return fg_surface_at(id,size,true); }
 // fg_surface, without the shading normal (left as the geometric one) unless `shading`.
 fn fg_surface_at(id:vec2<u32>,size:vec2<u32>,shading:bool)->FgSurface {
@@ -208,7 +220,21 @@ fn fg_surface_at(id:vec2<u32>,size:vec2<u32>,shading:bool)->FgSurface {
     let b=primary_input(hit.batch,hit.ib,hit.placement);
     let c=primary_input(hit.batch,hit.ic,hit.placement);
     let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
-    s.world=world_position(receiver_point(a.position,b.position,c.position,w),hit.placement).xyz;
+    let local_p=receiver_point(a.position,b.position,c.position,w);
+    s.world=world_position(local_p,hit.placement).xyz;
+    let half=arrayLength(&models)/2u;
+    var rigid_moved=false;
+    s.prev_world=s.world;
+    if hit.placement<half {
+        let cur_m=models[hit.placement];
+        let prev_m=models[half+hit.placement];
+        rigid_moved=any(bitcast<vec4<u32>>(cur_m[0])!=bitcast<vec4<u32>>(prev_m[0]))
+            || any(bitcast<vec4<u32>>(cur_m[1])!=bitcast<vec4<u32>>(prev_m[1]))
+            || any(bitcast<vec4<u32>>(cur_m[2])!=bitcast<vec4<u32>>(prev_m[2]))
+            || any(bitcast<vec4<u32>>(cur_m[3])!=bitcast<vec4<u32>>(prev_m[3]));
+        if rigid_moved { s.prev_world=(prev_m*vec4<f32>(local_p,1.0)).xyz; }
+    }
+    s.moved=rigid_moved || batch_skinned(primary_batch_info(hit.batch));
     let g=unit_normal(primary_geometric(a.position,b.position,c.position,hit.placement));
     s.normal=select(-g,g,dot(g,lighting.eye-s.world)>=0.0);
     s.shading=s.normal;
@@ -340,8 +366,76 @@ fn fg_touch(slot:u32) {
 // usual change (fg_note_change). Word 1 is the gather's frame count (fg_frame).
 const FG_STABLE:u32=4u;
 const FG_STABLE_RATE:u32=4u;
+// Header words in fg_state ahead of the per-probe pairs:
+//   0: recently_changed (1 forces full update rate)
+//   1: gather_frame
+//   2: bank parity (0 or 1; write bank = parity, read bank = 1 - parity)
+//   3: has_prev (1 when words 4..20 hold a valid previous-frame unjittered view-projection)
+//   4..20: previous unjittered view-projection mat4x4<f32> (column-major bitcast u32)
+const FG_STATE_HEAD:u32=20u;
 @group(2) @binding(31) var<storage,read_write> fg_state:array<u32>;
-fn fg_state_at(index:u32)->u32 { return 2u+2u*index; }
+fn fg_state_at(index:u32)->u32 { return FG_STATE_HEAD+2u*index; }
+fn fg_previous_vp()->mat4x4<f32> {
+    return mat4x4<f32>(
+        vec4<f32>(bitcast<f32>(fg_state[4]),bitcast<f32>(fg_state[5]),bitcast<f32>(fg_state[6]),bitcast<f32>(fg_state[7])),
+        vec4<f32>(bitcast<f32>(fg_state[8]),bitcast<f32>(fg_state[9]),bitcast<f32>(fg_state[10]),bitcast<f32>(fg_state[11])),
+        vec4<f32>(bitcast<f32>(fg_state[12]),bitcast<f32>(fg_state[13]),bitcast<f32>(fg_state[14]),bitcast<f32>(fg_state[15])),
+        vec4<f32>(bitcast<f32>(fg_state[16]),bitcast<f32>(fg_state[17]),bitcast<f32>(fg_state[18]),bitcast<f32>(fg_state[19])),
+    );
+}
+// Projects a world point into previous-frame pixel coordinates (z > 0 when inside the screen).
+fn fg_reproject_pixel(world:vec3<f32>,size:vec2<u32>)->vec3<f32> {
+    if fg_state[3]==0u {return vec3<f32>(0.0,0.0,-1.0);}
+    let clip=fg_previous_vp()*vec4<f32>(world,1.0);
+    if clip.w<=1e-6 {return vec3<f32>(0.0,0.0,-1.0);}
+    let ndc=clip.xy/clip.w;
+    if any(abs(ndc)>vec2<f32>(1.0)) {return vec3<f32>(0.0,0.0,-1.0);}
+    let uv=vec2<f32>(ndc.x*0.5+0.5,0.5-ndc.y*0.5);
+    return vec3<f32>(uv*vec2<f32>(size),1.0);
+}
+// Best matching previous-frame tile probe in read_bank for surface `s` (0xffffffffu if none).
+fn fg_find_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
+    let rp=fg_reproject_pixel(s.prev_world,size);
+    if rp.z<=0.0 {return 0xffffffffu;}
+    let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
+    let base=vec2<i32>(floor(rp.xy/f32(FG_TILE)-vec2<f32>(0.5)));
+    let bank=fg_read_bank();
+    var best=0.0;
+    var chosen=0xffffffffu;
+    for(var k=0u;k<4u*FG_SLOTS;k+=1u) {
+        let o=vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
+        let t=clamp(base+o,vec2<i32>(0),tiles-vec2<i32>(1));
+        let idx=fg_tile_at(u32(t.y*tiles.x+t.x)*FG_SLOTS+k/4u,size,bank);
+        let p=fg_plane(idx,size);
+        let tol=0.5*FG_PLANE*max(footprint,p.normal.w);
+        if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.9 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
+        let score=fg_on_plane(p,s.prev_world,s.normal)*p.point.w;
+        if score>best {best=score;chosen=idx;}
+    }
+    return chosen;
+}
+// Best matching previous-frame adaptive (or tile fallback) probe in read_bank for surface `s`.
+fn fg_find_prev_adapt(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
+    let rp=fg_reproject_pixel(s.prev_world,size);
+    if rp.z<=0.0 {return 0xffffffffu;}
+    let blocks=vec2<i32>((size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK);
+    let base=vec2<i32>(floor(rp.xy/f32(FG_BLOCK)-vec2<f32>(0.5)));
+    let bank=fg_read_bank();
+    var best=0.0;
+    var chosen=0xffffffffu;
+    for(var k=0u;k<4u;k+=1u) {
+        let o=vec2<i32>(i32(k&1u),i32(k>>1u));
+        let b=clamp(base+o,vec2<i32>(0),blocks-vec2<i32>(1));
+        let idx=fg_adaptive_in(vec2<u32>(b),size,bank);
+        let p=fg_plane(idx,size);
+        let tol=0.5*FG_PLANE*max(footprint,p.normal.w);
+        if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.9 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
+        let score=fg_on_plane(p,s.prev_world,s.normal)*p.point.w;
+        if score>best {best=score;chosen=idx;}
+    }
+    if chosen!=0xffffffffu {return chosen;}
+    return fg_find_prev_tile(s,size,footprint);
+}
 // The gather's own frame count, written by the CPU every frame (word 1 of fg_state): its tile
 // picks, ray directions and half-rate checkerboard turn with it. They turned with
 // primary_frame.sided.y, which is TR1's direction rotation (8 * (frame % 32), 0 with TR1 off):
@@ -519,35 +613,53 @@ fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:ve
 // blending in at 1/FG_HISTORY an update (a light switched on under settled probes reached 0.75
 // of its light 48 frames later), and the probe does not turn stable while far from it.
 const FG_RESTART:f32=4.0;
-// Folds the lanes from `first` (summed into that row by fg_reduce) into probe `index`, now at s:
-// history while the new point stays on the old probe's plane.
-fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
+// Folds the lanes from `first` (summed into that row by fg_reduce) into probe `write_index`
+// (in write_bank), continuing from `prev_index` (in read_bank, 0xffffffffu when none) and
+// recording change state at `state_index`.
+fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
     var sh:array<f32,40>;
     var nee:array<f32,12>;
     // fg_reduce left each sum in the probe's first row.
     for(var i=0u;i<40u;i+=1u) {sh[i]=fg_lane_sh[first][i];}
     for(var i=0u;i<12u;i+=1u) {nee[i]=fg_nee_sh[first][i];}
+    let footprint=fg_footprint(pixel,size,s.world);
+    let has_old=prev_index!=0xffffffffu;
+    var old:FgProbe;
+    if has_old {old=fg_load(prev_index,size);}
+    let answered=sh[FG_ANSWERED];
+    // Zero-answer guard: when every hemisphere ray hit an unshaded cache cell (e.g. frame 0 in a
+    // tight corner), preserve valid on-plane history or invalidate rather than storing pitch-black.
+    if answered<=0.0 {
+        if has_old && old.point.w>0.0 {
+            var kept=old;
+            kept.point=vec4<f32>(s.world,old.point.w);
+            kept.normal=vec4<f32>(s.normal,footprint);
+            fg_store(write_index,size,kept);
+        } else {
+            fg_invalidate(write_index,size);
+        }
+        return;
+    }
     // Uniform hemisphere: pdf 1/(2 pi), over the rays with an answer (the others stand for their
     // average). The emitter samples were divided by the full ray count's scale (fg_nee).
-    let scale=6.283185307179586/max(sh[FG_ANSWERED],1.0);
+    let scale=6.283185307179586/answered;
     sh[FG_ANSWERED]=0.0;
     for(var i=0u;i<40u;i+=1u) {sh[i]*=scale;}
     for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]+=nee[i]*(6.283185307179586/f32(FG_HEMI));}
-    let footprint=fg_footprint(pixel,size,s.world);
-    let old=fg_load(index,size);
+    let max_hist=select(FG_HISTORY,8.0,s.moved);
     var count=1.0;
-    if old.point.w>0.0 && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*footprint {
-        count=min(old.point.w+1.0,FG_HISTORY);
+    if has_old && old.point.w>0.0 {
+        count=min(old.point.w+1.0,max_hist);
     }
     var fresh:array<vec4<f32>,10>;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {fresh[v]=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);}
-    if fg_note_change(index,fresh,old,count,s.normal) {count=min(count,FG_RESTART);}
+    if fg_note_change(state_index,fresh,old,count,s.normal) {count=min(count,FG_RESTART);}
     let blend=1.0/count;
     var out:FgProbe;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=select(fresh[v],mix(old.sh[v],fresh[v],blend),count>1.0);}
     out.point=vec4<f32>(s.world,count);
     out.normal=vec4<f32>(s.normal,footprint);
-    fg_store(index,size,out);
+    fg_store(write_index,size,out);
 }
 @compute @workgroup_size(32) fn fg_trace(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
@@ -597,26 +709,34 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
             }
         }
     }
-    let index=tile*FG_SLOTS+slot;
-    // Half rate: on alternate frames, a checkerboard of tiles keeps a probe that has history and
-    // still lies on the plane under its tile (fg_accumulate's test), instead of tracing it. A
-    // stable probe (fg_state) traces one frame in FG_STABLE_RATE.
-    let old=fg_plane(index,size);
-    let at=fg_state_at(index);
+    let tile_slot=tile*FG_SLOTS+slot;
+    let write_idx=fg_tile_at(tile_slot,size,fg_write_bank());
+    let footprint=select(0.0,fg_footprint(pixel,size,s.world),s.placement!=0u);
+    let prev_idx=select(0xffffffffu,fg_find_prev_tile(s,size,footprint),s.placement!=0u);
+    // Half rate: on alternate frames, a checkerboard of tiles carries forward a reprojected probe
+    // that has history on its plane instead of tracing it. Moving surfaces always trace.
+    let old_w=select(0.0,fg_plane(prev_idx,size).point.w,prev_idx!=0xffffffffu);
+    let at=fg_state_at(tile_slot);
     let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0xffu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
     let turn=select((group.x+group.y+frame)&1u,(group.x+2u*group.y+frame)%FG_STABLE_RATE,stable);
-    let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old.point.w>=FG_HALF_MIN
-        && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*old.normal.w;
+    let keep=FG_HALF_RATE && turn!=0u && !s.moved && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
     if keep {traced.placement=0u;}
-    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
+    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(tile_slot^(frame*0x27d4eb2fu)));
     workgroupBarrier();
     fg_reduce(lane);
     workgroupBarrier();
     fg_count_rays(lane);
-    if lane%FG_RAYS!=0u || any(group.xy>=tiles) || keep {return;}
-    if s.placement==0u {fg_invalidate(index,size);return;}
-    fg_accumulate(index,size,slot*FG_RAYS,s,pixel);
+    if lane%FG_RAYS!=0u || any(group.xy>=tiles) {return;}
+    if s.placement==0u {fg_invalidate(write_idx,size);return;}
+    if keep {
+        var carried=fg_load(prev_idx,size);
+        carried.point=vec4<f32>(s.world,carried.point.w);
+        carried.normal=vec4<f32>(s.normal,footprint);
+        fg_store(write_idx,size,carried);
+        return;
+    }
+    fg_accumulate(write_idx,prev_idx,tile_slot,size,slot*FG_RAYS,s,pixel);
 }
 // The tile probes around a pixel on its plane, bilinear by tile position: weighted SH and the
 // weights' sum.
@@ -643,16 +763,18 @@ fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface,sh:bool)->f32 {
 // One thread per tile: both slots' filtered copies. A neighbour weighs its agreement with the
 // probe's plane (fg_on_plane at the probe's point and normal), a Gaussian in tile distance and
 // its frames of history; the probe itself weighs its own frames.
-const FG_FILTER_SHORT:f32=4.0;
+const FG_FILTER_SHORT:f32=6.0;
 @compute @workgroup_size(8,4) fn fg_filter(@builtin(global_invocation_id) grid:vec3<u32>) {
     let size=textureDimensions(primary_hit);
     let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
     let own=vec2<i32>(grid.xy);
     if any(own>=tiles) {return;}
+    let bank=fg_write_bank();
     for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
-        let index=u32(own.y*tiles.x+own.x)*FG_SLOTS+slot;
+        let tile_slot=u32(own.y*tiles.x+own.x)*FG_SLOTS+slot;
+        let index=fg_tile_at(tile_slot,size,bank);
         let c=fg_plane(index,size);
-        if c.point.w<=0.0 {fg_invalidate(fg_filtered(index,size),size);continue;}
+        if c.point.w<=0.0 {fg_invalidate(fg_filtered(tile_slot,size),size);continue;}
         let reach=select(1,2,c.point.w<=FG_FILTER_SHORT);
         let sigma=f32(reach)*0.75;
         fg_clear();
@@ -663,7 +785,7 @@ const FG_FILTER_SHORT:f32=4.0;
                 let t=own+vec2<i32>(x,y);
                 if any(t<vec2<i32>(0)) || any(t>=tiles) {continue;}
                 for(var k=0u;k<FG_SLOTS;k+=1u) {
-                    let at=u32(t.y*tiles.x+t.x)*FG_SLOTS+k;
+                    let at=fg_tile_at(u32(t.y*tiles.x+t.x)*FG_SLOTS+k,size,bank);
                     if at==index {continue;}
                     let p=fg_plane(at,size);
                     let w=fg_on_plane(p,c.point.xyz,c.normal.xyz)*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*p.point.w;
@@ -676,7 +798,7 @@ const FG_FILTER_SHORT:f32=4.0;
         var out:FgProbe;
         out.point=c.point;out.normal=c.normal;
         for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=fg_sum[v]/total;}
-        fg_store(fg_filtered(index,size),size,out);
+        fg_store(fg_filtered(tile_slot,size),size,out);
     }
 }
 var<workgroup> fg_orphan:atomic<u32>;
@@ -701,7 +823,7 @@ fn fg_pick_at(index:u32,size:vec2<u32>)->u32 { return gi_prepared[fg_at(index,si
     workgroupBarrier();
     if lane!=0u {return;}
     let pick=atomicLoad(&fg_orphan);
-    let index=fg_adaptive(group.xy,size);
+    let index=fg_adaptive_in(group.xy,size,fg_write_bank());
     let at=fg_at(index,size)+2u;
     let c=gi_prepared[at];
     let stored=select(pick&63u,FG_NONE,pick==FG_NONE);
@@ -713,13 +835,16 @@ var<workgroup> fg_pair:array<u32,2>;
 // trace block b's probe; a pair with no pick exits before any shading.
 @compute @workgroup_size(32) fn fg_adapt(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
+    let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
     let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
     let frame=fg_frame();
     let b=lane/FG_RAYS;
     let block=vec2<u32>(group.x*2u+b,group.y);
     let inside=all(block<blocks);
-    let index=fg_adaptive(min(block,blocks-vec2<u32>(1u)),size);
-    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);atomicStore(&fg_asked[b],0u);atomicStore(&fg_rays[b],0u);}
+    let clamped=min(block,blocks-vec2<u32>(1u));
+    let write_idx=fg_adaptive_in(clamped,size,fg_write_bank());
+    let state_idx=tiles.x*tiles.y*FG_SLOTS+clamped.y*blocks.x+clamped.x;
+    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(write_idx,size),inside);atomicStore(&fg_asked[b],0u);atomicStore(&fg_rays[b],0u);}
     let pair=workgroupUniformLoad(&fg_pair);
     if pair[0]==FG_NONE && pair[1]==FG_NONE {return;}
     let pick=pair[b];
@@ -729,43 +854,56 @@ var<workgroup> fg_pair:array<u32,2>;
         pixel=block*FG_BLOCK+vec2<u32>(pick%FG_BLOCK,pick/FG_BLOCK);
         s=fg_surface_at(pixel,size,false);
     }
-    // Half rate, as the tile probes (fg_trace): on alternate frames a checkerboard of blocks keeps
-    // a probe that has history and still lies on the plane under its pick, instead of tracing it.
-    let old=fg_plane(index,size);
-    let keep=FG_HALF_RATE && ((block.x+block.y+frame)&1u)==1u && s.placement!=0u && old.point.w>=FG_HALF_MIN
-        && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*old.normal.w;
+    let footprint=select(0.0,fg_footprint(pixel,size,s.world),s.placement!=0u);
+    let prev_idx=select(0xffffffffu,fg_find_prev_adapt(s,size,footprint),s.placement!=0u);
+    // Half rate, as the tile probes (fg_trace): on alternate frames a checkerboard of blocks
+    // carries forward a reprojected probe with history on its plane. Moving surfaces always trace.
+    let old_w=select(0.0,fg_plane(prev_idx,size).point.w,prev_idx!=0xffffffffu);
+    let keep=FG_HALF_RATE && ((block.x+block.y+frame)&1u)==1u && !s.moved && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
     if keep {traced.placement=0u;}
-    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
+    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(state_idx^(frame*0x27d4eb2fu)));
     workgroupBarrier();
     fg_reduce(lane);
     workgroupBarrier();
     fg_count_rays(lane);
-    if lane%FG_RAYS!=0u || pick==FG_NONE || s.placement==0u || keep {return;}
-    fg_accumulate(index,size,b*FG_RAYS,s,pixel);
+    if lane%FG_RAYS!=0u || pick==FG_NONE {return;}
+    if s.placement==0u {fg_invalidate(write_idx,size);return;}
+    if keep {
+        var carried=fg_load(prev_idx,size);
+        carried.point=vec4<f32>(s.world,carried.point.w);
+        carried.normal=vec4<f32>(s.normal,footprint);
+        fg_store(write_idx,size,carried);
+        return;
+    }
+    fg_accumulate(write_idx,prev_idx,state_idx,size,b*FG_RAYS,s,pixel);
 }
 @compute @workgroup_size(8,4) fn fg_resolve(@builtin(global_invocation_id) grid:vec3<u32>) {
     let id=grid.xy+primary_region.xy;
     let size=textureDimensions(primary_hit);
     let s=fg_surface(id,size);
     if s.placement==0u {return;}
+    let bank=fg_write_bank();
     fg_clear();
     var total=fg_tiles(id,size,s,true);
     if total<=1e-4 {
-        // No tile probe on this plane: the adaptive probes around it, bilinear by block.
+        // No tile probe on this plane: 3x3 history- and plane-weighted spatial filter over the
+        // surrounding adaptive probes, eliminating single-probe noise on curved limbs and edges.
         let blocks=vec2<i32>((size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK);
         let f=(vec2<f32>(id)+vec2<f32>(0.5))/f32(FG_BLOCK)-vec2<f32>(0.5);
-        let base=vec2<i32>(floor(f));
-        let fr=f-floor(f);
-        for(var k=0u;k<4u;k+=1u) {
-            let o=vec2<i32>(i32(k&1u),i32(k>>1u));
-            let b=clamp(base+o,vec2<i32>(0),blocks-vec2<i32>(1));
-            let index=fg_adaptive(vec2<u32>(b),size);
-            let bilinear=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
-            let w=max(bilinear,1e-3)*fg_on_plane(fg_plane(index,size),s.world,s.normal);
-            if w<=1e-6 {continue;}
-            fg_add(index,size,w);
-            total+=w;
+        let own_b=clamp(vec2<i32>(id/FG_BLOCK),vec2<i32>(0),blocks-vec2<i32>(1));
+        for(var y=-1;y<=1;y+=1) {
+            for(var x=-1;x<=1;x+=1) {
+                let b=own_b+vec2<i32>(x,y);
+                if any(b<vec2<i32>(0)) || any(b>=blocks) {continue;}
+                let index=fg_adaptive_in(vec2<u32>(b),size,bank);
+                let p=fg_plane(index,size);
+                let d=vec2<f32>(b)-f;
+                let w=exp(-dot(d,d)*0.5)*fg_on_plane(p,s.world,s.normal)*max(p.point.w,1.0);
+                if w<=1e-6 {continue;}
+                fg_add(index,size,w);
+                total+=w;
+            }
         }
     }
     if total<=1e-4 {
@@ -789,7 +927,7 @@ var<workgroup> fg_pair:array<u32,2>;
         if best<=0.05 {
             best=0.0;
             for(var k=0u;k<FG_SLOTS+1u;k+=1u) {
-                let index=select(fg_filtered(u32(own.y*tiles.x+own.x)*FG_SLOTS+k,size),fg_adaptive(id/FG_BLOCK,size),k==FG_SLOTS);
+                let index=select(fg_filtered(u32(own.y*tiles.x+own.x)*FG_SLOTS+k,size),fg_adaptive_in(id/FG_BLOCK,size,bank),k==FG_SLOTS);
                 let p=fg_plane(index,size);
                 if p.point.w<=0.0 {continue;}
                 let facing=dot(p.normal.xyz,s.normal);
