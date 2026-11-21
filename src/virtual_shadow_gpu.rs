@@ -43,7 +43,7 @@ const MAX_RECTS: usize = 48;
 const PAGE: u32 = 128;
 /// The Disk mark pass's receiver counters (WGSL `vsm_reach`): four words, then (copied after
 /// the page work) the sparse pool's header words 4..11 (`POOL_*`).
-const REACH_BYTES: u64 = 64;
+const REACH_BYTES: u64 = 64 + MAX_LEVELS as u64 * ARGS_BYTES;
 
 // Sparse clipmap (U-CLIPMAP, opt-in with the Disk lookup: `RENDERLAB_VSM_SPARSE=1`; the dense
 // windows are the default). It gives receivers the level their footprint wants, about 450 MiB
@@ -2670,7 +2670,9 @@ impl Renderer {
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                 for ((_, _, frame), words) in &collected {
                     let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
-                    let _ = writeln!(f, "{frame} {} {} {} {}", word(12), word(13), word(14), word(15));
+                    let levels = (0..MAX_LEVELS).map(|l| 16 + l * (ARGS_BYTES as usize / 4));
+                    let (sw, hw): (u32, u32) = levels.fold((0, 0), |(s, h), b| (s + word(b + 3), h + word(b + 5)));
+                    let _ = writeln!(f, "{frame} {} {} {} {} {sw} {hw}", word(12), word(13), word(14), word(15));
                 }
             }
         }
@@ -4343,6 +4345,8 @@ impl Renderer {
                 encoder.copy_buffer_to_buffer(&r.pool, 16, &r.reach, 16, 32);
             }
             encoder.copy_buffer_to_buffer(&r.pool, 48, &r.reach, 48, 16);
+            // Measurement: each level's raster arguments (software clusters, hardware instances).
+            encoder.copy_buffer_to_buffer(&casters.work, 0, &r.reach, 64, MAX_LEVELS as u64 * ARGS_BYTES);
             let frame = self.pass_timeline.as_ref().map_or(0, |t| t.frame());
             let tag = (state.eye, state.epoch, frame);
             state
