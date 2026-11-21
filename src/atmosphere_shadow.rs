@@ -12,11 +12,13 @@ impl VirtualState {
 pub(crate) fn atmosphere_source() -> String {
     // Reuse the owner's frame ABI and coordinate helpers verbatim. No walks, page
     // requests, cache writes or triangle/material bindings enter the fog module.
-    let definitions = include_str!("../shaders/virtual_shadow.wgsl")
-        .split("// ---- Page requests")
-        .next()
-        .unwrap()
-        .replace("@binding(0)", "@binding(21)");
+    let definitions = with_pitch(
+        include_str!("../shaders/virtual_shadow.wgsl")
+            .split("// ---- Page requests")
+            .next()
+            .unwrap()
+            .replace("@binding(0)", "@binding(21)"),
+    );
     // The sparse clipmap (vsm_sparse): the page state's epochs sit at the table index, and the
     // top word in the entry's physical page, which must hold this absolute page (its tag).
     let access = include_str!("../shaders/atmosphere_shadow_virtual.wgsl");
@@ -26,8 +28,8 @@ pub(crate) fn atmosphere_source() -> String {
             "let slot=vsm_vpage(level,page);",
         )
         .replace(
-            "let word=at_shadow_top[(level*side+cell.y)*side+cell.x];",
-            "var index=(level*side+cell.y)*side+cell.x;\n        \
+            "let word=at_shadow_top[(level*side+cell.y)*vsm_pitch()+cell.x];",
+            "var index=(level*side+cell.y)*vsm_pitch()+cell.x;\n        \
              if vsm_sparse() {\n            \
              let physical=at_shadow_pages[vsm_section(2u)+slot];\n            \
              if physical==VSM_NONE || at_shadow_pages[vsm_section(1u)+slot]!=vsm_tag(level,page) { continue; }\n            \

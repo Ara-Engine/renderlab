@@ -345,7 +345,9 @@ pub(super) struct LocalMaps {
     prepared_clear: Option<Arc<Owned<wgpu::RenderPipeline>>>,
     retired: Vec<(u64, Atlas)>,
     pub generation: u64,
-    /// Each slot's map content (light placement, settings and casters), None to redraw.
+    /// Each slot's whole-sphere cache key (fast skip when no caster in the light's sphere moved).
+    slot_keys: Vec<Option<[u8; 32]>>,
+    /// Each layer's (slot * 6 + face) map content key, None to redraw that face.
     keys: Vec<Option<[u8; 32]>>,
     slots: Vec<Option<u32>>,
     strengths: Vec<f32>,
@@ -360,6 +362,7 @@ impl LocalMaps {
             prepared_clear: None,
             retired: vec![],
             generation: 0,
+            slot_keys: vec![],
             keys: vec![],
             slots: vec![],
             strengths: vec![],
@@ -632,7 +635,8 @@ impl Renderer {
                 let old = std::mem::replace(&mut shared.atlas, next);
                 shared.retired.push((self.submissions, old));
                 shared.generation += 1;
-                shared.keys = vec![None; count as usize];
+                shared.slot_keys = vec![None; count as usize];
+                shared.keys = vec![None; count as usize * 6];
             }
             // Hash each caster once, then include only intersecting casters in a map's
             // key. A distant moving object no longer invalidates the entire atlas.
@@ -671,18 +675,21 @@ impl Renderer {
             }
             for (slot, light) in slots.iter().enumerate() {
                 let Some(light) = *light else {
-                    shared.keys[slot] = None;
+                    shared.slot_keys[slot] = None;
+                    shared.keys[slot * 6..(slot + 1) * 6].fill(None);
                     continue;
                 };
                 let Some(tile) = shared.tiles[slot] else {
+                    shared.slot_keys[slot] = None;
+                    shared.keys[slot * 6..(slot + 1) * 6].fill(None);
                     continue;
                 };
                 let (centre, radius) = lc::sphere(&lights[light as usize]).unwrap();
-                let mut casters = vec![];
+                let mut sphere_casters = vec![];
                 let mut scene = Sha256::new();
-                for (d, i, b, key) in &candidates {
+                for (c, (_, _, b, key)) in candidates.iter().enumerate() {
                     if centre.distance_squared(centre.clamp(b.min, b.max)) <= radius * radius {
-                        casters.push((*d, *i));
+                        sphere_casters.push(c);
                         scene.update(key);
                     }
                 }
@@ -690,49 +697,65 @@ impl Renderer {
                 let record = &self.lighting.pending.records
                     [light as usize * crate::lighting::LIGHT_BYTES..]
                     [..crate::lighting::LIGHT_BYTES];
-                let key: [u8; 32] = Sha256::new()
+                let slot_base = Sha256::new()
                     .chain_update(&record[..32])
                     .chain_update((light as u32).to_ne_bytes())
+                    .chain_update((faces[slot] as u32).to_ne_bytes())
                     .chain_update(tile.x.to_ne_bytes())
                     .chain_update(tile.y.to_ne_bytes())
                     .chain_update(tile.size.to_ne_bytes())
                     .chain_update(state.settings.near.to_ne_bytes())
-                    .chain_update(state.settings.resolution.to_ne_bytes())
-                    .chain_update(scene)
-                    .finalize()
-                    .into();
-                if shared.keys[slot] == Some(key) {
+                    .chain_update(state.settings.resolution.to_ne_bytes());
+                let slot_key: [u8; 32] = slot_base.clone().chain_update(scene).finalize().into();
+                if shared.slot_keys[slot] == Some(slot_key) {
                     continue;
                 }
-                shared.keys[slot] = Some(key);
+                shared.slot_keys[slot] = Some(slot_key);
+                for face in faces[slot]..6 {
+                    shared.keys[slot * 6 + face] = None;
+                }
+                // Per-face caching: a moving caster inside a point light's sphere only
+                // invalidates the cube faces whose clip volume intersects its old or new bounds.
                 for face in 0..faces[slot] {
                     let layer = (slot * 6 + face) as u32;
-                    self.queue.write_buffer(
-                        shared.atlas.uniforms.as_ref().unwrap(),
-                        u64::from(layer) * shared.atlas.stride,
-                        &matrix_bytes(layers[layer as usize]),
-                    );
-                    uploads.shadows += 64;
-                    uploads.write_calls += 1;
+                    let matrix = layers[layer as usize];
                     // LC3: a cube face needs only casters that reach its own clip
                     // volume. Reuse M2's conservative rounding envelope; never LOD or
                     // shorten the caster set to meet a timing budget.
-                    let volume = crate::visibility::ClipVolume::new(&layers[layer as usize]);
-                    let face_casters: Vec<_> = casters
-                        .iter()
-                        .copied()
-                        .filter(|&(d, i)| {
-                            let draw = &draws[d];
-                            volume.may_be_visible(&crate::visibility::HomogeneousWorldBounds::new(
-                                &draw.instances.state.models[i as usize],
-                                &draw.mesh.bounds,
-                            ))
-                        })
-                        .collect();
+                    let volume = crate::visibility::ClipVolume::new(&matrix);
+                    let mut face_casters = vec![];
+                    let mut face_hash = slot_base
+                        .clone()
+                        .chain_update((face as u32).to_ne_bytes())
+                        .chain_update(matrix_bytes(matrix));
+                    for &c in &sphere_casters {
+                        let (d, i, _, key) = &candidates[c];
+                        let draw = &draws[*d];
+                        if volume.may_be_visible(&crate::visibility::HomogeneousWorldBounds::new(
+                            &draw.instances.state.models[*i as usize],
+                            &draw.mesh.bounds,
+                        )) {
+                            face_casters.push((*d, *i));
+                            face_hash.update(key);
+                        }
+                    }
+                    let face_key: [u8; 32] = face_hash.finalize().into();
+                    if shared.keys[layer as usize] == Some(face_key) {
+                        continue;
+                    }
+                    shared.keys[layer as usize] = Some(face_key);
+                    self.queue.write_buffer(
+                        shared.atlas.uniforms.as_ref().unwrap(),
+                        u64::from(layer) * shared.atlas.stride,
+                        &matrix_bytes(matrix),
+                    );
+                    uploads.shadows += 64;
+                    uploads.write_calls += 1;
                     redraw.push((layer, face_casters));
                 }
             }
         } else {
+            shared.slot_keys.iter_mut().for_each(|k| *k = None);
             shared.keys.iter_mut().for_each(|k| *k = None);
         }
         let stats = &mut state.stats;
@@ -819,12 +842,22 @@ impl Renderer {
             pass.dispatch_workgroups(lc::CLUSTERS.div_ceil(64), 1, 1);
         }
         let state = &self.local_maps;
-        for (layer, casters) in &frame.redraw {
+        // Batch all dirty tiles sharing a cube-face array layer into one render pass
+        // (at most 6 passes instead of one per face): tiles are disjoint rectangles, so
+        // clearing every dirty tile on the face then drawing all casters is exact.
+        for face in 0..state.atlas.layers.len() {
+            if !frame
+                .redraw
+                .iter()
+                .any(|(layer, _)| *layer as usize % 6 == face)
+            {
+                continue;
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("LC1 local shadow face"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &state.atlas.layers[*layer as usize % 6],
+                    view: &state.atlas.layers[face],
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -833,39 +866,59 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            let tile = state.tiles[*layer as usize / 6].unwrap();
-            pass.set_viewport(
-                tile.x as f32,
-                tile.y as f32,
-                tile.size as f32,
-                tile.size as f32,
-                0.0,
-                1.0,
-            );
-            pass.set_scissor_rect(tile.x, tile.y, tile.size, tile.size);
             pass.set_pipeline(state.atlas.clear.as_ref().unwrap());
-            pass.draw(0..3, 0..1);
+            for (layer, _) in &frame.redraw {
+                if *layer as usize % 6 != face {
+                    continue;
+                }
+                let tile = state.tiles[*layer as usize / 6].unwrap();
+                pass.set_viewport(
+                    tile.x as f32,
+                    tile.y as f32,
+                    tile.size as f32,
+                    tile.size as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(tile.x, tile.y, tile.size, tile.size);
+                pass.draw(0..3, 0..1);
+            }
             pass.set_pipeline(&self.pipeline.shadow);
-            pass.set_bind_group(0, &*state.atlas.binds[*layer as usize], &[]);
             let (mut instances, mut material, mut mesh) = (None, None, None);
-            for &(d, slot) in casters {
-                let draw = &draws[d];
-                let bind: &wgpu::BindGroup = &draw.instances.bind;
-                if changed(&mut instances, bind) {
-                    pass.set_bind_group(1, bind, &[]);
+            for (layer, casters) in &frame.redraw {
+                if *layer as usize % 6 != face || casters.is_empty() {
+                    continue;
                 }
-                let bind: &wgpu::BindGroup = &draw
-                    .material
-                    .unwrap_or(self.default_material.as_ref().unwrap())
-                    .bind;
-                if changed(&mut material, bind) {
-                    pass.set_bind_group(2, bind, &[]);
+                let tile = state.tiles[*layer as usize / 6].unwrap();
+                pass.set_viewport(
+                    tile.x as f32,
+                    tile.y as f32,
+                    tile.size as f32,
+                    tile.size as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(tile.x, tile.y, tile.size, tile.size);
+                pass.set_bind_group(0, &*state.atlas.binds[*layer as usize], &[]);
+                for &(d, slot) in casters {
+                    let draw = &draws[d];
+                    let bind: &wgpu::BindGroup = &draw.instances.bind;
+                    if changed(&mut instances, bind) {
+                        pass.set_bind_group(1, bind, &[]);
+                    }
+                    let bind: &wgpu::BindGroup = &draw
+                        .material
+                        .unwrap_or(self.default_material.as_ref().unwrap())
+                        .bind;
+                    if changed(&mut material, bind) {
+                        pass.set_bind_group(2, bind, &[]);
+                    }
+                    if changed(&mut mesh, draw.mesh) {
+                        pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+                        pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                    }
+                    pass.draw_indexed(0..draw.mesh.index_count, 0, slot..slot + 1);
                 }
-                if changed(&mut mesh, draw.mesh) {
-                    pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-                    pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-                }
-                pass.draw_indexed(0..draw.mesh.index_count, 0, slot..slot + 1);
             }
         }
     }

@@ -1258,7 +1258,7 @@ fn pitch_pad() -> u32 {
     *PAD.get_or_init(|| std::env::var("RENDERLAB_VSM_PITCH_PAD").ok().and_then(|v| v.parse().ok()).unwrap_or(32))
 }
 /// `source` with the row padding `pitch_pad` sets.
-fn with_pitch(source: String) -> String {
+pub(crate) fn with_pitch(source: String) -> String {
     const PAD: &str = "const VSM_PITCH_PAD:u32=32u;";
     if pitch_pad() == 32 || !source.contains(PAD) {
         return source;

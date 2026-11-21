@@ -26,7 +26,7 @@ fn rl_hit_sun_map(receiver:Receiver, l:vec3<f32>)->f32 {
         var slot=(level*pages+page.y)*pages+page.x;
         if vsm_sparse() { slot=vsm_vpage(level,page); }
         if rl_hs_pages[slot]!=vsm.levels[level].info.x { continue; }
-        var index=(level*size+cell.y)*size+cell.x;
+        var index=(level*size+cell.y)*vsm_pitch()+cell.x;
         if vsm_sparse() {
             let physical=rl_hs_pages[vsm_section(2u)+slot];
             if physical==VSM_NONE || rl_hs_pages[vsm_section(1u)+slot]!=vsm_tag(level,page) { continue; }
