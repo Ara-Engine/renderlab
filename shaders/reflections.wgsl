@@ -119,14 +119,11 @@ const RL_FAR:f32=1.0e6;
 // rays (one ray, the exact image) are never bound.
 const RL_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 // Glossy strata follow the reflectance the program declares (`SpecularLobe.weight`, the
-// luminance its `shade` multiplies `specular_incident` by): a lobe weighted RL_FULL_STRATA or
-// more traces all its strata, a weaker one proportionally fewer, at least one. Each stratum
-// reaches the image scaled by that weight, so a weak reflector's extra grain is that much
-// fainter, and TR1 averages it over frames. Every lobe in the traced bands still traces, so
-// no pixel switches between traced and untraced as the view or the scene moves. On Glint's
-// start view (a stone deck in the glossy band) shading falls from 25 to 12 ms with 98% of
-// the pixels unchanged (U-SKIP). RENDERLAB_RL_FULL_STRATA overrides it (src/program.rs).
-const RL_FULL_STRATA:f32=0.5;
+// luminance its `shade` multiplies `specular_incident` by): at 4 strata (`RL_GLOSSY_MAX=4`),
+// physical dielectrics (F0 = 0.04) and semi-metallics trace all 4 strata so the lone-stratum
+// firefly clamp stays active and rough glossy plates never drop to 1 unfiltered ray/pixel.
+// Near-zero-weight lobes still scale down smoothly. RENDERLAB_RL_FULL_STRATA overrides it.
+const RL_FULL_STRATA:f32=0.04;
 
 var<private> rl_specular:vec4<f32>;
 // Shading a reflection hit: light visibility traces its own shadow ray (rl_hit_shadow),

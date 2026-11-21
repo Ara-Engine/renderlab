@@ -101,17 +101,23 @@ struct RlScatterOut { @location(0) raw:vec4<f32>, @location(1) normal_oct:u32 };
     let size=vec2<i32>(textureDimensions(rl_glossy_raw));
     let id=textureLoad(rl_primary_hit,p,0).x;
     let n=rl_oct_decode(b.x);
-    let wide=rough>=0.18;
-    let rad=select(1,2,wide);
+    let rad=select(select(1,2,rough>=0.16),3,rough>=0.22);
     let sigma=select(
-        mix(0.65,1.15,clamp((rough-0.08)/0.10,0.0,1.0)),
-        mix(1.20,1.80,clamp((rough-0.18)/0.22,0.0,1.0)),
-        wide
+        select(
+            mix(0.65,1.10,clamp((rough-0.08)/0.08,0.0,1.0)),
+            mix(1.15,1.65,clamp((rough-0.16)/0.06,0.0,1.0)),
+            rough>=0.16
+        ),
+        mix(1.75,2.40,clamp((rough-0.22)/0.20,0.0,1.0)),
+        rough>=0.22
     );
     let inv2s2=0.5/(sigma*sigma);
     let inv_alpha=2.0/max(alpha,0.02);
     var sum=center.rgb;
     var wsum=1.0;
+    var top_rgb=center.rgb;
+    var top_luma=dot(max(center.rgb,vec3<f32>(0.0)),RL_LUMA);
+    var top_w=1.0;
     for(var y=-rad;y<=rad;y+=1) {
         for(var x=-rad;x<=rad;x+=1) {
             if x==0 && y==0 {continue;}
@@ -122,12 +128,24 @@ struct RlScatterOut { @location(0) raw:vec4<f32>, @location(1) normal_oct:u32 };
             if textureLoad(rl_primary_hit,q,0).x!=id {continue;}
             let nq=rl_oct_decode(textureLoad(rl_glossy_meta,q,0).x);
             let ndot=dot(n,nq);
-            if ndot<0.80 {continue;}
+            if ndot<0.85 {continue;}
             let n2=ndot*ndot;
             let n4=n2*n2;
             let w=exp(-f32(x*x+y*y)*inv2s2-abs(rq.a-alpha)*inv_alpha)*n4*n4;
+            let l=dot(max(rq.rgb,vec3<f32>(0.0)),RL_LUMA);
+            if l>top_luma {top_luma=l;top_rgb=rq.rgb;top_w=w;}
             sum+=rq.rgb*w;
             wsum+=w;
+        }
+    }
+    // Suppress a single stray firefly tap from splattering across the filter footprint while
+    // leaving genuine multi-pixel bright reflections (bars, rings, area lights) untouched.
+    let rest_w=wsum-top_w;
+    if rest_w>=3.0 && top_luma>1e-5 {
+        let rest_mean=max(dot(max(sum-top_rgb*top_w,vec3<f32>(0.0)),RL_LUMA)/rest_w,0.0);
+        let cap=3.5*rest_mean;
+        if top_luma>cap && rest_mean>1e-5 {
+            sum-=top_rgb*top_w*(1.0-cap/top_luma);
         }
     }
     return vec4<f32>(reflectance.a*reflectance.rgb*(sum/wsum),0.0);
