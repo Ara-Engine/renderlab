@@ -26,6 +26,7 @@ const GI_W_TRACE_PARTIAL:u32=215u;
 // Counts the cell once (before gi_queue_shade sets GI_SHADE), then queues it.
 fn gi_queue_shade_cause(slot:u32, cause:u32) {
     if (gi_table[gi_cold(slot)+GI_C_STATE]&GI_SHADE)==0u { atomicAdd(&gi_work[GI_W_SHADE_CAUSE+cause],1u); }
+    if cause==GI_SHADE_MOVER { gi_queue_reshade(slot); return; }
     gi_queue_shade(slot);
 }
 fn gi_queue_shade(slot:u32) {",
@@ -54,7 +55,7 @@ const CACHE: [(&str, &str); 7] = [
     ),
     (
         "            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
-            gi_queue_shade(slot);
+            gi_queue_reshade(slot);
         }
     }",
         "            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;

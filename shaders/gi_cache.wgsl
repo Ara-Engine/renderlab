@@ -952,14 +952,38 @@ fn gi_queue_integrate(slot:u32) {
 // Whether this frame's program reflects light, so gathers and cell shading run.
 fn gi_bounce_on() -> bool { return gi_word(GI_H_BOUNCE)!=0u; }
 // Queues a cell for this frame's cell shading once (GI_SHADE, cleared by gi_light). Every
-// caller handles the cell in one thread.
+// caller handles the cell in one thread. Its callers changed what the cell's shading reads
+// (its sky, its bounce, or the lights themselves), so with GI_H_TRICKLE the cell is marked
+// GI_SHADE_FULL: shaded, and filtered (gi_filter), whatever its light visibility.
 fn gi_queue_shade(slot:u32) {
+    gi_queue_cell(slot,gi_trickle());
+}
+// Queues a cell once, marking it GI_SHADE_FULL when `full` (the mark stays once set this frame).
+fn gi_queue_cell(slot:u32, full:bool) {
     let cold=gi_cold(slot);
-    let state=gi_table[cold+GI_C_STATE];
+    let state=gi_table[cold+GI_C_STATE]|select(0u,GI_SHADE_FULL,full);
+    gi_table[cold+GI_C_STATE]=state;
     if (state&GI_SHADE)!=0u { return; }
     gi_table[cold+GI_C_STATE]=state|GI_SHADE;
     let at=atomicAdd(&gi_work[GI_W_SHADES],1u);
     if at<gi_frame.offsets.x { atomicStore(&gi_work[gi_frame.bounce.w+at],slot); }
+}
+// GI_H_TRICKLE (src/gi_cache.rs trickle_on; RENDERLAB_GI_TRICKLE=0 turns it off): cell shading
+// and the filter follow what changed. A cell a moved caster's swept box reaches (gi_light_reached)
+// is queued without GI_SHADE_FULL: its sky and bounce are unchanged, so it is never filtered,
+// and gi_light drops it from the shading queue when its new light visibility equals the old,
+// since its outgoing radiance would then be rewritten with the same value. Before, the player's
+// character reshaded about 61,000 cells a frame on Outpost's walk, each lit, shaded and filtered
+// with its eight neighbours (sunrt's bench, 21 Nov). The reach test also ends a local light's ray
+// at the light, so a box beyond the light reaches nothing.
+const GI_H_TRICKLE:u32=47u;
+const GI_SHADE_FULL:u32=16u;
+const GI_W_RESHADE_SKIPPED:u32=370u;
+const GI_SHADE_SKIP:u32=0xffffffffu;
+fn gi_trickle() -> bool { return gi_word(GI_H_TRICKLE)!=0u; }
+// Queues a cell a moved caster reached: as gi_queue_shade without GI_SHADE_FULL.
+fn gi_queue_reshade(slot:u32) {
+    gi_queue_cell(slot,false);
 }
 // Schedules at least `gathers` gathers of a cell on the next frames, queueing it for next
 // frame's once (GI_BQUEUED). An event reaching the cell sets the schedule; it is not a count
@@ -1733,6 +1757,13 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
 }
 
 // ---- event scan ----
+// The distance along (o, d) at which the ray enters the box (0 from inside); only meaningful
+// where gi_box_hit holds.
+fn gi_box_near(o:vec3<f32>, d:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>) -> f32 {
+    let inv=vec3<f32>(1.0)/d;
+    let a=(lo-o)*inv;let b=(hi-o)*inv;
+    return max(max(max(min(a.x,b.x),min(a.y,b.y)),min(a.z,b.z)),0.0);
+}
 fn gi_box_hit(o:vec3<f32>, d:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>) -> bool {
     let inv=vec3<f32>(1.0)/d;
     let a=(lo-o)*inv;let b=(hi-o)*inv;
@@ -1887,7 +1918,7 @@ fn gi_count_read(at:u32, cold:u32) {
             atomicAdd(&gi_work[GI_W_RESHADED],1u);
             gi_count_read(GI_W_RESHADED_READ,cold);
             gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
-            gi_queue_shade(slot);
+            gi_queue_reshade(slot);
         }
     }
     // A changing map re-integrates one fixed slot group a frame (src/gi_cache.rs
@@ -1920,7 +1951,16 @@ fn gi_light_reached(slot:u32) -> bool {
     let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
     let edge=c.edge;
     let origin=q+n*gi_origin_offset(q,edge);
-    let lights_n=lighting.count;
+    for(var l=0u;l<lighting.count;l+=1u) {
+        if !gi_light_affects(l,q,n) { continue; }
+        if gi_light_crossed(l,origin,q,edge,mask) { return true; }
+    }
+    return false;
+}
+// Whether light l's ray from `origin` (the query point q's ray origin) meets a moved caster's
+// swept box among `mask`'s (gi_box_mask); with GI_H_TRICKLE only between the cell and the light.
+fn gi_light_crossed(l:u32, origin:vec3<f32>, q:vec3<f32>, edge:f32, mask:vec4<u32>) -> bool {
+    let d=gi_light_direction(l,q);
     for(var w=0u;w<4u;w+=1u) {
       var bits=mask[w];
       while bits!=0u {
@@ -1929,10 +1969,7 @@ fn gi_light_reached(slot:u32) -> bool {
         if b>=gi_frame.counts.x { break; }
         let pad=vec3<f32>(1e-3*edge+1e-4);
         let lo=gi_frame.boxes[b*2u].xyz-pad;let hi=gi_frame.boxes[b*2u+1u].xyz+pad;
-        for(var l=0u;l<lights_n;l+=1u) {
-            if !gi_light_affects(l,q,n) { continue; }
-            if gi_box_hit(origin,gi_light_direction(l,q).xyz,lo,hi) { return true; }
-        }
+        if gi_box_hit(origin,d.xyz,lo,hi) && (!gi_trickle() || gi_box_near(origin,d.xyz,lo,hi)<=d.w) { return true; }
       }
     }
     return false;
@@ -1957,7 +1994,11 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
         let slot=atomicLoad(&gi_work[gi_frame.bounce.w+i]);
         let cold=gi_cold(slot);
         let state=gi_table[cold+GI_C_STATE];
-        gi_table[cold+GI_C_STATE]=(state&~GI_SHADE)|select(0u,GI_LIGHTS_KNOWN,gi_word(GI_H_LIGHT_REUSE)!=0u);
+        gi_table[cold+GI_C_STATE]=(state&~(GI_SHADE|GI_SHADE_FULL))|select(0u,GI_LIGHTS_KNOWN,gi_word(GI_H_LIGHT_REUSE)!=0u);
+        // GI_H_TRICKLE: only a moved caster queued it (no GI_SHADE_FULL), so only its light
+        // visibility can differ; unchanged, its shading is skipped (GI_SHADE_SKIP).
+        let reach_only=gi_trickle() && (state&GI_SHADE_FULL)==0u;
+        var same=true;
         // A cell whose light visibility is known keeps it: nothing that changes it has happened
         // since (a new or re-traced cell, a relight, a moved caster crossing one of its light
         // rays: each clears GI_LIGHTS_KNOWN). Most cells shaded in motion are shaded again only
@@ -1968,17 +2009,29 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
         let edge=gi_edge(gi_table[cold+GI_C_DEF]&0xffu);
         let origin=q+n*gi_origin_offset(q,edge);
         var traced=0u;
+        // A moved caster's reshade re-traces only the lights whose ray crosses a moved box; the
+        // others keep their bits (nothing on their rays moved).
+        var mask=vec4<u32>(0u);
+        if reach_only { mask=gi_box_mask(gi_cell(slot).centre,0.75*edge); }
         for(var first=0u;first<lighting.count;first+=32u) {
+            let old=gi_table[cold+GI_C_LIGHTS+(first>>5u)];
             var bits=0u;
             for(var l=first;l<min(first+32u,lighting.count);l+=1u) {
                 if !gi_light_affects(l,q,n) { continue; }
+                let bit=1u<<(l-first);
+                if reach_only && !gi_light_crossed(l,origin,q,edge,mask) { bits|=old&bit; continue; }
                 let d=gi_light_direction(l,q);
                 traced+=1u;
-                if gi_visible_within(origin,d.xyz,d.w) { bits|=1u<<(l-first); }
+                if gi_visible_within(origin,d.xyz,d.w) { bits|=bit; }
             }
+            same=same && gi_table[cold+GI_C_LIGHTS+(first>>5u)]==bits;
             gi_table[cold+GI_C_LIGHTS+(first>>5u)]=bits;
         }
         atomicAdd(&gi_work[GI_W_LIGHT_RAYS],traced);
+        if reach_only && same {
+            atomicStore(&gi_work[gi_frame.bounce.w+i],GI_SHADE_SKIP);
+            atomicAdd(&gi_work[GI_W_RESHADE_SKIPPED],1u);
+        }
     }
 }
 // Requests the cell (level, bin, cell) for this frame's claim rounds, as the probe lists a
@@ -2762,12 +2815,20 @@ fn gi_filter_mark() -> u32 { return gi_word(GI_H_FRAME)%0x3fffffffu+1u; }
         let c=atomicLoad(&gi_work[gi_frame.bounce.w+i/9u]);
         let j=i%9u;
         if (gi_table[gi_hot(c)]&GI_VALID)==0u { continue; }
+        // GI_H_TRICKLE: a cell queued only because a moved caster reached it kept its sky and
+        // bounce, so neither it nor its neighbours have a new filtered value.
+        if gi_trickle() && (gi_table[gi_cold(c)+GI_C_STATE]&GI_SHADE_FULL)==0u { continue; }
         var slot=c;
         if j!=4u {
             let cold=gi_cold(c);
             let def=gi_table[cold+GI_C_DEF];
             slot=gi_filter_neighbour(def&0xffu,def>>8u,gi_point(cold),gi_unpack_normal(gi_table[cold+GI_C_NORMAL]),i32(j%3u)-1,i32(j/3u)-1);
-            if slot==0xffffffffu || (gi_table[gi_cold(slot)+GI_C_STATE]&(GI_SHADE|GI_BQUEUED))!=0u { continue; }
+            // A neighbour filtered by its own item is left to it: one queued with GI_SHADE_FULL
+            // (any queued one without GI_H_TRICKLE), or one waiting for a gather.
+            if slot==0xffffffffu { continue; }
+            let ns=gi_table[gi_cold(slot)+GI_C_STATE];
+            let own=(ns&GI_SHADE)!=0u && (!gi_trickle() || (ns&GI_SHADE_FULL)!=0u);
+            if own || (ns&GI_BQUEUED)!=0u { continue; }
             // A neighbour of several queued cells is rewritten once (P-GI): the first item to
             // mark its claim word with this frame's mark does it, and every rewrite would write
             // the same words. Marks stay below any claim value (whose band fills the top two

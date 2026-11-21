@@ -180,6 +180,14 @@ const STALE_SWEEP: u32 = 16;
 /// cache-terminated reflections) add, to a cell without a bounce value of its own yet, its albedo
 /// times the nearest coarser cell's own bounce (gi_cells.wgsl gi_borrow_*). Off by default;
 /// independent of RENDERLAB_GI_FIXED.
+/// Cell shading and the cell-space filter follow what changed (gi_cache.wgsl GI_H_TRICKLE): a
+/// cell a moved caster reached is shaded only when its light visibility changed, and filtered
+/// never (its sky and bounce are unchanged); the reach test ends a local light's ray at the
+/// light. Picture-identical; on by default, `RENDERLAB_GI_TRICKLE=0` turns it off.
+pub(crate) fn trickle_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_TRICKLE").as_deref() != Ok("0"))
+}
 pub(crate) fn borrow_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BORROW").as_deref() == Ok("1"))
@@ -1000,6 +1008,9 @@ pub struct IndirectCounters {
     /// Of the cells movers re-traced, those whose cube a moved box overlaps (fully re-probed).
     pub invalidated_cube: u32,
     pub reshaded: [u32; 3],
+    /// Of the cells a moved caster reached, those whose light visibility came out unchanged, so
+    /// cell shading skipped them (`RENDERLAB_GI_TRICKLE`, gi_cache.wgsl GI_SHADE_SKIP).
+    pub reshade_skipped: u32,
     /// Cells queued for cell shading by why (shaders/gi_cache.wgsl gi_queue_shade_cause, once a
     /// cell): after a trace, the sky filter, a relight, a mover crossing a light ray, after a gather.
     pub shade_causes: [u32; 5],
@@ -1585,6 +1596,7 @@ impl Planner {
         // Borrowed bounce for cells not gathered yet (gi_cells.wgsl GI_H_BORROW): its records
         // follow the emitter means, at header[34] + header[60] + slot.
         header[46] = u32::from(borrow_on());
+        header[47] = u32::from(trickle_on());
         // The cache's own gathers sample the list (and subtract emission at hits) only with
         // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
         header[43] = u32::from(!emitters_on());
@@ -3291,6 +3303,7 @@ impl Renderer {
             invalidated_read: [w[241], w[242]],
             invalidated_cube: w[246],
             reshaded: [w[243], w[244], w[245]],
+            reshade_skipped: w[370],
             shade_causes: [w[210], w[211], w[212], w[213], w[214]],
             trace_partial: w[215],
         }))
