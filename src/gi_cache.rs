@@ -5389,6 +5389,51 @@ mod tests {
 #[path = "gi_cache_tests.rs"]
 mod gpu_tests;
 
+impl Renderer {
+    /// Measurement only (`RENDERLAB_GI_OCCUPANCY=<file>`, at the memory report's frame): copies the
+    /// table back once, waiting, and writes its slots, the occupied ones (hot key word nonzero) and
+    /// those seen within the last 1, 60 and 600 frames (cold `GI_C_SEEN` against the header's frame).
+    pub(super) fn measure_gi_occupancy(&mut self) {
+        let Some(path) = std::env::var_os("RENDERLAB_GI_OCCUPANCY") else { return };
+        let Some(r) = self.gi.resources.as_ref() else { return };
+        let bytes = r.table.size();
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GI occupancy readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&r.table, 0, &staging, 0, bytes);
+        self.queue.submit([encoder.finish()]);
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        let Ok(data) = staging.slice(..).get_mapped_range() else { return };
+        let word = |i: usize| u32::from_ne_bytes(data[i * 4..i * 4 + 4].try_into().unwrap());
+        let (header, hot) = (64usize, 24usize);
+        let slots = word(1) as usize + 1;
+        let frame = word(3);
+        let cold_words = word(23).max(24) as usize;
+        let cold = header + slots * hot;
+        let (mut occupied, mut seen) = (0u64, [0u64; 3]);
+        for s in 0..slots {
+            if word(header + s * hot) == 0 {
+                continue;
+            }
+            occupied += 1;
+            let age = frame.wrapping_sub(word(cold + s * cold_words + 2));
+            for (k, limit) in [1u32, 60, 600].into_iter().enumerate() {
+                seen[k] += u64::from(age <= limit);
+            }
+        }
+        drop(data);
+        let _ = std::fs::write(
+            path,
+            format!("slots {slots} frame {frame} occupied {occupied} seen1 {} seen60 {} seen600 {}\n", seen[0], seen[1], seen[2]),
+        );
+    }
+}
+
 /// The bench's reload (src/bench, feature `bench`, docs/bench.md): the lighting cache's kernels
 /// and every program's cell shading, rebuilt from the current shader text (`program::gi_shader`).
 /// Each part keeps its old pipelines when its new text fails, and the error returns.
