@@ -633,8 +633,7 @@ struct Resources {
     pool: Owned<wgpu::Buffer>,
     /// Both layers: one 64-bit word per texel per level (normalized height << 32 | id).
     top: Owned<wgpu::Buffer>,
-    /// Measurement (`RENDERLAB_VSM_SPACER_KB`): a buffer allocated between the two layers.
-    _spacer: Option<Owned<wgpu::Buffer>>,
+    /// The peel layer, `peel_skew` bytes into its buffer.
     peel: Owned<wgpu::Buffer>,
     /// Max-mips of the top layer's heights per level (mips 1..log2(side)).
     mips: Owned<wgpu::Buffer>,
@@ -1251,6 +1250,26 @@ fn corners(b: &crate::shadow_plan::Bounds) -> impl Iterator<Item = glam::DVec3> 
             f64::from(if i & 4 == 0 { b.min.z } else { b.max.z }),
         )
     })
+}
+/// The peel layer's start inside its buffer (`RENDERLAB_VSM_PEEL_SKEW=0`: at 0). The top and peel
+/// layers are equal power-of-two buffers the lookup reads at the same index; placed a power of two
+/// apart, every such pair lands in the same memory channel and cache sets. Glint's cannon and flight
+/// views then read 2.6 and 4.0 ms of sun shadows instead of 0.55 and 0.93, in whichever process the
+/// driver placed them so. 64 KiB + 256 B (a storage offset multiple) moves the peel's low address bits.
+fn peel_skew() -> u64 {
+    static SKEW: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SKEW.get_or_init(|| if std::env::var("RENDERLAB_VSM_PEEL_SKEW").is_ok_and(|v| v.trim() == "0") { 0 } else { 64 * 1024 + 256 })
+}
+/// The peel layer's binding: its buffer after `peel_skew`.
+fn peel_entry(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: b,
+            offset: peel_skew(),
+            size: std::num::NonZeroU64::new(b.size() - peel_skew()),
+        }),
+    }
 }
 fn buffer(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
@@ -2324,11 +2343,7 @@ impl VirtualState {
             pool,
             // COPY_SRC: the dump (`RENDERLAB_VD_DUMP`).
             top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE | B::COPY_SRC),
-            _spacer: std::env::var("RENDERLAB_VSM_SPACER_KB")
-                .ok()
-                .and_then(|v| v.parse::<u64>().ok())
-                .map(|kb| buffer("N8c clipmap spacer (measurement)", kb * 1024, B::STORAGE)),
-            peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
+            peel: buffer("N8c clipmap peel layer", map_bytes + peel_skew(), B::STORAGE),
             mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
             outline: buffer("Disk lookup outline bits", outline_bytes, B::STORAGE),
             planes: buffer("N8k clipmap texel planes", plane_bytes, B::STORAGE),
@@ -3813,7 +3828,7 @@ impl Renderer {
                         buffer(25, clusters),
                         buffer(29, &r.render),
                         buffer(31, &r.top),
-                        buffer(32, &r.peel),
+                        peel_entry(32, &r.peel),
                         buffer(33, &casters.work),
                         buffer(54, &r.pool),
                         buffer(55, &r.state),
@@ -3857,7 +3872,7 @@ impl Renderer {
                         texture(15, &fresh.visibility.view),
                         buffer(16, &r.top),
                         texture(18, &r.level_view),
-                        buffer(19, &r.peel),
+                        peel_entry(19, &r.peel),
                         buffer(20, &r.debug),
                         buffer(24, &horizons),
                         buffer(35, &r.mips),
@@ -3869,7 +3884,7 @@ impl Renderer {
                     &[
                         buffer(0, &r.frame),
                         buffer(16, &r.top),
-                        buffer(19, &r.peel),
+                        peel_entry(19, &r.peel),
                         buffer(29, &r.render),
                         buffer(41, &r.planes),
                         buffer(43, &r.errors),
@@ -3887,7 +3902,7 @@ impl Renderer {
                         texture(15, &fresh.visibility.view),
                         buffer(16, &r.top),
                         texture(18, &r.level_view),
-                        buffer(19, &r.peel),
+                        peel_entry(19, &r.peel),
                         buffer(35, &r.mips),
                         buffer(40, &r.planes),
                         buffer(42, &r.errors),
@@ -3912,7 +3927,7 @@ impl Renderer {
                         texture(15, &fresh.visibility.view),
                         buffer(16, &r.top),
                         texture(18, &r.level_view),
-                        buffer(19, &r.peel),
+                        peel_entry(19, &r.peel),
                         buffer(35, &r.mips),
                         buffer(50, &r.disk_frame),
                         buffer(55, &r.state),
@@ -3935,7 +3950,7 @@ impl Renderer {
                         texture(15, &fresh.visibility.view),
                         buffer(16, &r.top),
                         texture(18, &r.level_view),
-                        buffer(19, &r.peel),
+                        peel_entry(19, &r.peel),
                         buffer(20, &r.queue),
                         buffer(24, &horizons),
                         buffer(35, &r.mips),
