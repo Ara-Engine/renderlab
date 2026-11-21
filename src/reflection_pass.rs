@@ -413,6 +413,14 @@ impl Renderer {
         )
     }
 
+    /// The bench's reload (src/bench/reload.rs): the next frame compiles the pass's kernels again.
+    #[cfg(feature = "bench")]
+    pub(crate) fn bench_drop_reflection_trace(&mut self) {
+        if let Some(state) = self.view.primary.as_mut() {
+            state.rl_pipelines = [None, None];
+        }
+    }
+
     /// Compiles the pass's kernels for `shading`'s head the first time a frame needs them.
     pub(crate) fn ensure_reflection_trace(&mut self, shading: Shading) -> Result<(), Error> {
         let Some(state) = self.view.primary.as_ref() else {

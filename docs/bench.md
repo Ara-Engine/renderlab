@@ -66,6 +66,10 @@ Environment:
 - `LIGHTBENCH_WALK_STEP` / `LIGHTBENCH_WALK_FRAMES`: the walking camera's step in metres per frame (default 0.02) and how many frames it walks (default 48).
 - `LIGHTBENCH_SHADOW_FRAMES` / `LIGHTBENCH_SHADOW_DUMP=<dir>`: the shadow fixture's frames per run (default 8), and a directory for its measured, exact and unshadowed images as PGM.
 - `LIGHTBENCH_GPU_LOCK`: the GPU lock whose owner marks a round contended (default `D:/Coding/renderlab-work/gpu-slot.lock`).
+- `LIGHTBENCH_CACHE`: the pipeline cache directory, one cache per path shared by its renderers (default `D:/Coding/renderlab-work/bench-cache`).
+- `LIGHTBENCH_REFLECT_FRAMES`, `LIGHTBENCH_GLASS_FRAMES`: frames per run of `reflect` and `glass` (default 32 each).
+- `LIGHTBENCH_TR1_STEP` / `LIGHTBENCH_TR1_FRAMES`: `tr1-edge`'s slide in metres per frame (default 0.03) and its frames (default 40).
+- `LIGHTBENCH_FIXTURE_DUMP=<dir>`: `reflect`, `glass` and `tr1-edge` write their frames, references and clean frames there as PFM.
 
 **Others' timing rows** (main thread's rule, 20 Nov). The bench takes no GPU lease of its own: a round is about 3 s of tiny frames (320x180, about 2.4 ms each).
 - **Idle.** It does no GPU work while the timing-hold belongs to a timing lease or is exclusive, that is, while its `owner.json` lacks `"exclusive":false`. `n8-run.py --timing` and similar leases write no `exclusive` field; an `--exclusive` smoke writes `true`. Meanwhile it prints `lightbench: idle, a timing lease holds the machine: <owner>`. Edits saved during the idle are picked up when it resumes.
@@ -74,34 +78,61 @@ Environment:
 
 ## Passes it reloads
 
-| pass | files | rebuild |
-|---|---|---|
-| `gi` | gi_cache, gi_cells, gi_near, gi_emitters, gi_gather_software, gi_rays_software, gi_rays_hardware, gi_shade_entry (`.wgsl`) | the lighting cache's kernels and every program's cell shading (`Renderer::bench_reload_gi`) |
-| `vsm` | virtual_shadow, virtual_shadow_records, virtual_shadow_hybrid, virtual_shadow_lookup, virtual_shadow_disk (`.wgsl`) | the virtual sun shadows' pipelines (`Renderer::bench_reload_vsm`). The composed modules are checked with naga first, then a new set of pipelines replaces the old one; the view keeps its pages and bind groups. |
+| pass | files | rebuild | fixtures run |
+|---|---|---|---|
+| `gi` | gi_cache, gi_cells, gi_near, gi_emitters, gi_gather_software, gi_rays_software, gi_rays_hardware, gi_shade_entry (`.wgsl`) | the lighting cache's kernels and every program's cell shading (`Renderer::bench_reload_gi`) | all |
+| `vsm` | virtual_shadow, virtual_shadow_records, virtual_shadow_hybrid, virtual_shadow_lookup, virtual_shadow_disk (`.wgsl`) | the virtual sun shadows' pipelines (`Renderer::bench_reload_vsm`). The composed modules are checked with naga first, then a new set of pipelines replaces the old one; the view keeps its pages and bind groups. | all |
+| `shading` | scene, program_api, program_traced*, program_view, program_bins, programs/standard, programs/toon, light_cluster_api, light_vis_pass, decals, environment_lobes, specular_filter, shadow_visibility_filter, gi_api | the prelude rebuild (below) | `grey`, `orange`, `shadow-edges`, `reflect` |
+| `reflections` | reflections*, reflection_cache_hits, reflection_hit_bins, reflection_hit_sun, reflection_hits | the prelude rebuild | `reflect` |
+| `transparency` | transparency, transparency_shadow, id_glass, pane_pixels, transmission_reduce | the prelude rebuild | `glass` |
+| `gi_receiver` | gi_receiver_pass | the prelude rebuild | `walk`, `grey` |
+| `tr1` | temporal_resolve, temporal_zones, temporal_coverage_cycle, temporal_coverage_pack, temporal_view | the prelude rebuild | `tr1-edge` |
+| `visibility` | primary_rays, primary_trace, primary_interactive, primary_edge_check, primary_edge_queue, visibility_buffer* | the prelude rebuild | `shadow-edges`, `tr1-edge` |
 
-**Measured (20 Nov, release bench, cold edits).**
+**Which fixtures run.** After a reload only the pass's fixtures rebuild and run. Every other rig records the pass as stale (`Rig::stale`) and rebuilds it before it next runs. The rigs rebuild at once, one thread per renderer, so both paths compile together.
 
-| pass | save to numbers | reload | fixtures | fixtures run |
-|---|---:|---:|---:|---|
-| `vsm` | 1.36-1.55 s | 0.62-0.70 s | 0.59-0.85 s | `shadow-edges`, `city` |
-| `gi` | 0.5-1.5 s | 0.1-0.9 s | 0.3-0.5 s | `walk`, `grey`, `orange` |
+**The prelude passes' text** (src/bench/edits.rs). A saved file becomes hunks against the text the bench started with: each changed run of lines, widened by whole lines of context until it occurs once in that file. Every shader module the process creates (`pipeline_compilation::shader_module`) has them applied wherever their old text occurs. These passes compose their files through constants, slices and seams; the hunks reach whatever survives of the edited lines, with no per-site plumbing.
+- **Checked first.** A module the hunks change is checked with naga before the device sees it. When it fails, the module is created from the last working hunks and the bench prints the error.
+- **Reached modules.** After each round the bench prints how many modules each edit reached, counted after the fixtures' frames because some kernels compile on first use. When it is 0, it prints a warning: the numbers are the old kernels'. A line the composition replaces through a seam reaches none.
+- **The starting text.** Hunks are taken against the files as the bench starts. They match the binary's built-in text only when the two agree, so start the bench from the checkout it was built from.
 
-**Not yet reloadable.** An edit to any other file prints `<file> changed; no bench pass reloads it yet`.
+**The prelude rebuild** (src/bench/reload.rs). Their kernels all compose the traced heads or the prelude, and a file of one pass can compose into another's kernels (the reflection and TR1 view files go into program shading). So one rebuild serves all six:
+1. The engine's own prelude reload (`Renderer::reload` with the installed prelude): the engine pipelines and every program's modules in one transaction.
+2. The hashes that key cached pipelines are salted, so the receiver's, transparency's and the visibility buffer's caches miss. The reflection trace and every program's cell shading are dropped.
+3. `prepare_view_pipelines` builds what the programs of the fixture's last frame draw with.
+4. Their lean shading is compiled and waited for. A lean compile running from before the reload is dropped: its text is the old one, and its digests cannot tell.
 
-These files reach their kernels through compile-time constants (`include_str!`):
-- the program shading sets;
-- the reflection passes;
-- TR1;
-- `gi_cells.wgsl` and `gi_api.wgsl` as composed into program shading. Note that `gi_cells.wgsl` does reload, but only into the cache's own kernels.
+Kernels whose SPIR-V did not change are cache hits.
 
-**Program shading: tried and taken out (20 Nov).** The attempt routed the traced templates (`program_traced.wgsl`, `program_traced_entry.wgsl`, `program_api.wgsl`) through the text hook and called `Renderer::reload_program` for each fixture program.
-- That reload recompiles only the program's hot sets: two background pipelines.
-- The frames' traced shading kernel never recompiled after a template edit.
-- So the pass would print numbers from unchanged kernels. A real program pass must rebuild the slot's installed variants, and the lists and hit shading that read the same templates.
+**One pipeline cache per path.** The bench's devices are the engine's own (`engine::device::request_device`: the path's features and limits, so the reflection pass and its composite run as in the game). Each path's facade holds one pipeline cache for all its renderers, saved under `LIGHTBENCH_CACHE` after each round.
+- A revert, an A/B toggle or a restart is a cache hit.
+- Startup with a warm cache: 10 fixtures on 2 paths in 26 s, against 126 s for three fixtures before. Three fixtures alone take 1.7 s.
 
-**Adding a pass** takes two pieces:
-1. **Override.** Route the pass's sources through `program::engine_shader` (or `gi_shader`), which composes the bench's text when the feature is on.
-2. **Rebuild.** Write a `bench_reload_*` that rebuilds the pass's pipelines and keeps the old ones on an error, then add a row to `PASSES` in `src/bench/mod.rs`.
+**Measured (21 Nov, RTX PC, release bench).**
+- **Setup:** one process with `grey,orange,walk,shadow-edges,reflect,glass,tr1-edge`. Each edit gives a float literal on a code line new digits (cold: new SPIR-V, new digits each run), then reverts.
+- **Contention:** other agents' non-exclusive smokes were running.
+- **Driver script:** `main-thread/clipmap/bench/pass_times.py`.
+
+| pass (file edited) | modules reached | save to numbers, nort | nort and RT | reload | longest kernel |
+|---|---:|---:|---:|---:|---|
+| `shading` (programs/standard.wgsl) | 28 / 64 | 6.0-7.5 s | 7.2-8.3 s | 5.5-7.5 s | traced program shading 2.6-3.1 s |
+| `reflections` (reflections_resolve.wgsl) | 0 | (old kernels: the edited line is not in any composed module) | | | |
+| `transparency` (transparency.wgsl) | 4 | 2.9 s | 3.9 s | 0.3 s | TP1 pipelines compile in the fixture's first frame |
+| `gi_receiver` (gi_receiver_pass.wgsl) | 70 / 140 | 4.2 s | 7.9 s | 1.3-1.4 s | the receiver composes into traced shading; `walk` takes 2.9-6.4 s |
+| `tr1` (temporal_resolve.wgsl) | 5 / 10 | 2.1 s | 3.9 s | 1.0-1.2 s | tr1_resolve 0.7-0.9 s |
+| `visibility` (visibility_buffer_resolve.wgsl) | 12 | 2.0 s | 3.3 s | 0.7-0.8 s | resolve 0.2 s |
+| `visibility` (primary_trace.wgsl) | 4 / 10 | 1.0 s | 3.0 s | 0.7-2.4 s | primary_trace_interactive 0.56 s |
+| a revert (cache hit) | | 0.4-0.9 s | 0.6-1.3 s | 0.2-0.4 s | |
+
+**Under 2 s?** Edits that reach only their own pass's kernels are: TR1, visibility and reverts.
+- **Program shading:** its floor is one cold compile of the traced program shading kernel, 2.5-3 s on this driver with both paths compiling.
+- **The receiver:** it composes into that kernel, so it pays the same compile.
+- **Transparency:** its pipelines compile in the fixture's first frame. They are built by frames, not by `prepare_view_pipelines` (`prewarm_transparency` needs the materials, which the renderer does not keep).
+- **One outlier:** a program-shading revert once compiled cold (6.3 s) where the others were cache hits (0.9-1.3 s).
+
+**Adding a pass** is a row in `PASSES` (src/bench/mod.rs): its files, its rebuild and the fixtures that read it.
+- A pass whose kernels compose the prelude or the traced heads takes `edits: true` and `Renderer::bench_reload_prelude`.
+- A pass with its own pipelines takes a `bench_reload_*` that rebuilds them and keeps the old ones on an error, with its sources routed through `program::engine_shader` or `gi_shader` (`edits: false`).
 
 ## Adding a fixture
 
@@ -126,7 +157,7 @@ pub(crate) trait Fixture {
 
 The bench adds the per-pass GPU milliseconds itself. They are medians over the run's frames, from the renderer's pass log, leaving out frames that compiled. Keep a run well under a second per path.
 
-**`reference`**, when a fixture has one, renders it once (the live path tracer). The bench caches it at `<refs>/<name>-<hash of scene_key>.lbref`, so every later start loads it. A fixture with an exact answer needs none.
+**`reference`**, when a fixture has one, renders it once (the live path tracer). `kit::traced_reference` traces it on a renderer of its own with ray hardware, so a fixture on either path gets one. The bench caches it at `<refs>/<name>-<hash of scene_key>.lbref`, so every later start loads it. A fixture with an exact answer needs none.
 
 **Shared helpers** are in `src/bench/kit.rs`:
 - `part`: a mesh from quads, with its instance and material;
@@ -153,6 +184,9 @@ A fixture is a child of the `renderer` module, so crate-internal renderer state 
 | `slab` | gicut | thin slab over an emitter under a sky; the top reads 0.5 | `energy`, `err`, `off5` |
 | `slab-roof` | gicut | the slab under a roof and a black sky; top and roof read 0 | `top.mean`, `top.leak_max`, `roof.*` |
 | `shadow-edges` | clipmap (src/bench/shadow_edges.rs) | a grey floor under a soft sun (0.02 rad), the sun only: a 3 m rail 0.9 m up turned against the map's grid, a 0.3 m block resting on the floor, a 5 mm wire; 256x256, `LIGHTBENCH_SHADOW_FRAMES` frames (default 8) with TR1 | against the exact answer (the sun's disk cast on the CPU from each floor pixel, once at load): `err` over the edge band, `lit_in_shadow`, `rail_wobble_px`, `contact_gap_px`, `thin_missing`; `mask_mismatch` checks the camera |
+| `reflect` | clipmap (src/bench/reflect.rs) | a mirror (metal, roughness 0.02) and a copper sphere (metal, roughness 0.3) over a grey floor with a red box, sun 1,000 lux and a uniform sky of 20; 192x144, the lighting cache and TR1 on, 32 frames from a cut and an empty cache | against the live path tracer (16,384 paths, cached on disk): `err` and `energy` over both objects, `mirror.*`, `sphere.*`, `floor.err` |
+| `glass` | clipmap (src/bench/glass.rs) | a tinted glass pane (index 1.5) and a blue film (index 1, half coverage) over a grey floor before a red and a white wall; 192x144, 32 frames as `reflect` | against the live path tracer: `err`, `energy`, `glass.*`, `film.*`, `shadow.err` (the floor in their sun shadows) |
+| `tr1-edge` | clipmap (src/bench/tr1_edge.rs) | a white box sliding 0.03 m per frame (about 2 px) for 40 frames over a dark floor, then a camera jump without `cut_reconstruction`; 256x160, the lighting cache off | against clean frames rendered still at load: `pass_ghost_px` (median, over five lines, of how far behind the box the floor still differs by over 10%), `pass_ghost_max_px`, `cut_ghost_px` (pixels differing on the first frame after the jump), `cut_frames` (frames until under 0.2% differ; 17 = not within 16) |
 
 **Real size, checked against the game (20 Nov).** The play gate's 1080p Glint course reads, without ray hardware:
 - gather 11.38 ms;
