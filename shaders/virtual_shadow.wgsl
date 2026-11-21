@@ -239,6 +239,15 @@ fn vsm_moved(level:u32,page:vec2<u32>)->u32 {
     let moved=vsm_moved(level,page);
     if vsm_requests[id.x]!=0u {
         if vsm_state[id.x]!=epoch || moved!=0u {
+            // Measurement: 12 never resident or cleared, 13 the level's epoch moved on, 14 moved
+            // casters' partial redraws and 15 their texels.
+            if vsm_state[id.x]==0u {atomicAdd(&vsm_pool[12],1u);}
+            else if vsm_state[id.x]!=epoch {atomicAdd(&vsm_pool[13],1u);}
+            else {
+                atomicAdd(&vsm_pool[14],1u);
+                let d=vsm_dirty_hi(moved)+vec2<u32>(1u)-min(vsm_dirty_lo(moved),vsm_dirty_hi(moved)+vec2<u32>(1u));
+                atomicAdd(&vsm_pool[15],d.x*d.y);
+            }
             vsm_render[id.x]=select(moved,VSM_DIRTY_FULL,vsm_state[id.x]!=epoch);
             vsm_state[id.x]=epoch;
             // vsm_cull's grid: 64 clusters a group, 65535 groups a row.
