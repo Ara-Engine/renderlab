@@ -116,6 +116,12 @@ pub use transparency::{
 };
 pub use wgpu;
 
+/// The test bench's entry point (`lightbench`, feature `bench`, docs/bench.md): returns the exit code.
+#[cfg(feature = "bench")]
+pub fn bench_main() -> i32 {
+    renderer::bench::main()
+}
+
 /// Raster shadow receivers read the actual triangle's world-space vertices, and
 /// environment lookups filter the RGBA32F field in the texture unit (P-SKY,
 /// docs/p-sky.md). Callers must request these device features.

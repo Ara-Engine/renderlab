@@ -3730,18 +3730,44 @@ impl Renderer {
         let lean_layout = &layouts.lean_pipelines[usize::from(software)];
         let lean_list = std::cell::RefCell::new(Vec::new());
         // A kernel goes on the lean layout when it validates there (it reads neither array).
-        let kernel = |entry: &str| {
+        let build = |entry: &str| {
             if lean() {
                 let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
                 let pipeline = compute(entry, lean_layout);
                 if pollster::block_on(scope.pop()).is_none() {
-                    lean_list.borrow_mut().push((*pipeline).clone());
-                    return pipeline;
+                    return (pipeline, true);
                 }
             }
-            compute(entry, main)
+            (compute(entry, main), false)
         };
         let priority = software && priority::on();
+        // The set's kernels are created at once, as many together as the process's compile slots
+        // allow (one in frames; four in prepare and the bench's reload), then taken by name below.
+        // A kernel not listed here is created where it is asked for.
+        let listed = [
+            "gi_probe", "gi_external_requests", if priority { "gi_priority_claim_visible" } else { "gi_claim" },
+            "gi_resolve", "gi_resolve_last", "gi_scan", "gi_setup", "gi_rays", "gi_finish", "gi_integrate",
+            if priority { "gi_priority_gather_empty" } else if software { "gi_gather_batched" } else { "gi_gather" },
+            "gi_fill_count", "gi_fill_select", "gi_emitters_build", "gi_emitters_publish", "gi_emitters_cdf",
+            "gi_gather_count", "gi_gather_select", "gi_light", "gi_filter",
+        ];
+        let mut first_error = None;
+        let mut ready = std::collections::HashMap::new();
+        for (name, (built, error)) in listed
+            .into_iter()
+            .zip(super::program_gpu::in_parallel(&self.device, listed.map(|name| move || build(name))))
+        {
+            first_error = first_error.or(error);
+            ready.insert(name, built);
+        }
+        let ready = std::cell::RefCell::new(ready);
+        let kernel = |entry: &str| {
+            let (pipeline, lean) = ready.borrow_mut().remove(entry).unwrap_or_else(|| build(entry));
+            if lean {
+                lean_list.borrow_mut().push((*pipeline).clone());
+            }
+            pipeline
+        };
         let mut pipelines = Pipelines {
             software,
             priority: priority.then(|| priority::Pipelines::new(|name| kernel(name))),
@@ -3778,7 +3804,7 @@ impl Renderer {
             lean: vec![],
         };
         pipelines.lean = lean_list.into_inner();
-        if let Some(error) = scopes.finish() {
+        if let Some(error) = scopes.finish().or(first_error) {
             return Err(Error::Shader(error.to_string()));
         }
         self.gi.pipelines = Some(pipelines);
@@ -5361,3 +5387,36 @@ mod tests {
 #[cfg(test)]
 #[path = "gi_cache_tests.rs"]
 mod gpu_tests;
+
+/// The bench's reload (src/bench, feature `bench`, docs/bench.md): the lighting cache's kernels
+/// and every program's cell shading, rebuilt from the current shader text (`program::gi_shader`).
+/// Each part keeps its old pipelines when its new text fails, and the error returns.
+#[cfg(feature = "bench")]
+impl Renderer {
+    pub(super) fn bench_reload_gi(&mut self) -> Result<(), Error> {
+        let slots = crate::pipeline_compilation::prepare_compile_slots();
+        crate::pipeline_compilation::with_compile_slots(slots, || self.bench_rebuild_gi())
+    }
+    fn bench_rebuild_gi(&mut self) -> Result<(), Error> {
+        if let Some(old) = self.gi.pipelines.take() {
+            let software = old.software;
+            if let Err(error) = self.ensure_gi_pipelines(software) {
+                self.gi.pipelines = Some(old);
+                return Err(error);
+            }
+        }
+        let old = std::mem::take(&mut self.gi.shading);
+        let mut fresh = Vec::with_capacity(old.len());
+        for entry in &old {
+            match self.gi_shade_pipeline(entry.key.0, entry.key, entry.mixed) {
+                Ok(pipeline) => fresh.push(pipeline),
+                Err(error) => {
+                    self.gi.shading = old;
+                    return Err(error);
+                }
+            }
+        }
+        self.gi.shading = fresh;
+        Ok(())
+    }
+}
