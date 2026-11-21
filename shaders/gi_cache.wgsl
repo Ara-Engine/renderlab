@@ -2215,6 +2215,8 @@ fn gi_fill_share(room:u32, h:u32) -> u32 { return select(0u,u32(f32(room)/f32(ma
 fn gi_fixed_on() -> bool { return gi_word(GI_H_FIXED_RAYS)!=0u; }
 // New-cell tracing under the same budget (RENDERLAB_GI_FIXED_TRACE=1): the first fill's cap.
 const GI_H_FIXED_TRACE:u32=44u;
+// Per-cell settling (GI_SETTLED) on: RENDERLAB_GI_FIXED_REST=1 (src/gi_cache.rs fixed_rest).
+const GI_H_FIXED_SETTLE:u32=51u;
 fn gi_fixed_trace_on() -> bool { return gi_fixed_on() && gi_word(GI_H_FIXED_TRACE)!=0u; }
 // Counts a gather whose new bounce (its L0 term, `dc`) differs from the cell's last by more than
 // 1/256 of the larger. A first gather is a new cell, not a value still moving (on a still view the
@@ -2229,7 +2231,7 @@ fn gi_fixed_note(hot:u32, dc:vec3<f32>, quiet_hits:bool) {
     let moved=any(abs(dc-old)*256.0>max(max(abs(dc),abs(old)),vec3<f32>(1e-6)));
     if !first && moved { atomicAdd(&gi_work[GI_W_FIXED_MOVED],1u); }
     // Settles the cell at its gather's end (gi_gather_done).
-    gi_fixed_calm=!first && !moved && quiet_hits;
+    gi_fixed_calm=!first && !moved && quiet_hits && gi_word(GI_H_FIXED_SETTLE)!=0u;
 }
 // A slot's bin, or 0xffffffff for a cell not ranked this frame (empty, not traced, an orphan,
 // queued for tracing, or not read this frame or the last).

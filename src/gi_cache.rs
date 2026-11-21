@@ -176,6 +176,14 @@ const STALE_SWEEP: u32 = 16;
 /// and terrain price a hardware ray only 1.2-1.6x below a software one). Unset or 0 keeps the
 /// event-driven gather queue.
 /// The ara-gpu port does not encode the ranking passes: leave it unset there.
+/// RENDERLAB_GI_FIXED_REST=1 (with RENDERLAB_GI_FIXED): the budget rests on still views: per-cell
+/// settling (shaders/gi_cache.wgsl GI_SETTLED), a quarter of it in the still-view batch, and idle
+/// once a full turn passes with no value moved (`Planner::fixed_settled`). Off by default: on the
+/// furnace these stop a slow series early (orange's red channel 0.58 against 1.0 without them).
+fn fixed_rest() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED_REST").is_ok_and(|v| v == "1"))
+}
 /// RENDERLAB_GI_FIXED_TRACE=1 (with RENDERLAB_GI_FIXED): new cells' tracing comes out of the
 /// same ray budget, ahead of the gathers (shaders/gi_cache.wgsl gi_fixed_select).
 fn fixed_trace() -> bool {
@@ -192,7 +200,7 @@ impl Planner {
     /// readback's lag), at least 8 frames.
     fn fixed_settled(&self, still: bool) -> bool {
         let turn = self.fixed_ranked.div_ceil(fixed_rays().max(1)).max(8) + 4;
-        still && self.fixed_quiet >= turn
+        fixed_rest() && still && self.fixed_quiet >= turn
     }
 }
 fn stale_budget() -> u32 {
@@ -1679,6 +1687,7 @@ impl Planner {
         // A quarter of it on a still view (the still-view batch's frames): a ceiling, not a floor.
         header[45] = if self.fixed_still { (fixed_rays() / 4).max(1) } else { fixed_rays() };
         header[44] = u32::from(fixed_trace());
+        header[51] = u32::from(fixed_rest());
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
@@ -1987,7 +1996,7 @@ impl Planner {
         // queue does; on a still view before that it runs in the still-view batch below (one frame
         // in STILL_BATCH): the budget is a ceiling, not a floor.
         let fixed_awake = bounce && fixed_rays() != 0 && !self.fixed_settled(view.idle_frames >= idle_after);
-        self.fixed_still = still_batch_on() && view.idle_frames >= STILL_BATCH;
+        self.fixed_still = fixed_rest() && still_batch_on() && view.idle_frames >= STILL_BATCH;
         if view.idle_frames >= idle_after && flags == 0 && !busy && !fixed_awake {
             return Finished { frame, plan: None };
         }
@@ -2003,6 +2012,8 @@ impl Planner {
             && view.idle_frames >= STILL_BATCH
             && flags == 0
             && !busy
+            // Without its rest rules the fixed budget works every frame, as #232's did.
+            && (!fixed_awake || fixed_rest())
             && self.since_cut.min(self.since_clear) >= STILL_BATCH_SETTLE
             && view.idle_frames % STILL_BATCH != 0
         {
