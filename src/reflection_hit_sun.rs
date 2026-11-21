@@ -28,15 +28,17 @@ pub(super) fn compose(source: String) -> Option<String> {
         return None;
     }
     let zones = "struct Tr1Zones { shadow_lo:vec4<f32>, shadow_hi:vec4<f32>, shadow_light:vec4<f32>, relit:array<vec4<f32>,8>, counts:vec4<u32> };\n";
-    let definitions = include_str!("../shaders/virtual_shadow.wgsl")
-        .split("// ---- Page requests")
-        .next()?
-        .replacen(zones, "", 1)
-        .replacen(
-            "@group(0) @binding(0) var<uniform> vsm:VsmFrame;",
-            "@group(4) @binding(0) var<uniform> vsm:VsmFrame;",
-            1,
-        );
+    let definitions = crate::renderer::virtual_shadow_gpu::with_pitch(
+        include_str!("../shaders/virtual_shadow.wgsl")
+            .split("// ---- Page requests")
+            .next()?
+            .replacen(zones, "", 1)
+            .replacen(
+                "@group(0) @binding(0) var<uniform> vsm:VsmFrame;",
+                "@group(4) @binding(0) var<uniform> vsm:VsmFrame;",
+                1,
+            ),
+    );
     if !source.contains(zones) || !definitions.contains("@group(4) @binding(0)") {
         return None;
     }

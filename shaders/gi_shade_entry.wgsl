@@ -253,6 +253,9 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
     let queue=gi_word(GI_H_SHADE_QUEUE);
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=gi_shade_work[queue+i];
+        // A moved caster's reshade whose light visibility came out unchanged (gi_cache.wgsl
+        // GI_SHADE_SKIP): its outgoing radiance stands.
+        if slot==0xffffffffu { continue; }
         gi_shade_out[slot]=gs_shade(slot);
         if gi_borrow_on() { gi_shade_out[gi_borrow_at(slot)]=gs_borrow; }
         // GC1 (shared with G2c's cell shading; the line above is MP1's seam): a value whose

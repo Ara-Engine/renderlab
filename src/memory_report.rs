@@ -17,13 +17,14 @@ fn target() -> Option<&'static (std::path::PathBuf, u64)> {
         .as_ref()
 }
 
-/// Called once a frame with the renderer's frame count.
-pub(crate) fn frame(device: &wgpu::Device, frame: u64) {
-    let Some((path, at)) = target() else { return };
+/// Called once a frame with the renderer's frame count. Returns true on the frame it writes, so
+/// other one-shot measurements (`Renderer::measure_gi_occupancy`) run at the same moment.
+pub(crate) fn frame(device: &wgpu::Device, frame: u64) -> bool {
+    let Some((path, at)) = target() else { return false };
     if frame < *at || WRITTEN.swap(true, Ordering::Relaxed) {
-        return;
+        return false;
     }
-    let Some(report) = device.generate_allocator_report() else { return };
+    let Some(report) = device.generate_allocator_report() else { return true };
     let mut text = format!(
         "frame {frame} reserved {} allocated {} blocks {} block_bytes {}\n",
         report.total_reserved_bytes,
@@ -37,4 +38,5 @@ pub(crate) fn frame(device: &wgpu::Device, frame: u64) {
     if let Err(error) = std::fs::write(path, text) {
         eprintln!("renderlab: RENDERLAB_MEMORY_REPORT {}: {error}", path.display());
     }
+    true
 }

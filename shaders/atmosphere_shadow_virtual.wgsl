@@ -15,7 +15,7 @@ fn at_sun_visible(world:vec3<f32>) -> f32 {
         let page=cell/VSM_PAGE;
         let slot=(level*pages+page.y)*pages+page.x;
         if at_shadow_pages[slot]!=vsm.levels[level].info.x { continue; }
-        let word=at_shadow_top[(level*side+cell.y)*side+cell.x];
+        let word=at_shadow_top[(level*side+cell.y)*vsm_pitch()+cell.x];
         if word.x==0u { return 1.0; }
         let height=fma(bitcast<f32>(word.y),vsm.depth.z,vsm.depth.x);
         // Froxels have no receiver surface and need no normal offset. A small
