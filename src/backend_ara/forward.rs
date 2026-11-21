@@ -2202,17 +2202,17 @@ fn frame(
             }
             _ => None,
         };
-    // What the panes' sun map is made from (`prepare_transmission`'s key): its record,
-    // and each pane's geometry, material and transform.
-    let transmission_key: Option<[u8; 32]> = transmission_record.as_ref().map(|record| {
+    // What the panes' sun map is made from (`prepare_transmission`'s structural key): meshes and
+    // materials without transforms or sun, so moving a transparent object re-renders the map
+    // without wiping TR1 or relighting the entire GI cache every frame.
+    let transmission_key: Option<[u8; 32]> = transmission_record.as_ref().map(|_| {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
-        h.update(record);
+        h.update((scene.transparent.len() as u64).to_le_bytes());
         for pane in scene.transparent {
             h.update((pane.vertices.len() as u64).to_le_bytes());
             h.update((pane.indices.len() as u64).to_le_bytes());
             h.update(pane.material.bytes());
-            h.update(bytemuck::cast_slice(&pane.transform.to_cols_array()));
         }
         h.finalize().into()
     });

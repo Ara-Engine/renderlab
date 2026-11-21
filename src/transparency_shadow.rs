@@ -153,6 +153,14 @@ fn map(
         view,
     }
 }
+/// Whether `draw` has any shadow-casting instance that should write to the coloured sun
+/// transmission map (`Instances::set_casts_shadows`). Non-casting transparent draws (holograms,
+/// ghost rivals, VFX overlays) cast no sun shadow and never trigger transmission rebuilds.
+pub(crate) fn casts_transmission(draw: &Draw<'_>) -> bool {
+    let state = &draw.instances.state;
+    !state.any_non_casting() || (0..state.models.len()).any(|s| state.casts_shadows(s))
+}
+
 impl Renderer {
     pub(crate) fn prepare_transmission(&mut self, transparent: &[Draw<'_>]) -> Result<(), Error> {
         let sun = self.lighting.source_lights.iter().find_map(|l| match l {
@@ -165,15 +173,23 @@ impl Renderer {
         } else {
             sun
         };
+        let casting: Vec<&Draw<'_>> = transparent
+            .iter()
+            .filter(|d| casts_transmission(d))
+            .collect();
         let mut receivers = vec![];
-        for draw in transparent {
-            for &model in &draw.instances.state.models {
+        for draw in &casting {
+            let state = &draw.instances.state;
+            for (slot, &model) in state.models.iter().enumerate() {
+                if !state.casts_shadows(slot) {
+                    continue;
+                }
                 let b = shadow_gpu::world_bounds(draw.mesh.bounds, model)?;
                 receivers.push((b.min, b.max));
             }
         }
         let fit = sun.and_then(|s| shadow_fit(s, &receivers, &[]));
-        let count = if fit.is_some() { transparent.len() } else { 0 };
+        let count = if fit.is_some() { casting.len() } else { 0 };
         if count > MAX_TRANSPARENT_DRAWS
             || count as u32 > self.device.limits().max_texture_array_layers
         {
@@ -192,37 +208,48 @@ impl Renderer {
             0.0,
             0.0,
         ]));
-        // The draws alone (U-FIXED): a sun turn re-renders the map but restarts no history;
-        // TR1 caps its windows by the turn, as for opaque shadows. With the sun in the cut
-        // key, a day-cycle sun restarted every pixel every frame.
-        let mut scene = Sha256::new();
-        scene.update(self.source.as_bytes());
-        scene.update(count.to_ne_bytes());
-        for d in transparent {
+        // Structural caster identity (meshes, materials, shadow-casting masks, without transforms or
+        // sun): adding/removing/editing a casting transparent draw restarts views and relights GI,
+        // while moving an existing casting transparent draw re-renders the map and feeds scoped
+        // TR1 mover zones instead of wiping the entire frame's temporal & GI history every tick.
+        let mut structure = Sha256::new();
+        structure.update(self.source.as_bytes());
+        structure.update(count.to_ne_bytes());
+        let mut transforms = Sha256::new();
+        for d in &casting {
             let mut identity = std::collections::hash_map::DefaultHasher::new();
             (**d.mesh.vertex).hash(&mut identity);
             (**d.mesh.index).hash(&mut identity);
             if let Some(material) = d.material {
                 (*material._uniform).hash(&mut identity);
             }
-            scene.update(identity.finish().to_ne_bytes());
-            for m in &d.instances.state.models {
-                scene.update(bytes_of(&m.to_cols_array()));
+            structure.update(identity.finish().to_ne_bytes());
+            let state = &d.instances.state;
+            structure.update((state.models.len() as u64).to_ne_bytes());
+            for &word in state.non_casting() {
+                structure.update(word.to_ne_bytes());
+            }
+            for (slot, m) in state.models.iter().enumerate() {
+                if state.casts_shadows(slot) {
+                    transforms.update(bytes_of(&m.to_cols_array()));
+                }
             }
         }
-        let scene: [u8; 32] = scene.finalize().into();
+        let structure: [u8; 32] = structure.finalize().into();
+        let transforms: [u8; 32] = transforms.finalize().into();
         let key: [u8; 32] = Sha256::new()
             .chain_update(&data)
-            .chain_update(scene)
+            .chain_update(structure)
+            .chain_update(transforms)
             .finalize()
             .into();
-        // The coloured sun map's casters are scene state: every view's history restarts.
-        if self.lighting.transmission.hash != scene {
+        // Structural changes to coloured sun casters restart every view's history.
+        if self.lighting.transmission.hash != structure {
             for view in self.views_mut() {
                 view.cut_reconstruction();
             }
         }
-        self.lighting.transmission.hash = scene;
+        self.lighting.transmission.hash = structure;
         self.queue
             .write_buffer(&self.lighting.transmission.uniform, 0, &data);
         self.lighting.transmission.render = false;
@@ -280,7 +307,7 @@ impl Renderer {
         if !state.render {
             return;
         }
-        for (i, draw) in draws.iter().enumerate() {
+        for (i, draw) in draws.iter().filter(|d| casts_transmission(d)).enumerate() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TP2 coloured sun transmission"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -308,9 +335,27 @@ impl Renderer {
             pass.set_bind_group(2, &*draw.material.unwrap().bind, &[]);
             pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
             pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-            // Draw every instance, including off-camera casters. instance_index is used
-            // directly instead of the camera's compact visible ID vertex stream.
-            pass.draw_indexed(0..draw.mesh.index_count, 0, 0..draw.instances.len() as u32);
+            // Draw every shadow-casting instance, including off-camera casters. instance_index is
+            // used directly instead of the camera's compact visible ID vertex stream.
+            let instances = &draw.instances.state;
+            if !instances.any_non_casting() {
+                pass.draw_indexed(0..draw.mesh.index_count, 0, 0..draw.instances.len() as u32);
+            } else {
+                let n = instances.models.len();
+                let mut start = 0;
+                while start < n {
+                    if !instances.casts_shadows(start) {
+                        start += 1;
+                        continue;
+                    }
+                    let mut end = start + 1;
+                    while end < n && instances.casts_shadows(end) {
+                        end += 1;
+                    }
+                    pass.draw_indexed(0..draw.mesh.index_count, 0, start as u32..end as u32);
+                    start = end;
+                }
+            }
         }
         // The layers reduced to two per texel, which shading reads.
         if let (Some(pipeline), Some(group)) = (&state.reduce_pipeline, &state.reduce) {

@@ -2405,6 +2405,7 @@ impl Renderer {
         camera: &Camera,
         index: u64,
         draws: &[PreparedDraw<'_>],
+        transparent: &[Draw<'_>],
     ) {
         let size = self.view.hdr.as_ref().unwrap().resolved.texture.size();
         let output = self
@@ -2492,6 +2493,41 @@ impl Renderer {
                 }
             }
             rigid_only &= !edited || any_moved;
+        }
+        // Moving shadow-casting transparent objects feed scoped TR1 mover zones (swept sun
+        // shadow + local proximity) instead of triggering a full-view cut in prepare_transmission.
+        for d in transparent {
+            if !super::super::transparency_gpu::transmission_shadow::casts_transmission(d) {
+                continue;
+            }
+            let state = &d.instances.state;
+            if !state.edited_since_submit(self.view_key.0, self.view.last_frame) {
+                continue;
+            }
+            let previous = state.previous_models(self.view_key.0, self.view.last_frame);
+            for (slot, (&model, &previous_model)) in
+                state.models.iter().zip(previous).enumerate()
+            {
+                if !state.casts_shadows(slot) {
+                    continue;
+                }
+                let moved = model
+                    .to_cols_array()
+                    .iter()
+                    .zip(previous_model.to_cols_array())
+                    .any(|(&a, b)| (a - b).abs() > 1e-5);
+                if moved {
+                    rigid_motion = true;
+                    let mut own = None;
+                    for m in [model, previous_model] {
+                        if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, m) {
+                            moving_bounds = Some(union(moving_bounds, b));
+                            own = Some(union(own, b));
+                        }
+                    }
+                    moving_boxes.extend(own);
+                }
+            }
         }
         // P-RTS: with the penumbra pass compiled and edges deferred, every receiver first
         // traces the held count; only listed pixels trace the rest of the budget.
