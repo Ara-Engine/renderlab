@@ -1009,7 +1009,7 @@ pub(super) fn shader_source() -> String {
         let end = equals + source[equals..].find(';').unwrap();
         source.replace_range(equals..end, value);
     }
-    source
+    with_pitch(source)
 }
 /// The covered fraction (off by default; `RENDERLAB_VSM_FRACTION=1` turns it on, with the
 /// receiver jitter off, WGSL `VD_JITTER`): each silhouette texel's
@@ -1082,13 +1082,13 @@ pub(super) fn map_source() -> String {
         .map(|path| std::fs::read_to_string(path).unwrap());
     #[cfg(not(test))]
     let variant: Option<String> = None;
-    format!(
+    with_pitch(format!(
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
         crate::TRACED_DRAWS,
         variant
             .as_deref()
             .unwrap_or(&crate::program::engine_shader("virtual_shadow_lookup.wgsl", include_str!("../shaders/virtual_shadow_lookup.wgsl")))
-    )
+    ))
 }
 
 /// CPU-only access to nested production source composers.
@@ -1161,7 +1161,7 @@ pub(super) fn disk_source() -> String {
         let end = equals + source[equals..].find(';').unwrap();
         source.replace_range(equals..end, value);
     }
-    source
+    with_pitch(source)
 }
 /// Merges moved casters' light-space rectangles, and their screen rectangles alike, the pair
 /// whose union adds the least area first, until at most `max` remain: many movers invalidate the
@@ -1249,6 +1249,21 @@ fn corners(b: &crate::shadow_plan::Bounds) -> impl Iterator<Item = glam::DVec3> 
             f64::from(if i & 4 == 0 { b.min.z } else { b.max.z }),
         )
     })
+}
+/// The dense layers' row padding in texels (WGSL `VSM_PITCH_PAD`; `RENDERLAB_VSM_PITCH_PAD=N`
+/// measurement, 0 the unpadded layout): rows a power of two apart made the lookup's cost depend on
+/// where the driver placed the layers (Glint's cannon and flight views: 0.55/0.93 ms or 2.6/4.0).
+fn pitch_pad() -> u32 {
+    static PAD: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PAD.get_or_init(|| std::env::var("RENDERLAB_VSM_PITCH_PAD").ok().and_then(|v| v.parse().ok()).unwrap_or(32))
+}
+/// `source` with the row padding `pitch_pad` sets.
+fn with_pitch(source: String) -> String {
+    const PAD: &str = "const VSM_PITCH_PAD:u32=32u;";
+    if pitch_pad() == 32 || !source.contains(PAD) {
+        return source;
+    }
+    source.replacen(PAD, &format!("const VSM_PITCH_PAD:u32={}u;", pitch_pad()), 1)
 }
 fn buffer(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
@@ -1437,8 +1452,11 @@ impl Renderer {
             let planes = resources.into_iter().flat_map(|r| {
                 [Some((&r.top, "top")), fraction_on().then_some((&r.cover, "cover"))].into_iter().flatten()
             });
+            let rows = resources.map(|r| (r.pages * PAGE, r.levels as u32)).unwrap_or((0, 0));
             for (source, name) in planes {
                 let bytes = source.size();
+                // Bytes per texel: 8 in the top layer, 2 in the cover lines.
+                let texel = if name == "top" { 8 } else { 2 };
                 let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("clipmap top layer dump"),
                     size: bytes,
@@ -1449,9 +1467,9 @@ impl Renderer {
                 DUMPS.lock().unwrap().push(Dump {
                     path: dir.join(format!("{name}-{frame}.bin")),
                     buffer,
-                    row: bytes as u32,
-                    width_bytes: bytes as u32,
-                    height: 1,
+                    row: (rows.0 + pitch_pad()) * texel,
+                    width_bytes: rows.0 * texel,
+                    height: rows.0 * rows.1,
                     frame,
                     done: None,
                 });
@@ -2151,7 +2169,7 @@ impl VirtualState {
         let map_bytes = if sparse {
             u64::from(capacity) * page_words * 8
         } else {
-            u64::from(side) * u64::from(side) * levels as u64 * 8
+            u64::from(side) * u64::from(side + pitch_pad()) * levels as u64 * 8
         };
         if map_bytes > device.limits().max_storage_buffer_binding_size {
             return Err(Error::InvalidInput(

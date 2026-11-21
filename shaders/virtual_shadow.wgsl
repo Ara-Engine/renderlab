@@ -91,6 +91,12 @@ struct VsmFrame {
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
 
+// The dense layers' row pitch in texels: the window's side plus VSM_PITCH_PAD, so rows are not a power
+// of two apart (virtual_shadow_gpu.rs `pitch_pad`). A 16 KiB row stride let the lookup's vertical
+// neighbours fall into the same memory channels and cache sets, which in some placements of the
+// layers made Glint's cannon and flight views 4x dearer.
+const VSM_PITCH_PAD:u32=32u;
+fn vsm_pitch()->u32 {return vsm.counts.y*VSM_PAGE+VSM_PITCH_PAD;}
 fn vsm_light(world:vec3<f32>)->vec3<f32> {
     let rel=world-vsm.eye.xyz;
     return vec3<f32>(dot(rel,vsm.u.xyz),dot(rel,vsm.v.xyz),dot(world,vsm.l.xyz));
@@ -892,7 +898,7 @@ fn vsm_sil_triangle(tid:u32,level:u32,centre:vec2<f32>)->u32 {
             let q=q0+vec2<u32>(li%16u,li/16u);
             if vsm_dirty_has(w,q) {
                 let t=corner+q;
-                vsm_silhouette(level,t,(level*side+t.y)*side+t.x,(li/16u+1u)*18u+li%16u+1u);
+                vsm_silhouette(level,t,(level*side+t.y)*vsm_pitch()+t.x,(li/16u+1u)*18u+li%16u+1u);
             }
             workgroupBarrier();
         }
@@ -932,7 +938,7 @@ fn vsm_sil_triangle(tid:u32,level:u32,centre:vec2<f32>)->u32 {
         let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
         if !vsm_dirty_has(w,q) {continue;}
         let t=corner+q;
-        vsm_fold((level*side+t.y)*side+t.x);
+        vsm_fold((level*side+t.y)*vsm_pitch()+t.x);
     }
 }
 // Zeroes both layers of every page flagged for this frame: one workgroup per page slot.
@@ -948,7 +954,7 @@ fn vsm_sil_triangle(tid:u32,level:u32,centre:vec2<f32>)->u32 {
         let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
         if !vsm_dirty_has(w,q) {continue;}
         let t=corner+q;
-        let i=(level*side+t.y)*side+t.x;
+        let i=(level*side+t.y)*vsm_pitch()+t.x;
         atomicStore(&vsm_top_map[i],0lu);
         atomicStore(&vsm_peel_map[i],0lu);
         if VSM_MSAA {vsm_cover_clear(i);}
@@ -962,7 +968,7 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     let w=vsm_render[v];
     if w==0u || !vsm_dirty_has(w,t%VSM_PAGE) {return;}
     let side=pages*VSM_PAGE;
-    var i=(level*side+t.y)*side+t.x;
+    var i=(level*side+t.y)*vsm_pitch()+t.x;
     if vsm_sparse() {
         i=vsm_pages[vsm_section(2u)+v]*VSM_PAGE*VSM_PAGE+(t.y%VSM_PAGE)*VSM_PAGE+t.x%VSM_PAGE;
     }
@@ -1045,7 +1051,7 @@ fn vsm_texel_index(level:u32,t:vec2<u32>)->u32 {
     if w==0u || !vsm_dirty_has(w,t%VSM_PAGE) {return VSM_NONE;}
     if vsm_sparse() {return vsm_pages[vsm_section(2u)+v]*VSM_PAGE*VSM_PAGE+(t.y%VSM_PAGE)*VSM_PAGE+t.x%VSM_PAGE;}
     let side=pages*VSM_PAGE;
-    return (level*side+t.y)*side+t.x;
+    return (level*side+t.y)*vsm_pitch()+t.x;
 }
 fn vsm_cross(a:vec2<f32>,b:vec2<f32>,p:vec2<f32>)->f32 {return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);}
 // One triangle (vertices a, b, c in level texels, counter-clockwise, normalized heights z) at
@@ -1243,7 +1249,7 @@ struct VsmHw {
 @group(0) @binding(19) var<storage,read> vsm_peel_words:array<vec2<u32>>;
 fn vsm_word(cell:vec2<i32>,level:u32)->u32 {
     let side=vsm.counts.y*VSM_PAGE;
-    return (level*side+u32(cell.y))*side+u32(cell.x);
+    return (level*side+u32(cell.y))*vsm_pitch()+u32(cell.x);
 }
 
 struct NormalTransform {x:vec4<f32>,y:vec4<f32>,z:vec4<f32>,info:vec4<f32>};
@@ -1948,7 +1954,7 @@ fn vsm_mip_base(level:u32,mip:u32)->u32 {
     for(var k=0u;k<4u;k+=1u) {
         let c=id.xy*2u+vec2<u32>(k&1u,k>>1u);
         if mip==1u {
-            h=max(h,bitcast<f32>(vsm_top_words[(level*side+c.y)*side+c.x].y));
+            h=max(h,bitcast<f32>(vsm_top_words[(level*side+c.y)*vsm_pitch()+c.x].y));
         } else {
             h=max(h,vsm_mips_out[vsm_mip_base(level,mip-1u)+c.y*(2u*s)+c.x]);
         }
@@ -2071,7 +2077,7 @@ fn vsm_outline_page(i0:u32,stride:u32,corner:vec2<u32>,level:u32,li:u32) {
     let level=slot/per;let local=slot%per;
     let side=pages*VSM_PAGE;
     let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
-    vsm_outline_page((level*side+corner.y)*side+corner.x,side,corner,level,li);
+    vsm_outline_page((level*side+corner.y)*vsm_pitch()+corner.x,vsm_pitch(),corner,level,li);
 }
 // Sparse: one workgroup per page drawn this frame (an indirect dispatch over the pool's list).
 @compute @workgroup_size(256) fn vsm_outline_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
@@ -2093,7 +2099,7 @@ fn vsm_mip_clear(level:u32,centre:vec2<f32>,radius:f32,lower:f32)->bool {
     let mip=u32(ceil(log2(span)));
     var h=0.0;
     if mip==0u {
-        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*side+u32(a.x)].y);
+        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*vsm_pitch()+u32(a.x)].y);
     } else {
         let ia=vec2<u32>(a)>>vec2<u32>(mip);let ib=vec2<u32>(b)>>vec2<u32>(mip);
         let s=side>>mip;let base=vsm_mip_base(level,mip);

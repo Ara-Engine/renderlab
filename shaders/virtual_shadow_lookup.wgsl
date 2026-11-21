@@ -40,6 +40,12 @@ struct VsmFrame {
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
 
+// The dense layers' row pitch in texels: the window's side plus VSM_PITCH_PAD, so rows are not a power
+// of two apart (virtual_shadow_gpu.rs `pitch_pad`). A 16 KiB row stride let the lookup's vertical
+// neighbours fall into the same memory channels and cache sets, which in some placements of the
+// layers made Glint's cannon and flight views 4x dearer.
+const VSM_PITCH_PAD:u32=32u;
+fn vsm_pitch()->u32 {return vsm.counts.y*VSM_PAGE+VSM_PITCH_PAD;}
 fn vsm_light(world:vec3<f32>)->vec3<f32> {
     let rel=world-vsm.eye.xyz;
     return vec3<f32>(dot(rel,vsm.u.xyz),dot(rel,vsm.v.xyz),dot(world,vsm.l.xyz));
@@ -52,7 +58,7 @@ fn vsm_radius(level:u32,height:f32)->f32 {
 }
 fn vsm_word(cell:vec2<i32>,level:u32)->u32 {
     let side=vsm.counts.y*VSM_PAGE;
-    return (level*side+u32(cell.y))*side+u32(cell.x);
+    return (level*side+u32(cell.y))*vsm_pitch()+u32(cell.x);
 }
 
 // ---- The clipmap layers (virtual_shadow.wgsl's), as (id, normalized height bits) ----
@@ -117,7 +123,7 @@ fn vmap_gradient(word:u32)->vec2<f32> {return unpack2x16float(word);}
     for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
         let inside=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
         let t=corner+inside;
-        let i=(level*side+t.y)*side+t.x;
+        let i=(level*side+t.y)*vsm_pitch()+t.x;
         var out=vec2<u32>(0u);
         var errors=vec2<f32>(0.0);
         for(var layer=0u;layer<2u;layer+=1u) {
@@ -186,7 +192,7 @@ struct VsmPass {level:u32,pad0:u32,pad1:u32,pad2:u32};
     for(var k=0u;k<4u;k+=1u) {
         let c=id.xy*2u+vec2<u32>(k&1u,k>>1u);
         if mip==1u {
-            h=min(h,bitcast<f32>(vsm_top_words[(level*side+c.y)*side+c.x].y));
+            h=min(h,bitcast<f32>(vsm_top_words[(level*side+c.y)*vsm_pitch()+c.x].y));
         } else {
             h=min(h,vmap_minmips_out[vsm_mip_base(level,mip-1u)+c.y*(2u*s)+c.x]);
         }
@@ -543,7 +549,7 @@ fn vmap_mip_min(level:u32,centre:vec2<f32>,radius:f32)->f32 {
     let mip=u32(ceil(log2(span)));
     var h=0.0;
     if mip==0u {
-        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*side+u32(a.x)].y);
+        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*vsm_pitch()+u32(a.x)].y);
     } else {
         let ia=vec2<u32>(a)>>vec2<u32>(mip);let ib=vec2<u32>(b)>>vec2<u32>(mip);
         let s=side>>mip;let base=vsm_mip_base(level,mip);
@@ -563,7 +569,7 @@ fn vmap_mip_max(level:u32,centre:vec2<f32>,radius:f32)->f32 {
     let mip=u32(ceil(log2(span)));
     var h=0.0;
     if mip==0u {
-        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*side+u32(a.x)].y);
+        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*vsm_pitch()+u32(a.x)].y);
     } else {
         let ia=vec2<u32>(a)>>vec2<u32>(mip);let ib=vec2<u32>(b)>>vec2<u32>(mip);
         let s=side>>mip;let base=vsm_mip_base(level,mip);
@@ -581,7 +587,7 @@ fn vsm_mip_clear(level:u32,centre:vec2<f32>,radius:f32,lower:f32)->bool {
     let mip=u32(ceil(log2(span)));
     var h=0.0;
     if mip==0u {
-        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*side+u32(a.x)].y);
+        h=bitcast<f32>(vsm_top_words[(level*side+u32(a.y))*vsm_pitch()+u32(a.x)].y);
     } else {
         let ia=vec2<u32>(a)>>vec2<u32>(mip);let ib=vec2<u32>(b)>>vec2<u32>(mip);
         let s=side>>mip;let base=vsm_mip_base(level,mip);

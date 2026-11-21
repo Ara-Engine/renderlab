@@ -64,6 +64,12 @@ struct VdFrame {
 };
 @group(0) @binding(50) var<uniform> vd:VdFrame;
 
+// The dense layers' row pitch in texels: the window's side plus VSM_PITCH_PAD, so rows are not a power
+// of two apart (virtual_shadow_gpu.rs `pitch_pad`). A 16 KiB row stride let the lookup's vertical
+// neighbours fall into the same memory channels and cache sets, which in some placements of the
+// layers made Glint's cannon and flight views 4x dearer.
+const VSM_PITCH_PAD:u32=32u;
+fn vsm_pitch()->u32 {return vsm.counts.y*VSM_PAGE+VSM_PITCH_PAD;}
 fn vsm_light(world:vec3<f32>)->vec3<f32> {
     let rel=world-vsm.eye.xyz;
     return vec3<f32>(dot(rel,vsm.u.xyz),dot(rel,vsm.v.xyz),dot(world,vsm.l.xyz));
@@ -72,7 +78,7 @@ fn vsm_texel(level:u32)->f32 {return vsm.levels[level].origin.z;}
 fn vsm_extent(level:u32)->f32 {return f32(vsm.counts.y*VSM_PAGE)*vsm_texel(level);}
 fn vsm_word(cell:vec2<i32>,level:u32)->u32 {
     let side=vsm.counts.y*VSM_PAGE;
-    return (level*side+u32(cell.y))*side+u32(cell.x);
+    return (level*side+u32(cell.y))*vsm_pitch()+u32(cell.x);
 }
 // virtual_shadow.wgsl's sparse layout (vsm_sparse, vsm_vpage, vsm_section, vsm_page_mip).
 fn vsm_sparse()->bool {return (vsm.misc.w&0x200u)!=0u;}
