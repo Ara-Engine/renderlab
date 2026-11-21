@@ -953,20 +953,6 @@ fn gi_queue_integrate(slot:u32) {
 fn gi_bounce_on() -> bool { return gi_word(GI_H_BOUNCE)!=0u; }
 // Queues a cell for this frame's cell shading once (GI_SHADE, cleared by gi_light). Every
 // caller handles the cell in one thread.
-// Cause counters (bench attribution, sunrt 21 Nov): the cells queued for cell shading by why,
-// once a cell (counted before gi_queue_shade sets GI_SHADE), and the scan's re-traces of
-// untraced or partial cells (created, invalidated and refreshed count the other traces).
-const GI_W_SHADE_CAUSE:u32=210u;
-const GI_SHADE_AFTER_TRACE:u32=0u;
-const GI_SHADE_SKY:u32=1u;
-const GI_SHADE_RELIGHT:u32=2u;
-const GI_SHADE_MOVER:u32=3u;
-const GI_SHADE_AFTER_GATHER:u32=4u;
-const GI_W_TRACE_PARTIAL:u32=215u;
-fn gi_queue_shade_cause(slot:u32, cause:u32) {
-    if (gi_table[gi_cold(slot)+GI_C_STATE]&GI_SHADE)==0u { atomicAdd(&gi_work[GI_W_SHADE_CAUSE+cause],1u); }
-    gi_queue_shade(slot);
-}
 fn gi_queue_shade(slot:u32) {
     let cold=gi_cold(slot);
     let state=gi_table[cold+GI_C_STATE];
@@ -1690,7 +1676,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             // Bounce (G2): a traced cell's sky changed, so it is shaded again; once every
             // direction is known its blocked directions are gathered GI_H_GATHERS times.
             if gi_bounce_on() {
-                gi_queue_shade_cause(slot,GI_SHADE_AFTER_TRACE);
+                gi_queue_shade(slot);
                 // A cell made for a gather's hit takes GI_H_HIT_GATHERS (U-RTVIS: the fan-out).
                 let hit_made=(gi_table[cold+GI_C_STATE]&GI_SECONDARY)!=0u && gi_word(GI_H_HIT_GATHERS)!=0u;
                 // First fill's parent cells only stand in while finer cells are created: one gather.
@@ -1740,7 +1726,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             gi_store_sh(slot);
             // A filtered value is rewritten from the new source this frame (G3): the filter
             // reads the cell shading queue.
-            if gi_bounce_on() && gi_filter_on(GI_FILTER_SKY) { gi_queue_shade_cause(slot,GI_SHADE_SKY); }
+            if gi_bounce_on() && gi_filter_on(GI_FILTER_SKY) { gi_queue_shade(slot); }
         }
         workgroupBarrier();
     }
@@ -1856,7 +1842,6 @@ fn gi_count_read(at:u32, cold:u32) {
     if (state&GI_QUEUED)!=0u { return; }
     let flags=gi_frame.counts.z;
     var trace=(state&GI_TRACED)==0u || ((flags&GI_SCAN_PARTIAL)!=0u && (state&GI_PARTIAL)!=0u);
-    if trace { atomicAdd(&gi_work[GI_W_TRACE_PARTIAL],1u); }
     if !trace && (flags&(GI_SCAN_CASTER|GI_SCAN_STALE))!=0u {
         var reach=0u;
         if (flags&GI_SCAN_CASTER)!=0u { reach=gi_reach(slot,gi_cell(slot)); }
@@ -1894,7 +1879,7 @@ fn gi_count_read(at:u32, cold:u32) {
             let p=relight&0xffu;
             if all || p==0u || (slot+((relight>>8u)&0xffu))%p==0u {
                 gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
-                gi_queue_shade_cause(slot,GI_SHADE_RELIGHT);
+                gi_queue_shade(slot);
                 gi_schedule(slot,select(1u,gi_word(GI_H_GATHERS),all));
             }
         }
@@ -1902,7 +1887,7 @@ fn gi_count_read(at:u32, cold:u32) {
             atomicAdd(&gi_work[GI_W_RESHADED],1u);
             gi_count_read(GI_W_RESHADED_READ,cold);
             gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
-            gi_queue_shade_cause(slot,GI_SHADE_MOVER);
+            gi_queue_shade(slot);
         }
     }
     // A changing map re-integrates one fixed slot group a frame (src/gi_cache.rs
@@ -2600,7 +2585,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
                 retry=0u;
             }
             gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
-            gi_queue_shade_cause(slot,GI_SHADE_AFTER_GATHER);
+            gi_queue_shade(slot);
             gi_gather_done(slot,left);
         }
         }

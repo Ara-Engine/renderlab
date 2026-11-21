@@ -609,6 +609,12 @@ fn scan(shaders: &Path) -> BTreeMap<String, SystemTime> {
 
 /// The bench's entry point (src/bin/lightbench.rs). Returns the process exit code.
 pub fn main() -> i32 {
+    // The cause line's counters (src/gi_causes.rs), composed into the cache kernels before the first renderer;
+    // LIGHTBENCH_CAUSES=0 runs the default kernels.
+    if std::env::var("LIGHTBENCH_CAUSES").as_deref() != Ok("0") && std::env::var_os("RENDERLAB_GI_CAUSES").is_none() {
+        // SAFETY: set before the bench starts any thread or renderer.
+        unsafe { std::env::set_var("RENDERLAB_GI_CAUSES", "1") };
+    }
     let o = match options() {
         Ok(o) => o,
         Err(error) => {

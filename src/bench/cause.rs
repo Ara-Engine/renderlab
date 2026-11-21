@@ -22,6 +22,10 @@ pub(super) fn line(series: &[(String, Vec<f64>)], pass_ms: impl Fn(&str) -> f64)
     let get = |name: &str| series.iter().find(|(k, _)| k == name).map(|(_, v)| median(v));
     let (created, partial, invalidated, refreshed) = (get("created")?, get("trace_partial")?, get("invalidated")?, get("refreshed")?);
     let shade = ["shade_trace", "shade_sky", "shade_relight", "shade_mover", "shade_gather"].map(|k| get(k).unwrap_or(0.0));
+    // Cells were shaded but no cause counted: the kernels ran without the counters (LIGHTBENCH_CAUSES=0).
+    if shade.iter().all(|&v| v == 0.0) && get("shades").unwrap_or(0.0) > 0.0 {
+        return Some("off (the kernels ran without the cause counters: LIGHTBENCH_CAUSES=0)".into());
+    }
     let (gathers, gather_rays) = (get("gathers").unwrap_or(0.0), get("gather_rays").unwrap_or(0.0));
     let traced = created + partial + invalidated + refreshed;
     let share = |x: f64, of: f64| if of > 0.0 { x / of } else { 0.0 };
