@@ -27,9 +27,42 @@ const POSITION_WORDS: usize = 3;
 /// Builds a full-detail one-level BVH4 over a triangle list (eight triangles a leaf), by binned
 /// SAH splits (GC1: software rays visit fewer nodes and triangles than over median splits; the
 /// same hits, docs/m7-gc1.md).
+///
+/// `RENDERLAB_GI_SPLITS=leaf=N[,spatial]` builds with at most N triangles a leaf (1-8) and, with
+/// `spatial`, spatial splits (`near_field::build_bvh_split`): the same hits, fewer triangle tests
+/// where long triangles overlap. Meshes that refit keep `build_refittable`.
 pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh, Error> {
+    let Some((leaf, spatial)) = splits() else {
+        return build_refittable(positions, indices);
+    };
+    let start = std::time::Instant::now();
+    let bvh = crate::asset::near_field::build_bvh_split(positions, indices, leaf, spatial)
+        .map_err(|_| Error::InvalidInput("indirect geometry is not a valid triangle list"))?;
+    let words = bvh.nodes.len() * NODE_WORDS + bvh.leaves.len() * LEAF_WORDS + bvh.positions.len() * POSITION_WORDS + bvh.indices.len();
+    eprintln!(
+        "{{\"gi_splits_build\":{},\"references\":{},\"nodes\":{},\"leaves\":{},\"words\":{words},\"seconds\":{:.4}}}",
+        indices.len() / 3,
+        bvh.indices.len() / 3,
+        bvh.nodes.len(),
+        bvh.leaves.len(),
+        start.elapsed().as_secs_f64()
+    );
+    Ok(bvh)
+}
+/// The binned SAH build at eight triangles a leaf, whose tree `near_field::refit_bvh` can refit
+/// to new positions of the same vertices (skinned meshes).
+pub(crate) fn build_refittable(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh, Error> {
     crate::asset::near_field::build_bvh_sah(positions, indices)
         .map_err(|_| Error::InvalidInput("indirect geometry is not a valid triangle list"))
+}
+/// `RENDERLAB_GI_SPLITS`: (leaf triangles, spatial splits), or None for `build_refittable`.
+fn splits() -> Option<(usize, bool)> {
+    static S: std::sync::OnceLock<Option<(usize, bool)>> = std::sync::OnceLock::new();
+    *S.get_or_init(|| {
+        let v = std::env::var("RENDERLAB_GI_SPLITS").ok()?;
+        let leaf = v.split(',').find_map(|p| p.strip_prefix("leaf=")?.parse().ok()).unwrap_or(crate::asset::near_field::LEAF_TRIANGLES);
+        Some((leaf, v.split(',').any(|p| p == "spatial")))
+    })
 }
 
 /// One cooked placement's near-field masks (two sides of `words` per BVH position) and the

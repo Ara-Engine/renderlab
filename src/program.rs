@@ -821,7 +821,14 @@ fn gi_shader_variant<'a>(name: &str, text: &'a str) -> std::borrow::Cow<'a, str>
     }
     // The software rays' top level (src/instance_bvh.rs) selects its traversal here.
     if name == "gi_rays_software.wgsl" {
-        return crate::instance_bvh::shader_text(text).into();
+        let text = crate::instance_bvh::shader_text(text);
+        // RENDERLAB_GI_TRI_COUNT=1: per-mesh traversal counts (measurement).
+        if crate::renderer::gi_cache::tri_counting() {
+            let from = "const GI_TRI_COUNT:bool=false;";
+            assert_eq!(text.matches(from).count(), 1, "RENDERLAB_GI_TRI_COUNT seam");
+            return text.replacen(from, "const GI_TRI_COUNT:bool=true;", 1).into();
+        }
+        return text.into();
     }
     text.into()
 }

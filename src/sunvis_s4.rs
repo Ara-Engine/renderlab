@@ -242,7 +242,7 @@ fn triangles<'b>(
             return None;
         }
         let bvh = &blas.bvh;
-        let local: Vec<[usize; 3]> = bvh
+        let mut local: Vec<[usize; 3]> = bvh
             .leaves
             .iter()
             .flat_map(|l| {
@@ -252,6 +252,12 @@ fn triangles<'b>(
                     .map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
             })
             .collect();
+        // A spatial-split tree (RENDERLAB_GI_SPLITS, src/gi_bvh.rs) lists a triangle in every
+        // leaf that holds part of it: each once, in first-seen order.
+        if local.len() * 3 > d.mesh.index_count as usize {
+            let mut seen = std::collections::HashSet::new();
+            local.retain(|t| seen.insert(*t));
+        }
         if local.len() * 3 != d.mesh.index_count as usize {
             return None;
         }

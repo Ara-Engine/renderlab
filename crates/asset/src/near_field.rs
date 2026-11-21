@@ -203,6 +203,327 @@ fn depth(bvh: &Bvh, child: u32) -> usize {
         .unwrap_or(0)
 }
 
+/// Runtime software-ray BVH4 with at most `leaf_max` triangles a leaf (1 to LEAF_TRIANGLES) and,
+/// with `spatial`, spatial splits (Stich, Friedrich and Dietrich 2009, "Spatial Splits in Bounding
+/// Volume Hierarchies"): a binary split may cut triangle references at a plane, so a long triangle
+/// stops inflating every box it crosses. A triangle can then sit in several leaves, each holding
+/// the box of its part there; a ray's hit on it lies in one of those parts, so the hits are a
+/// whole-triangle build's. Leaf boxes are the parts' rather than the triangles', so
+/// `Bvh::validate`'s enclosure check does not apply (the tree's own test checks its hits). Not
+/// refittable: deforming meshes keep `build_bvh_sah`. A tree deeper than MAX_SAH_DEPTH falls back
+/// to `build_bvh_sah`.
+pub fn build_bvh_split(positions: &[[f32; 3]], indices: &[u32], leaf_max: usize, spatial: bool) -> Result<Bvh> {
+    if indices.is_empty() || !indices.len().is_multiple_of(3) {
+        return Err(Error("BVH geometry needs a nonempty triangle list"));
+    }
+    if indices.iter().any(|&i| i as usize >= positions.len()) || positions.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(Error("BVH geometry has an invalid index or position"));
+    }
+    let refs: Vec<Ref> = (0..indices.len() / 3)
+        .map(|t| {
+            let (lo, hi) = bounds((0..3).map(|k| positions[indices[t * 3 + k] as usize]));
+            Ref { tri: t as u32, lo, hi }
+        })
+        .collect();
+    let (lo, hi) = refs.iter().fold(NO_BOX, |b, r| merge(b, (r.lo, r.hi)));
+    let mut builder = SplitBuilder {
+        positions,
+        indices,
+        leaf_max: leaf_max.clamp(1, LEAF_TRIANGLES),
+        spatial,
+        root_area: half_area(lo, hi),
+        // At most as many extra references as triangles: memory stays within 2x however much the
+        // triangles overlap.
+        budget: refs.len(),
+        leaf_boxes: vec![],
+        bvh: Bvh { positions: positions.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect(), ..Default::default() },
+    };
+    let root = builder.subtree(refs);
+    let mut bvh = builder.bvh;
+    if depth(&bvh, root) > MAX_SAH_DEPTH {
+        return build_bvh_sah(positions, indices);
+    }
+    let leaves = bvh.leaves.len() as u32;
+    bvh.level_leaves = (0..leaves).collect();
+    bvh.levels.push(Level { mesh: 0, root, requested_error: 0.0, max_error: 0.0, leaves: Span { offset: 0, count: leaves } });
+    Ok(bvh)
+}
+/// One triangle reference: the triangle, and the box of its part this subtree holds.
+#[derive(Clone, Copy)]
+struct Ref {
+    tri: u32,
+    lo: [f32; 3],
+    hi: [f32; 3],
+}
+impl Ref {
+    fn centroid(&self, axis: usize) -> f32 {
+        0.5 * (self.lo[axis] + self.hi[axis])
+    }
+}
+/// A split's overlap must exceed this share of the root's area before spatial splits are tried
+/// (Stich et al.'s alpha).
+const SPLIT_ALPHA: f32 = 1e-5;
+type Boxed = ([f32; 3], [f32; 3]);
+const NO_BOX: Boxed = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+struct SplitBuilder<'a> {
+    positions: &'a [[f32; 3]],
+    indices: &'a [u32],
+    leaf_max: usize,
+    spatial: bool,
+    root_area: f32,
+    /// Extra references spatial splits may still add.
+    budget: usize,
+    /// Per leaf, the union of its references' boxes (the box its parent stores).
+    leaf_boxes: Vec<Boxed>,
+    bvh: Bvh,
+}
+impl SplitBuilder<'_> {
+    fn subtree(&mut self, refs: Vec<Ref>) -> u32 {
+        if refs.len() <= self.leaf_max {
+            return self.leaf(&refs);
+        }
+        let mut groups = vec![refs];
+        for _ in 0..2 {
+            groups = groups
+                .into_iter()
+                .flat_map(|g| {
+                    if g.len() <= self.leaf_max {
+                        return vec![g];
+                    }
+                    let (a, b) = self.split(g);
+                    vec![a, b]
+                })
+                .collect();
+        }
+        let children: Vec<u32> = groups.into_iter().map(|g| self.subtree(g)).collect();
+        let boxes: Vec<_> = children.iter().map(|&c| self.child_bounds(c)).collect();
+        let id = self.bvh.nodes.len() as u32;
+        self.bvh.nodes.push(quantized_node(&children, &boxes));
+        id
+    }
+    /// The cheaper of the binned object split and (when the object split's children overlap and
+    /// the budget allows) the binned spatial split, by the surface-area heuristic.
+    fn split(&mut self, g: Vec<Ref>) -> (Vec<Ref>, Vec<Ref>) {
+        let n = g.len();
+        let object = self.object_split(&g);
+        if self.spatial && self.budget > 0 {
+            let overlap = object.as_ref().map_or(f32::INFINITY, |o| {
+                let lo: [f32; 3] = std::array::from_fn(|a| o.left.0[a].max(o.right.0[a]));
+                let hi: [f32; 3] = std::array::from_fn(|a| o.left.1[a].min(o.right.1[a]));
+                if (0..3).all(|a| lo[a] <= hi[a]) { half_area(lo, hi) } else { 0.0 }
+            });
+            if overlap > SPLIT_ALPHA * self.root_area
+                && let Some((cost, axis, plane)) = self.spatial_split(&g)
+                && object.as_ref().is_none_or(|o| cost < o.cost)
+            {
+                let (mut left, mut right) = (vec![], vec![]);
+                for r in &g {
+                    if r.hi[axis] <= plane {
+                        left.push(*r);
+                    } else if r.lo[axis] >= plane {
+                        right.push(*r);
+                    } else {
+                        if let Some(b) = self.clip(r, axis, f32::NEG_INFINITY, plane) {
+                            left.push(Ref { tri: r.tri, lo: b.0, hi: b.1 });
+                        }
+                        if let Some(b) = self.clip(r, axis, plane, f32::INFINITY) {
+                            right.push(Ref { tri: r.tri, lo: b.0, hi: b.1 });
+                        }
+                    }
+                }
+                let extra = (left.len() + right.len()).saturating_sub(n);
+                if !left.is_empty() && !right.is_empty() && left.len() < n && right.len() < n && extra <= self.budget {
+                    self.budget -= extra;
+                    return (left, right);
+                }
+            }
+        }
+        match object {
+            Some(o) => g.into_iter().partition(|r| o.bin(r) <= o.plane),
+            None => {
+                // Every centroid in one bin on every axis: halve by count in a fixed order.
+                let (lo, hi) = g.iter().fold(NO_BOX, |b, r| merge(b, (r.lo, r.hi)));
+                let axis = (0..3).max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b]))).unwrap();
+                let mut g = g;
+                g.sort_by(|a, b| a.centroid(axis).total_cmp(&b.centroid(axis)).then(a.tri.cmp(&b.tri)));
+                let b = g.split_off(g.len() / 2);
+                (g, b)
+            }
+        }
+    }
+    fn object_split(&self, g: &[Ref]) -> Option<ObjectSplit> {
+        let (lo, hi) = g.iter().fold(NO_BOX, |b, r| {
+            let c: [f32; 3] = std::array::from_fn(|a| r.centroid(a));
+            merge(b, (c, c))
+        });
+        let mut best: Option<ObjectSplit> = None;
+        for axis in 0..3 {
+            let extent = hi[axis] - lo[axis];
+            if extent.is_nan() || extent <= 0.0 {
+                continue;
+            }
+            let split = ObjectSplit { cost: 0.0, axis, lo: lo[axis], extent, plane: 0, left: NO_BOX, right: NO_BOX };
+            let mut count = [0usize; SAH_BINS];
+            let mut boxes = [NO_BOX; SAH_BINS];
+            for r in g {
+                let b = split.bin(r);
+                count[b] += 1;
+                boxes[b] = merge(boxes[b], (r.lo, r.hi));
+            }
+            let mut right = [(0.0f32, NO_BOX); SAH_BINS];
+            let (mut acc, mut k) = (NO_BOX, 0usize);
+            for b in (1..SAH_BINS).rev() {
+                acc = merge(acc, boxes[b]);
+                k += count[b];
+                right[b] = (half_area(acc.0, acc.1) * k as f32, acc);
+            }
+            let (mut acc, mut k) = (NO_BOX, 0usize);
+            for b in 0..SAH_BINS - 1 {
+                acc = merge(acc, boxes[b]);
+                k += count[b];
+                if k == 0 || k == g.len() {
+                    continue;
+                }
+                let cost = half_area(acc.0, acc.1) * k as f32 + right[b + 1].0;
+                if best.as_ref().is_none_or(|o| cost < o.cost) {
+                    best = Some(ObjectSplit { cost, plane: b, left: acc, right: right[b + 1].1, ..split });
+                }
+            }
+        }
+        best
+    }
+    /// The binned spatial split over the references' common box: per axis SAH_BINS slabs, each
+    /// reference's clipped part added to every slab it crosses, entries and exits counted
+    /// (Stich et al. 2009, section 4). Returns the cost, axis and plane.
+    fn spatial_split(&self, g: &[Ref]) -> Option<(f32, usize, f32)> {
+        let (lo, hi) = g.iter().fold(NO_BOX, |b, r| merge(b, (r.lo, r.hi)));
+        let mut best: Option<(f32, usize, f32)> = None;
+        for axis in 0..3 {
+            let extent = hi[axis] - lo[axis];
+            if extent.is_nan() || extent <= 0.0 {
+                continue;
+            }
+            let w = extent / SAH_BINS as f32;
+            let plane = |k: usize| lo[axis] + w * k as f32;
+            let bin = |x: f32| (((x - lo[axis]) / w) as usize).min(SAH_BINS - 1);
+            let mut boxes = [NO_BOX; SAH_BINS];
+            let (mut entry, mut exit) = ([0usize; SAH_BINS], [0usize; SAH_BINS]);
+            for r in g {
+                let (first, last) = (bin(r.lo[axis]), bin(r.hi[axis]));
+                entry[first] += 1;
+                exit[last] += 1;
+                for b in first..=last {
+                    let part = if first == last { Some((r.lo, r.hi)) } else { self.clip(r, axis, plane(b), plane(b + 1)) };
+                    if let Some(part) = part {
+                        boxes[b] = merge(boxes[b], part);
+                    }
+                }
+            }
+            let mut right = [0.0f32; SAH_BINS];
+            let (mut acc, mut k) = (NO_BOX, 0usize);
+            for b in (1..SAH_BINS).rev() {
+                acc = merge(acc, boxes[b]);
+                k += exit[b];
+                right[b] = half_area(acc.0, acc.1) * k as f32;
+            }
+            let (mut acc, mut k) = (NO_BOX, 0usize);
+            for b in 0..SAH_BINS - 1 {
+                acc = merge(acc, boxes[b]);
+                k += entry[b];
+                let rest: usize = exit[b + 1..].iter().sum();
+                if k == 0 || rest == 0 {
+                    continue;
+                }
+                let cost = half_area(acc.0, acc.1) * k as f32 + right[b + 1];
+                if best.is_none_or(|(c, _, _)| cost < c) {
+                    best = Some((cost, axis, plane(b + 1)));
+                }
+            }
+        }
+        best
+    }
+    /// The box of reference `r`'s triangle between `s0` and `s1` on `axis`, within `r`'s box, or
+    /// None when the triangle does not reach that slab. Points on the clip planes come from the
+    /// edges and are padded outward by a few ulps, so the part's box encloses the exact part.
+    fn clip(&self, r: &Ref, axis: usize, s0: f32, s1: f32) -> Option<Boxed> {
+        let t = r.tri as usize * 3;
+        let v: [[f32; 3]; 3] = std::array::from_fn(|k| self.positions[self.indices[t + k] as usize]);
+        let mut b = NO_BOX;
+        for i in 0..3 {
+            let (a, c) = (v[i], v[(i + 1) % 3]);
+            if a[axis] >= s0 && a[axis] <= s1 {
+                b = merge(b, (a, a));
+            }
+            for s in [s0, s1] {
+                if s.is_finite() && (a[axis] - s) * (c[axis] - s) < 0.0 {
+                    let f = (s - a[axis]) / (c[axis] - a[axis]);
+                    let mut p: [f32; 3] = std::array::from_fn(|k| a[k] + (c[k] - a[k]) * f);
+                    p[axis] = s;
+                    b = merge(b, (p, p));
+                }
+            }
+        }
+        if b.0[0] > b.1[0] {
+            return None;
+        }
+        let pad = |x: f32| x.abs() * 4.0 * f32::EPSILON + f32::MIN_POSITIVE;
+        let lo: [f32; 3] = std::array::from_fn(|k| (b.0[k] - pad(b.0[k])).max(r.lo[k]));
+        let hi: [f32; 3] = std::array::from_fn(|k| (b.1[k] + pad(b.1[k])).min(r.hi[k]));
+        Some((lo, std::array::from_fn(|k| hi[k].max(lo[k]))))
+    }
+    fn leaf(&mut self, refs: &[Ref]) -> u32 {
+        let offset = self.bvh.indices.len() as u32;
+        for r in refs {
+            let t = r.tri as usize * 3;
+            self.bvh.indices.extend_from_slice(&self.indices[t..t + 3]);
+        }
+        let id = self.bvh.leaves.len() as u32;
+        self.bvh.leaves.push(Leaf {
+            mesh: 0,
+            cluster: id,
+            page: 0,
+            source_index_offset: refs[0].tri * 3,
+            indices: Span { offset, count: (refs.len() * 3) as u32 },
+            error: 0.0,
+            material: 0,
+        });
+        self.leaf_boxes.push(refs.iter().fold(NO_BOX, |b, r| merge(b, (r.lo, r.hi))));
+        id | LEAF_BIT
+    }
+    fn child_bounds(&self, child: u32) -> Boxed {
+        if child & LEAF_BIT != 0 {
+            return self.leaf_boxes[(child & !LEAF_BIT) as usize];
+        }
+        let n = &self.bvh.nodes[child as usize];
+        let mut out = NO_BOX;
+        for slot in 0..4 {
+            if n.children[slot] == EMPTY {
+                continue;
+            }
+            for (a, b) in [n.child_bounds(slot), n.child_bounds_fused(slot)] {
+                out = merge(out, (a.map(|x| x as f32), b.map(|x| x as f32)));
+            }
+        }
+        out
+    }
+}
+/// An object split's plane: references whose centroid bin is at most `plane` go left.
+#[derive(Clone, Copy)]
+struct ObjectSplit {
+    cost: f32,
+    axis: usize,
+    lo: f32,
+    extent: f32,
+    plane: usize,
+    left: Boxed,
+    right: Boxed,
+}
+impl ObjectSplit {
+    fn bin(&self, r: &Ref) -> usize {
+        (((r.centroid(self.axis) - self.lo) / self.extent * SAH_BINS as f32) as usize).min(SAH_BINS - 1)
+    }
+}
+
 fn build(positions: &[[f32; 3]], indices: &[u32], sah: bool) -> Result<Bvh> {
     if indices.is_empty() || !indices.len().is_multiple_of(3) {
         return Err(Error("BVH geometry needs a nonempty triangle list"));
@@ -824,5 +1145,120 @@ mod tests {
         bad.settings.skip = 1.0;
         assert!(encode(&bad, Limits::default()).is_err());
         assert!(encode(&field, Limits { max_bytes: 64 }).is_err());
+    }
+
+    /// Closest hit along (o, d) over `tris` triangles (each three corners), by Moller-Trumbore in
+    /// f64: the same per-triangle arithmetic for the brute force and the tree walk.
+    fn hit(v: [[f32; 3]; 3], o: [f64; 3], d: [f64; 3]) -> Option<f64> {
+        let p = |k: usize| v[k].map(f64::from);
+        let (a, b, c) = (p(0), p(1), p(2));
+        let sub = |x: [f64; 3], y: [f64; 3]| [x[0] - y[0], x[1] - y[1], x[2] - y[2]];
+        let cross = |x: [f64; 3], y: [f64; 3]| [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+        let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        let (e1, e2) = (sub(b, a), sub(c, a));
+        let q = cross(d, e2);
+        let det = dot(e1, q);
+        if det.abs() < 1e-14 {
+            return None;
+        }
+        let s = sub(o, a);
+        let u = dot(s, q) / det;
+        let r = cross(s, e1);
+        let w = dot(d, r) / det;
+        let t = dot(e2, r) / det;
+        (u >= 0.0 && w >= 0.0 && u + w <= 1.0 && t > 1e-9).then_some(t)
+    }
+    /// The tree's closest hit: a stack walk over the quantized child boxes (unfused decode).
+    fn walk(bvh: &Bvh, o: [f64; 3], d: [f64; 3]) -> Option<f64> {
+        let mut best = f64::INFINITY;
+        let mut stack = vec![bvh.levels[0].root];
+        while let Some(child) = stack.pop() {
+            if child & LEAF_BIT != 0 {
+                let leaf = &bvh.leaves[(child & !LEAF_BIT) as usize];
+                let span = leaf.indices.offset as usize..(leaf.indices.offset + leaf.indices.count) as usize;
+                for t in bvh.indices[span].chunks_exact(3) {
+                    let v = std::array::from_fn(|k| {
+                        let p = bvh.positions[t[k] as usize];
+                        [p[0], p[1], p[2]]
+                    });
+                    if let Some(t) = hit(v, o, d) {
+                        best = best.min(t);
+                    }
+                }
+                continue;
+            }
+            let n = &bvh.nodes[child as usize];
+            for slot in 0..4 {
+                if n.children[slot] == EMPTY {
+                    continue;
+                }
+                let (lo, hi) = n.child_bounds(slot);
+                let (mut near, mut far) = (0.0f64, best);
+                for a in 0..3 {
+                    if d[a] == 0.0 {
+                        if o[a] < lo[a] || o[a] > hi[a] {
+                            far = -1.0;
+                        }
+                        continue;
+                    }
+                    let (t0, t1) = ((lo[a] - o[a]) / d[a], (hi[a] - o[a]) / d[a]);
+                    near = near.max(t0.min(t1));
+                    far = far.min(t0.max(t1));
+                }
+                if near <= far {
+                    stack.push(n.children[slot]);
+                }
+            }
+        }
+        best.is_finite().then_some(best)
+    }
+
+    /// Spatial splits and small leaves keep every closest hit of a whole-triangle brute force:
+    /// a grid crossed by long slivers in every direction (the case spatial splits cut), random
+    /// rays from inside and around it. Splits add references (each triangle sits in at least one
+    /// leaf) and stay within the 2x reference budget.
+    #[test]
+    fn split_builds_keep_every_closest_hit() {
+        let (mut positions, mut indices) = grid(16);
+        let mut seed = 0x9e37_79b9u32;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        for _ in 0..200 {
+            let base = positions.len() as u32;
+            let a = [rand() * 1.4 - 0.2, rand(), rand() * 1.4 - 0.2];
+            let b = [rand() * 1.4 - 0.2, rand(), rand() * 1.4 - 0.2];
+            let c = [a[0] + (rand() - 0.5) * 0.05, a[1] + (rand() - 0.5) * 0.05, a[2] + (rand() - 0.5) * 0.05];
+            positions.extend_from_slice(&[a, b, c]);
+            indices.extend_from_slice(&[base, base + 1, base + 2]);
+        }
+        let tris: Vec<[[f32; 3]; 3]> = indices
+            .chunks_exact(3)
+            .map(|t| std::array::from_fn(|k| positions[t[k] as usize]))
+            .collect();
+        for (leaf_max, spatial) in [(8, false), (2, false), (4, true), (2, true), (1, true)] {
+            let bvh = build_bvh_split(&positions, &indices, leaf_max, spatial).unwrap();
+            let refs = bvh.indices.len() / 3;
+            assert!(refs >= tris.len() && refs <= 2 * tris.len(), "{leaf_max} {spatial}: {refs} references");
+            assert!(bvh.leaves.iter().all(|l| l.indices.count as usize <= 3 * leaf_max));
+            if spatial {
+                assert!(refs > tris.len(), "the slivers are split");
+            }
+            let mut hits = 0;
+            for _ in 0..10000 {
+                let o = [rand() * 1.8 - 0.4, rand() * 1.4 - 0.2, rand() * 1.8 - 0.4].map(f64::from);
+                let z = f64::from(rand()) * 2.0 - 1.0;
+                let phi = f64::from(rand()) * std::f64::consts::TAU;
+                let r = (1.0 - z * z).sqrt();
+                let d = [r * phi.cos(), z, r * phi.sin()];
+                let brute = tris.iter().filter_map(|&v| hit(v, o, d)).min_by(f64::total_cmp);
+                assert_eq!(walk(&bvh, o, d), brute, "leaf {leaf_max} spatial {spatial} ray {o:?} {d:?}");
+                hits += usize::from(brute.is_some());
+            }
+            assert!(hits > 1000, "{hits} of 10000 rays hit");
+        }
     }
 }

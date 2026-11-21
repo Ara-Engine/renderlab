@@ -467,6 +467,16 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
         let mut busy = leases(o);
         let result = rig.fixture.run(r, rig.path, rig.reference.as_ref());
         let _ = kit::drain(r);
+        // shade, measurement: RENDERLAB_GI_TRI_COUNT's per-mesh sums over the frames read.
+        if crate::renderer::gi_cache::tri_counting() {
+            let c = crate::renderer::gi_cache::take_tri_counts();
+            let meshes: Vec<String> = c.get(4..).unwrap_or(&[]).chunks_exact(6).enumerate()
+                .filter(|(_, m)| m[0] + m[4] > 0)
+                .map(|(i, m)| format!("[{i},{},{},{},{},{},{}]", m[0], m[1], m[2], m[3], m[4], m[5]))
+                .collect();
+            println!("{{\"tri_counts\":\"{}\",\"closest_rays\":{},\"any_rays\":{},\"meshes\":[{}]}}",
+                rig.fixture.name(), c.first().copied().unwrap_or(0), c.get(1).copied().unwrap_or(0), meshes.join(","));
+        }
         busy.extend(leases(o));
         busy.sort();
         busy.dedup();

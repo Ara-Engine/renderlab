@@ -70,6 +70,25 @@ fn gi_limit(best:GiHit, i:u32) -> f32 {
 }
 // One instance's part of gi_traverse: its world box, then its BVH, updating best. True when an
 // any-hit ray found a blocker.
+// RENDERLAB_GI_TRI_COUNT=1 (measurement, src/gi_cache.rs tri_counting): per mesh (instance word
+// 28), the rays that entered it and the leaves, nodes and triangles they tested, into counter
+// words from GI_TRI_COUNT_BASE: 0 closest rays, 1 any-hit rays, then 6 a mesh: closest entries,
+// leaves, nodes, triangles; any-hit entries, triangles. Off: compiled out.
+const GI_TRI_COUNT:bool=false;
+const GI_TRI_COUNT_BASE:u32=384u;
+const GI_TRI_COUNT_MESHES:u32=1024u;
+var<private> gi_cnt_leaves:u32;
+var<private> gi_cnt_nodes:u32;
+var<private> gi_cnt_tris:u32;
+fn gi_cnt_flush(r:u32, any_hit:bool) {
+    let m=GI_TRI_COUNT_BASE+4u+min(gi_geometry[r+28u],GI_TRI_COUNT_MESHES-1u)*6u;
+    if any_hit {
+        atomicAdd(&gi_work[m+4u],1u);atomicAdd(&gi_work[m+5u],gi_cnt_tris);
+    } else {
+        atomicAdd(&gi_work[m],1u);atomicAdd(&gi_work[m+1u],gi_cnt_leaves);
+        atomicAdd(&gi_work[m+2u],gi_cnt_nodes);atomicAdd(&gi_work[m+3u],gi_cnt_tris);
+    }
+}
 fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>, tmin:f32, any_hit:bool,
     best:ptr<function,GiHit>, stack:ptr<function,array<u32,GI_BVH_STACK>>) -> bool {
     let r=16u+i*GI_INSTANCE_WORDS;
@@ -81,6 +100,7 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
     let o=vec3<f32>(dot(r0,vec4<f32>(origin,1.0)),dot(r1,vec4<f32>(origin,1.0)),dot(r2,vec4<f32>(origin,1.0)));
     let d=vec3<f32>(dot(r0.xyz,direction),dot(r1.xyz,direction),dot(r2.xyz,direction));
     let inv=gi_safe_inverse(d);
+    if GI_TRI_COUNT { gi_cnt_leaves=0u;gi_cnt_nodes=0u;gi_cnt_tris=0u; }
     let nodes=gi_geometry[r+18u];let leaves=gi_geometry[r+19u];
     let positions=gi_geometry[r+20u];let indices=gi_geometry[r+21u];
     (*stack)[0]=gi_geometry[r+22u];
@@ -92,6 +112,7 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
             // P-MEM runtime layout: only leaf index offset/count are uploaded.
             let l=leaves+(child&~GI_BVH_LEAF)*2u;
             let first=gi_geometry[l];let count=gi_geometry[l+1u];
+            if GI_TRI_COUNT { gi_cnt_leaves+=1u; }
             // Two triangles a step: both triangles' indices, then both triangles'
             // positions, load before either is tested, so a leaf costs half the dependent
             // round trips. They are tested in leaf order, the second against the first's
@@ -109,26 +130,28 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
                 let a2=gi_gv(positions+ja*3u);
                 let b2=gi_gv(positions+jb*3u);
                 let c2=gi_gv(positions+jc*3u);
+                if GI_TRI_COUNT { gi_cnt_tris+=select(1u,2u,two); }
                 let h=gi_triangle(o,d,a,b,c,tmin,gi_limit(*best,i));
                 if h.x>=0.0 {
                     // The source-winding normal through the inverse transpose. r0-r2 are
                     // the world-to-object rows, so the matrix with them as columns is it.
                     let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b-a,c-a);
                     *best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(ia,ib,ic),h.yz);
-                    if any_hit { return true; }
+                    if any_hit { if GI_TRI_COUNT { gi_cnt_flush(r,any_hit); } return true; }
                 }
                 if two {
                     let h2=gi_triangle(o,d,a2,b2,c2,tmin,gi_limit(*best,i));
                     if h2.x>=0.0 {
                         let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b2-a2,c2-a2);
                         *best=GiHit(true,h2.x,unit_normal(n),i,vec3<u32>(ja,jb,jc),h2.yz);
-                        if any_hit { return true; }
+                        if any_hit { if GI_TRI_COUNT { gi_cnt_flush(r,any_hit); } return true; }
                     }
                 }
             }
             continue;
         }
         let n=nodes+child*16u;
+        if GI_TRI_COUNT { gi_cnt_nodes+=1u; }
         let origin_q=gi_gv(n);let step=gi_gv(n+3u);
         // The four children's entry distances (misses above best.t), then pushed far to
         // near so the nearest is visited first: closest-hit rays shrink best.t early and
@@ -163,6 +186,7 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
             }
         }
     }
+    if GI_TRI_COUNT { gi_cnt_flush(r,any_hit); }
     return false;
 }
 const GI_TOP_STACK:u32=48u;
@@ -178,6 +202,7 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
     var best=GiHit(false,tmax,vec3<f32>(0.0),0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
     var stack:array<u32,GI_BVH_STACK>;
     let world_inv=gi_safe_inverse(direction);
+    if GI_TRI_COUNT { atomicAdd(&gi_work[GI_TRI_COUNT_BASE+select(0u,1u,any_hit)],1u); }
     let instances=gi_geometry[0];
     let top=gi_geometry[1];
     if top==0u {

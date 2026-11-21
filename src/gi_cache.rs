@@ -36,7 +36,22 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-pub(crate) const COUNTER_WORDS: u64 = 384;
+/// 384 counter words, then RENDERLAB_GI_TRI_COUNT's per-mesh traversal counts (measurement:
+/// shaders/gi_rays_software.wgsl GI_TRI_COUNT_BASE, 4 + 6 words for each of 1024 meshes).
+pub(crate) const COUNTER_WORDS: u64 = 384 + 4 + 6 * 1024;
+/// RENDERLAB_GI_TRI_COUNT=1 (measurement): software rays count, per mesh, the leaves, nodes and
+/// triangles they test (shaders/gi_rays_software.wgsl GI_TRI_COUNT); `take_tri_counts` returns
+/// the sums over every frame whose counters were read since the last take.
+pub(crate) fn tri_counting() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_TRI_COUNT").as_deref() == Ok("1"))
+}
+static TRI_COUNTS: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+static TRI_PRINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(crate) fn take_tri_counts() -> Vec<u64> {
+    TRI_PRINTED.store(false, std::sync::atomic::Ordering::Relaxed);
+    std::mem::take(&mut *TRI_COUNTS.lock().unwrap())
+}
 /// Cells the external request list holds (shaders/gi_cache.wgsl GI_EXTERNAL_CAPACITY).
 const EXTERNAL_CAPACITY: u64 = 16384;
 /// Words of the external list's per-slot bits (shaders/gi_cache.wgsl GI_EXTERNAL_SEEN_WORDS): one
@@ -2619,7 +2634,7 @@ impl Renderer {
         let refit_ok = matches!(refit, Some(Ok(_)));
         let bvh = match refit {
             Some(Ok(bvh)) => bvh,
-            _ => gi_bvh::build(positions, indices)?,
+            _ => gi_bvh::build_refittable(positions, indices)?,
         };
         let mut blas = Blas::new(bvh, 0)?;
         blas.exact = true;
@@ -3202,6 +3217,13 @@ impl Renderer {
             .chunks_exact(4)
             .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
             .collect();
+        if tri_counting() {
+            let mut acc = TRI_COUNTS.lock().unwrap();
+            acc.resize(w.len() - 384, 0);
+            for (a, &v) in acc.iter_mut().zip(&w[384..]) {
+                *a += u64::from(v);
+            }
+        }
         Ok(Some(IndirectCounters {
             misses: w[0],
             traces: w[1],
@@ -4109,10 +4131,13 @@ impl Renderer {
         // world zero and its placement map's offset and length; word 27, 1 if it casts no
         // shadow (light visibility passes through it, bounce rays still hit it).
         let mut identities = vec![];
+        // RENDERLAB_GI_TRI_COUNT: per record its mesh (packed entry; the merged world last).
+        let mut meshes = vec![];
         if !p.covered.is_empty() {
             let w = &self.gi.world.as_ref().unwrap().blas;
             records.push((Mat4::IDENTITY, &**w, *p.offsets.last().unwrap(), 0));
             identities.push([0, p.map.0, p.map.1, 0]);
+            meshes.push(p.offsets.len() as u32 - 1);
         }
         let mut at = 0;
         for (di, ((d, blas), entry)) in draws.iter().zip(&blases).zip(&p.entry).enumerate() {
@@ -4129,6 +4154,7 @@ impl Renderer {
                     p.offsets[e],
                     blas.near_base(model, &p.near[e]),
                 ));
+                meshes.push(e as u32);
                 identities.push([
                     draw_identity(ids, di, ii),
                     0,
@@ -4142,6 +4168,39 @@ impl Renderer {
         for (i, words) in identities.iter().enumerate() {
             let r = gi_bvh::HEADER_WORDS + i * gi_bvh::INSTANCE_WORDS + 24;
             head[r..r + 4].copy_from_slice(words);
+        }
+        if tri_counting() {
+            for (i, &m) in meshes.iter().enumerate() {
+                head[gi_bvh::HEADER_WORDS + i * gi_bvh::INSTANCE_WORDS + 28] = m;
+            }
+            // Each mesh's tree once: triangles, leaves, placements, extent and edge lengths.
+            if !TRI_PRINTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let mut seen = std::collections::BTreeMap::new();
+                for (r, &m) in records.iter().zip(&meshes) {
+                    seen.entry(m).or_insert((r.1, 0u32)).1 += 1;
+                }
+                for (m, (blas, placements)) in seen {
+                    let b = &blas.bvh;
+                    let tris = b.indices.len() / 3;
+                    let leaves = b.leaves.len();
+                    let ext = std::array::from_fn::<f32, 3, _>(|a| blas.hi[a] - blas.lo[a]);
+                    let mut edges: Vec<f32> = b
+                        .indices
+                        .chunks_exact(3)
+                        .map(|t| {
+                            let p = |k: u32| glam::Vec3::from_slice(&b.positions[k as usize][..3]);
+                            let (a, bb, c) = (p(t[0]), p(t[1]), p(t[2]));
+                            a.distance(bb).max(bb.distance(c)).max(c.distance(a))
+                        })
+                        .collect();
+                    edges.sort_by(f32::total_cmp);
+                    let at = |q: f32| edges.get(((edges.len() as f32 - 1.0) * q) as usize).copied().unwrap_or(0.0);
+                    eprintln!(
+                        "{{\"tri_mesh\":{m},\"triangles\":{tris},\"leaves\":{leaves},\"placements\":{placements},\"extent\":[{:.2},{:.2},{:.2}],\"edge_p50\":{:.3},\"edge_p99\":{:.3},\"edge_max\":{:.3},\"nodes\":{}}}",
+                        ext[0], ext[1], ext[2], at(0.5), at(0.99), at(1.0), b.nodes.len()
+                    );
+                }
+            }
         }
         // U-RTVIS: the top level over the records (rebuilt only when they change).
         crate::instance_bvh::place(

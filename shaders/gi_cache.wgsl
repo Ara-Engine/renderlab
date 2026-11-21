@@ -201,7 +201,7 @@ const GI_W_GATHER_HIST:u32=256u;
 const GI_GATHER_BINS:u32=96u;
 const GI_W_GATHER_CUT:u32=352u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
-const GI_W_CLAIMS:u32=384u;
+const GI_W_CLAIMS:u32=6532u;
 // A miss: definition (4 words), request-table entry, claimed slot.
 const GI_MISS_WORDS:u32=6u;
 const GI_UNCLAIMED:u32=0xffffffffu;
