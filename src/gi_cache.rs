@@ -5364,6 +5364,11 @@ mod gpu_tests;
 /// Each part keeps its old pipelines when its new text fails, and the error returns.
 #[cfg(feature = "bench")]
 impl Renderer {
+    /// The bench's stamp-wrap check (`walk-wrap`): the cache's frame stamp continues from `frame`
+    /// instead of 0 after a reset, so a short fixture crosses a wrap of the stamp's packing.
+    pub(super) fn bench_start_frame(&mut self, frame: u32) {
+        self.gi.planner.frame = frame;
+    }
     pub(super) fn bench_reload_gi(&mut self) -> Result<(), Error> {
         let slots = crate::pipeline_compilation::prepare_compile_slots();
         crate::pipeline_compilation::with_compile_slots(slots, || self.bench_rebuild_gi())

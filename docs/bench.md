@@ -55,7 +55,7 @@ RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK lightben
 |---|---|
 | `--once` | run every fixture once and exit (scripts, CI) |
 | `--paths nort,rt` | which paths (default `nort`: the walking-cost goal's path) |
-| `--fixtures walk,grey` | which fixtures (default all but the named-only slab cases) |
+| `--fixtures walk,grey` | which fixtures (default all but the named-only real-size scenes `city` and `terrain`) |
 | `--shaders <dir>` | the shader directory to watch |
 
 Environment:
@@ -64,6 +64,7 @@ Environment:
 - `LIGHTBENCH_RUNS`: where the pass log goes (default `D:/Coding/renderlab-work/bench-runs`).
 - `LIGHTBENCH_FURNACE_FRAMES`: frames per furnace view (default 64).
 - `LIGHTBENCH_WALK_STEP` / `LIGHTBENCH_WALK_FRAMES`: the walking camera's step in metres per frame (default 0.02) and how many frames it walks (default 48).
+- `LIGHTBENCH_SHADOW_FRAMES` / `LIGHTBENCH_SHADOW_DUMP=<dir>`: the shadow fixture's frames per run (default 8), and a directory for its measured, exact and unshadowed images as PGM.
 - `LIGHTBENCH_GPU_LOCK`: the GPU lock whose owner marks a round contended (default `D:/Coding/renderlab-work/gpu-slot.lock`).
 
 **Others' timing rows** (main thread's rule, 20 Nov). The bench takes no GPU lease of its own: a round is about 3 s of tiny frames (320x180, about 2.4 ms each).
@@ -76,6 +77,14 @@ Environment:
 | pass | files | rebuild |
 |---|---|---|
 | `gi` | gi_cache, gi_cells, gi_near, gi_emitters, gi_gather_software, gi_rays_software, gi_rays_hardware, gi_shade_entry (`.wgsl`) | the lighting cache's kernels and every program's cell shading (`Renderer::bench_reload_gi`) |
+| `vsm` | virtual_shadow, virtual_shadow_records, virtual_shadow_hybrid, virtual_shadow_lookup, virtual_shadow_disk (`.wgsl`) | the virtual sun shadows' pipelines (`Renderer::bench_reload_vsm`). The composed modules are checked with naga first, then a new set of pipelines replaces the old one; the view keeps its pages and bind groups. |
+
+**Measured (20 Nov, release bench, cold edits).**
+
+| pass | save to numbers | reload | fixtures | fixtures run |
+|---|---:|---:|---:|---|
+| `vsm` | 1.36-1.55 s | 0.62-0.70 s | 0.59-0.85 s | `shadow-edges`, `city` |
+| `gi` | 0.5-1.5 s | 0.1-0.9 s | 0.3-0.5 s | `walk`, `grey`, `orange` |
 
 **Not yet reloadable.** An edit to any other file prints `<file> changed; no bench pass reloads it yet`.
 
@@ -83,11 +92,15 @@ These files reach their kernels through compile-time constants (`include_str!`):
 - the program shading sets;
 - the reflection passes;
 - TR1;
-- the shadows;
 - `gi_cells.wgsl` and `gi_api.wgsl` as composed into program shading. Note that `gi_cells.wgsl` does reload, but only into the cache's own kernels.
 
+**Program shading: tried and taken out (20 Nov).** The attempt routed the traced templates (`program_traced.wgsl`, `program_traced_entry.wgsl`, `program_api.wgsl`) through the text hook and called `Renderer::reload_program` for each fixture program.
+- That reload recompiles only the program's hot sets: two background pipelines.
+- The frames' traced shading kernel never recompiled after a template edit.
+- So the pass would print numbers from unchanged kernels. A real program pass must rebuild the slot's installed variants, and the lists and hit shading that read the same templates.
+
 **Adding a pass** takes two pieces:
-1. **Override.** Route the pass's sources through `program::gi_shader` (or a function like it), which composes the bench's text when the feature is on.
+1. **Override.** Route the pass's sources through `program::engine_shader` (or `gi_shader`), which composes the bench's text when the feature is on.
 2. **Rebuild.** Write a `bench_reload_*` that rebuilds the pass's pipelines and keeps the old ones on an error, then add a row to `PASSES` in `src/bench/mod.rs`.
 
 ## Adding a fixture
@@ -131,11 +144,34 @@ A fixture is a child of the `renderer` module, so crate-internal renderer state 
 | fixture | owner | scene | metrics |
 |---|---|---|---|
 | `walk` | gicut | the grey box, a camera walking 0.02 m per frame for 48 frames after 64 still | `energy`, `err`, `off5` on the last frame; cache ms per walking frame |
+| `walk-wrap` | gicut | `walk` with the cache's frame stamp started so the walk crosses frame 4096 (a 12-bit stamp's wrap) 24 frames in | as `walk` |
+| `city` (named only) | gicut, shade (src/bench/city.rs) | a closed furnace room (exact L = 1) holding 3,000 instanced boxes and 150 instanced 320-triangle rocks (85,548 triangles, 3,153 placements), two skinned columns swung each frame, a 1 lux sun the room occludes (`LIGHTBENCH_CITY_SUN_LUX`); camera walking 0.05 m per frame for 64 frames after 32 still | `energy`, `err`, `off5`; `geometry_bytes` (the cache's software geometry); `triangles`, `placements`; per walking frame `gather_rays`, `light_rays`, `aimed_rays` (series); cache ms per walking frame |
+| `terrain` (named only) | gicut, shade | the same room over one 320 x 320 heightfield (204,800 triangles in one mesh) | as `city` |
+| `glint-course` (named only) | gicut, shade (src/bench/dump.rs) | Glint from a scene dump on disk (`LIGHTBENCH_GLINT`, default D:/Coding/renderlab-work/bench-scenes/glint-goal: `scene.rla`, `scene.json`, the sky map; not committed), 137,084 triangles, its sun, local lights, sky map and emitting materials, at 1920x1080; the ball's course as the bot rolls it (53 m) at 9.5 m/s in 33 Hz frames under Glint's course camera | the cache's ms per walking frame split into trace (update, claim, probe), gather, integrate; rays, gather rays, light rays, cells created and queued per walking frame |
+| `glint` (named only) | gicut | the same dump, walking 13.4 m at 4.5 m/s into the dump's own view, then holding 90 frames there | against the dump's 16,384-sample path-traced reference (`reference.pfm`): `arrive_energy`, `arrive_err`, `arrive_region` (the view's central 20%), the same on the last held frame, `converge_frames` (held frames until that region is within 2%, -1 if never); the counters as `glint-course` |
 | `grey`, `orange` | gicut (src/gi_furnace_tests.rs) | closed emitting box, exact L = Le / (1 - rho) | `energy`, `err`, `off5` |
-| `slab` (named only) | gicut | thin slab over an emitter under a sky; the top reads 0.5 | `energy`, `err`, `off5` |
-| `slab-roof` (named only) | gicut | the slab under a roof and a black sky; top and roof read 0 | `top.mean`, `top.leak_max`, `roof.*` |
-| shadow edges (coming) | clipmap | rail edge, contact edge, thin caster | `lit_in_shadow`, `rail_wobble_px`, `contact_gap_px` |
+| `slab` | gicut | thin slab over an emitter under a sky; the top reads 0.5 | `energy`, `err`, `off5` |
+| `slab-roof` | gicut | the slab under a roof and a black sky; top and roof read 0 | `top.mean`, `top.leak_max`, `roof.*` |
+| `shadow-edges` | clipmap (src/bench/shadow_edges.rs) | a grey floor under a soft sun (0.02 rad), the sun only: a 3 m rail 0.9 m up turned against the map's grid, a 0.3 m block resting on the floor, a 5 mm wire; 256x256, `LIGHTBENCH_SHADOW_FRAMES` frames (default 8) with TR1 | against the exact answer (the sun's disk cast on the CPU from each floor pixel, once at load): `err` over the edge band, `lit_in_shadow`, `rail_wobble_px`, `contact_gap_px`, `thin_missing`; `mask_mismatch` checks the camera |
 
-**Known bug.** The slab cases read black on the bench, where the furnace test reads 0.5 on the top face. So they run only when `--fixtures` names them.
+**Real size, checked against the game (20 Nov).** The play gate's 1080p Glint course reads, without ray hardware:
+- gather 11.38 ms;
+- update 4.27 ms, plus claim and probe;
+- integrate 0.74 ms;
+- a 30.7 ms frame.
+
+`glint-course` on the bench, without ray hardware, beside other leases:
+- trace 5.1 ms;
+- gather 7.3 ms;
+- integrate 0.69 ms;
+- 14.4 ms of cache in an 18.7 ms span.
+
+So the bench is in the game's range. A round under heavier contention read 31.5 ms of cache. The counts repeat exactly round to round: 12.2k cells created, 573k rays (382k gather) and 14k queued per frame. The milliseconds move with whatever else holds the GPU.
+
+With ray hardware the cache is 3.4 ms (trace 1.0, gather 0.66, integrate 0.69). A round takes 5-11 s without ray hardware and 2.3 s with it. The goal walk (`glint`) takes 7-28 s, because it reads the HDR back every held frame until its region converges.
+
+The box city scenes (`city`, `terrain`) read 2 ms of cache. They are fast checks, not real size.
+
+**Atmosphere.** The furnace and real-size fixtures turn the atmosphere off, as lib tests start (`Atmosphere::off`). The default physical sky, which every non-test build gets, is black without a sun, and it puts height and volumetric fog into the rooms. Under it the slab's top read 0 instead of 0.5, and the boxes read about 0.4% darker.
 
 The furnace fixtures start each run from an empty lighting cache (`reset_indirect`) and render `LIGHTBENCH_FURNACE_FRAMES` frames per view. The default is 64 against the GPU test's 300, so their numbers are the bench's, not the test's.
