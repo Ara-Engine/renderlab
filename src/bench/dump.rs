@@ -319,6 +319,20 @@ impl Fixture for Dump {
                 glow.insert(i as usize, g);
             }
         }
+        // See-through materials (a motion dump keeps them, with their transparency) draw in the transparent pass.
+        let mut see_through = vec![];
+        for t in scene["transparency"].as_array().into_iter().flatten() {
+            let f = |k: usize| t[k].as_f64().unwrap_or(0.0) as f32;
+            if let Some(i) = t[0].as_u64() {
+                let i = i as usize;
+                see_through.resize(see_through.len().max(i + 1), None);
+                see_through[i] = Some(crate::Transparency { opacity: f(1), ior: f(2), thickness: f(3) });
+            }
+        }
+        if !see_through.is_empty() {
+            println!("lightbench: {} draws {} see-through materials", self.name, see_through.iter().flatten().count());
+            asset.set_transparency(see_through);
+        }
         let program = r.try_create_program(&ProgramDescriptor { label: "bench-emissive", source: &emissive_source()? })?;
         asset.set_programs_with(r, |i| (&program, vec![("glow", Value::Vec3(glow.get(&i).copied().unwrap_or([0.0; 3])))]))?;
         let size = [scene["size"][0].as_u64().unwrap_or(1920) as u32, scene["size"][1].as_u64().unwrap_or(1080) as u32];

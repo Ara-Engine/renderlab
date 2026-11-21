@@ -17,6 +17,9 @@
 //! frame id, the camera, each dumped placement whose model changed since the last record (its
 //! scene.rla placement index) and each skinned mesh whose palette changed. Records are deltas:
 //! a replay applies every record up to a frame. Recording stops when `<dir>/motion-stop` appears.
+//! A motion dump also keeps see-through batches (a reference dump leaves them out), and
+//! scene.json lists their materials' transparency (`transparency`: [material, opacity, ior,
+//! thickness]).
 use super::*;
 use std::{collections::HashMap, fmt::Write as _, io::Write as _, path::PathBuf};
 
@@ -41,7 +44,8 @@ struct RecordedMaterial {
     normal_scale: f32,
     double_sided: bool,
     emission: [f32; 3],
-    transparent: bool,
+    /// TP1's transparency (None: opaque).
+    transparency: Option<crate::Transparency>,
 }
 
 #[derive(Default)]
@@ -117,7 +121,7 @@ impl Recorder {
             normal_scale: desc.normal_scale,
             double_sided: desc.double_sided,
             emission,
-            transparent: desc.transparency.is_some(),
+            transparency: desc.transparency,
         });
     }
 
@@ -204,13 +208,17 @@ impl Engine {
         let mut material_index: HashMap<MaterialId, u32> = HashMap::new();
         let mut mesh_index: HashMap<(MeshId, MaterialId), u32> = HashMap::new();
         let mut emission = String::new();
+        // A motion dump (the bench's) keeps see-through batches, listed with their transparency: they move and
+        // cast like any other (the cache's moved boxes count them). A reference dump leaves them out, as the
+        // dump tracer reads every mesh as opaque.
+        let mut see_through = String::new();
         let mut skipped = 0usize;
         for batch in self.state.batches.values() {
             let (Some(recorded), Some(material)) = (rec.meshes.get(&batch.mesh), rec.materials.get(&batch.material)) else {
                 skipped += batch.models.len();
                 continue;
             };
-            if material.transparent {
+            if material.transparency.is_some() && !motion {
                 skipped += batch.models.len();
                 continue;
             }
@@ -240,6 +248,9 @@ impl Engine {
                     let index = asset.materials.len() as u32 - 1;
                     let e = material.emission;
                     let _ = write!(emission, "{}[{index},{},{},{}]", if emission.is_empty() { "" } else { "," }, e[0], e[1], e[2]);
+                    if let Some(t) = material.transparency {
+                        let _ = write!(see_through, "{}[{index},{},{},{}]", if see_through.is_empty() { "" } else { "," }, t.opacity, t.ior, t.thickness);
+                    }
                     material_index.insert(batch.material, index);
                     index
                 }
@@ -316,7 +327,7 @@ impl Engine {
             let _ = write!(lights, "{}{entry}", if lights.is_empty() { "" } else { "," });
         }
         let json = format!(
-            "{{\"label\":\"{label}\",\"camera\":{{\"eye\":{},\"target\":{},\"fov_y\":{}}},\"size\":[{},{}],\"exposure_stops\":{stops},\"sun\":{sun},\"sky\":{sky},\"lights\":[{lights}],\"emission\":[{emission}],\"skipped_instances\":{skipped},\"path\":\"{:?}\"}}\n",
+            "{{\"label\":\"{label}\",\"camera\":{{\"eye\":{},\"target\":{},\"fov_y\":{}}},\"size\":[{},{}],\"exposure_stops\":{stops},\"sun\":{sun},\"sky\":{sky},\"lights\":[{lights}],\"emission\":[{emission}],\"transparency\":[{see_through}],\"skipped_instances\":{skipped},\"path\":\"{:?}\"}}\n",
             v3(eye), v3(target), camera.fov_y(), size[0], size[1], self.path);
         std::fs::write(out.join("scene.json"), json).map_err(|_| Error::InvalidInput("scene dump write failed"))?;
         if motion {

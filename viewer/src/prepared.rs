@@ -30,6 +30,9 @@ pub struct Prepared {
     texture_data: Vec<Arc<asset::Texture>>,
     textures: Vec<Texture>,
     materials: Vec<Material>,
+    /// Per source material, TP1's transparency for `set_programs_with` (the bench's see-through
+    /// dump materials); empty draws every material opaque.
+    transparency: Vec<Option<renderlab::Transparency>>,
     meshes: Vec<Mesh>,
     mesh_uploads: Option<VecDeque<MeshUpload>>,
     instances: Vec<Instances>,
@@ -172,6 +175,7 @@ impl Prepared {
             texture_data,
             textures: Vec::new(),
             materials: Vec::new(),
+            transparency: Vec::new(),
             meshes: Vec::new(),
             mesh_uploads: None,
             instances: Vec::new(),
@@ -383,6 +387,11 @@ impl Prepared {
     ) -> Result<(), renderlab::Error> {
         self.set_programs_with(r, |i| (programs[i % programs.len()], vec![]))
     }
+    /// The transparency `set_programs_with` gives each source material (by index).
+    #[allow(dead_code)]
+    pub fn set_transparency(&mut self, transparency: Vec<Option<renderlab::Transparency>>) {
+        self.transparency = transparency;
+    }
     /// `set_programs` with each material's program and parameters chosen by its index
     /// (the bench gives a scene dump's emitting materials their glow).
     pub fn set_programs_with<'p>(
@@ -412,6 +421,7 @@ impl Prepared {
                     .map(|t| binding(t.texture, t.sampler)),
                 program: Some(program),
                 parameters: &parameters,
+                transparency: self.transparency.get(i).copied().flatten(),
                 ..Default::default()
             };
             materials.push(loop {
