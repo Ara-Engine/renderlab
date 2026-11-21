@@ -54,11 +54,12 @@ const CACHE: [(&str, &str); 7] = [
     ),
     (
         "            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
-            gi_queue_shade(slot);
+            gi_queue_reshade(slot);
         }
     }",
         "            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
-            gi_queue_shade_cause(slot,GI_SHADE_MOVER);
+            if (gi_table[cold+GI_C_STATE]&GI_SHADE)==0u { atomicAdd(&gi_work[GI_W_SHADE_CAUSE+GI_SHADE_MOVER],1u); }
+            gi_queue_reshade(slot);
         }
     }",
     ),
