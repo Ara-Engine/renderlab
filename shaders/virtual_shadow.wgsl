@@ -315,7 +315,8 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     vsm_state[vsm_section(3u)+v]=frame;
     let table=vsm_section(2u);
     var slot=vsm_state[table+v];
-    let moved=slot!=VSM_NONE && vsm_moved(level,page)!=0u;
+    let moved_mask=select(0u,vsm_moved(level,page),slot!=VSM_NONE);
+    let moved=moved_mask!=0u;
     if slot!=VSM_NONE && !moved {return;}
     if atomicAdd(&vsm_pool[5],1u)>=atomicLoad(&vsm_pool[9]) {
         // Rasterized again next frame (vsm_release frees it).
@@ -334,7 +335,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     }
     vsm_state[v]=vsm.levels[level].info.x;
     vsm_state[vsm_section(1u)+v]=vsm_tag(level,page);
-    vsm_render[v]=VSM_DIRTY_FULL;
+    vsm_render[v]=select(VSM_DIRTY_FULL,moved_mask,moved);
     let k=atomicAdd(&vsm_pool[0],1u);
     atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
     let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -466,14 +467,20 @@ fn vsm_area_tiles()->u32 {return vsm.counts.y*VSM_PAGE/vsm_area();}
 @group(0) @binding(55) var<storage,read> vsm_pages:array<u32>;
 // The table entry of this frame's k-th rasterized page.
 fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k];}
-// Sparse: zeroes both layers of each page rasterized this frame, one workgroup per page
-// (an indirect dispatch over the pool's list).
+// Sparse: zeroes both layers over each rasterized page's dirty rectangle (whole page on new/stale
+// pages, mover sub-rectangle on moved pages), one workgroup per page.
 @compute @workgroup_size(256) fn vsm_clear_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
-    let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
-    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
-        atomicStore(&vsm_top_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
-        atomicStore(&vsm_peel_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
-        if VSM_MSAA {vsm_cover_clear(slot*VSM_PAGE*VSM_PAGE+k);}
+    let v=vsm_rendered(group.x);
+    let dirty=vsm_render[v];
+    let slot=vsm_pages[vsm_section(2u)+v];
+    let lo=vsm_dirty_lo(dirty);let hi=vsm_dirty_hi(dirty);
+    let w=hi.x-lo.x+1u;let n=w*(hi.y-lo.y+1u);
+    let base=slot*VSM_PAGE*VSM_PAGE;
+    for(var i=li;i<n;i+=256u) {
+        let k=(lo.y+i/w)*VSM_PAGE+(lo.x+i%w);
+        atomicStore(&vsm_top_map[base+k],0lu);
+        atomicStore(&vsm_peel_map[base+k],0lu);
+        if VSM_MSAA {vsm_cover_clear(base+k);}
     }
 }
 // A texel's 16 bits in vsm_cover (two texels share a word): while the multisampled raster runs,
