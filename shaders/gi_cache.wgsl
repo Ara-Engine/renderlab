@@ -2097,6 +2097,21 @@ fn gi_hit_level(world:vec3<f32>, t:f32) -> u32 {
     }
     return level;
 }
+// RENDERLAB_GI_BORROW (gi_cells.wgsl gi_borrow_*): the radiance a hit cell `slot` at `level`
+// without a bounce of its own adds from the nearest coarser cell around `world` in `bin` that
+// has one (not a split cell, whose value mixes two surface layers), or 0.
+fn gi_borrow_hit(world:vec3<f32>, level:u32, bin:u32, slot:u32) -> vec3<f32> {
+    let r=gi_outgoing[gi_borrow_at(slot)];
+    if gi_borrow_own(r) { return vec3<f32>(0.0); }
+    let last=min(level+1u+GI_BORROW_LEVELS,gi_word(GI_H_LEVELS));
+    for(var l=level+1u;l<last;l+=1u) {
+        let p=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
+        if p==0xffffffffu || gi_outgoing[p].w<=0.0 || (gi_table[gi_hot(p)+15u]&GI_SPLIT_HOT)!=0u { continue; }
+        let lender=gi_outgoing[gi_borrow_at(p)];
+        if gi_borrow_own(lender) { return gi_borrow_radiance(r,lender); }
+    }
+    return vec3<f32>(0.0);
+}
 fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
@@ -2129,7 +2144,9 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0);
             // A hit on an emitting draw sends its reflected light only: its emission is the
             // emitter list's (gi_emitters.wgsl), sampled as a light by every gather.
-            let reflected=max(o.rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
+            var rgb=o.rgb;
+            if gi_borrow_on() { rgb+=gi_borrow_hit(world,l,bin,slot); }
+            let reflected=max(rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
             if l>base { atomicAdd(&gi_work[select(GI_W_GATHER_COARSE_ABSENT,GI_W_GATHER_COARSE_ORPHAN,orphan)],1u); }
             return vec4<f32>(reflected,select(GI_HIT_MISSING,settled,l==base || orphan));
         }
