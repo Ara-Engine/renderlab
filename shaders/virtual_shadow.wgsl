@@ -318,9 +318,9 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     let moved_mask=select(0u,vsm_moved(level,page),slot!=VSM_NONE);
     let moved=moved_mask!=0u;
     if slot!=VSM_NONE && !moved {return;}
-    if atomicAdd(&vsm_pool[5],1u)>=atomicLoad(&vsm_pool[9]) {
-        // Rasterized again next frame (vsm_release frees it).
-        if moved {vsm_state[v]=0u;}
+    // Only cap newly allocated pages; already-resident pages dirtied by moving casters always
+    // re-rasterize this frame so shadows never trail behind movers by a frame.
+    if slot==VSM_NONE && atomicAdd(&vsm_pool[5],1u)>=atomicLoad(&vsm_pool[9]) {
         return;
     }
     if slot==VSM_NONE {

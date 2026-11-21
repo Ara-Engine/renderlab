@@ -195,8 +195,8 @@ pub(crate) fn borrow_on() -> bool {
 }
 /// Default whole-cache ray budgets (gathers + new-cell tracing share the budget).
 /// `RENDERLAB_GI_FIXED=N` overrides (0 restores the legacy event-driven gather queue).
-const FIXED_RAYS_SOFTWARE: u32 = 128_000;
-const FIXED_RAYS_HARDWARE: u32 = 256_000;
+const FIXED_RAYS_SOFTWARE: u32 = 65_536;
+const FIXED_RAYS_HARDWARE: u32 = 131_072;
 pub(crate) fn fixed_rays(software: bool) -> u32 {
     static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     let forced = *OVERRIDE
@@ -2040,10 +2040,13 @@ impl Planner {
         if fixed_settled {
             return Finished { frame, plan: None };
         }
-        let busy = busy_relight || (bounce && budget != 0) || self.external_pending > 0;
+        let busy = busy_relight || self.external_pending > 0;
         // A gather cap spreads a cut's gathers over more frames: still frames keep running
         // until a spread of up to 64 slot groups per gather generation can have drained.
+        // Under the fixed budget, static views idle once fixed_settled triggers or after 64
+        // consecutive unchanged frames (well past convergence, before first-view windows).
         let idle_after = match (bounce, s.gather_cells) {
+            (true, _) if budget != 0 => IDLE_AFTER_BOUNCE + 48,
             (true, _) if begun.header[priority::HEADER_LIMIT] != 0 => IDLE_AFTER_BOUNCE
                 + c.slots.div_ceil(begun.header[priority::HEADER_LIMIT]).max(64) * (s.gathers + 1),
             (false, _) => IDLE_AFTER,
@@ -2063,6 +2066,7 @@ impl Planner {
         // frame.
         if still_batch_on()
             && view.idle_frames >= STILL_BATCH
+            && (budget == 0 || (view.idle_frames >= STILL_BATCH_SETTLE && self.fixed_quiet >= 2))
             && flags == 0
             && !busy
             && self.since_cut.min(self.since_clear) >= STILL_BATCH_SETTLE
@@ -4478,7 +4482,8 @@ impl Renderer {
             if let Some(vals) = watch.collect_words() {
                 let (moved, ranked, created) = (vals[0], vals[1], vals[2]);
                 self.gi.planner.fixed_ranked = ranked;
-                if moved == 0 && created == 0 {
+                // Tolerate the handful of edge cells TR1 sub-pixel jitter creates on static views.
+                if moved == 0 && created <= 8 {
                     self.gi.planner.fixed_quiet = self.gi.planner.fixed_quiet.saturating_add(1);
                 } else {
                     self.gi.planner.fixed_quiet = 0;
