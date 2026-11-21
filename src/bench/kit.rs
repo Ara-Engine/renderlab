@@ -35,7 +35,8 @@ pub(crate) fn device(path: BenchPath) -> Result<(wgpu::Device, wgpu::Queue), Str
                 required_limits: crate::traced_limits(wgpu::Limits {
                     max_blas_primitive_count: a.max_blas_primitive_count,
                     max_blas_geometry_count: 1,
-                    max_tlas_instance_count: 4096.min(a.max_tlas_instance_count),
+                    // The bench's real-size fixtures place a few thousand instances.
+                    max_tlas_instance_count: a.max_tlas_instance_count,
                     max_acceleration_structures_per_shader_stage: 1,
                     max_storage_buffer_binding_size: a.max_storage_buffer_binding_size,
                     max_buffer_size: a.max_buffer_size,
@@ -53,7 +54,16 @@ pub(crate) fn device(path: BenchPath) -> Result<(wgpu::Device, wgpu::Queue), Str
                 | crate::VISIBILITY_RASTER_FEATURES
                 | crate::VIRTUAL_FEATURES
                 | wgpu::Features::TIMESTAMP_QUERY,
-            required_limits: crate::visibility_limits(wgpu::Limits::default()),
+            // The adapter's buffer limits: the real-size scenes' virtual clipmap layer and software
+            // geometry pass the default 128 MiB binding.
+            required_limits: {
+                let a = adapter.limits();
+                wgpu::Limits {
+                    max_buffer_size: a.max_buffer_size,
+                    max_storage_buffer_binding_size: a.max_storage_buffer_binding_size,
+                    ..crate::visibility_limits(wgpu::Limits::default())
+                }
+            },
             memory_hints: crate::MEMORY_HINTS,
             ..Default::default()
         },
@@ -61,19 +71,21 @@ pub(crate) fn device(path: BenchPath) -> Result<(wgpu::Device, wgpu::Queue), Str
     pollster::block_on(adapter.request_device(&descriptor)).map_err(|e| e.to_string())
 }
 
-/// A renderer on `device` for `path`, single-sampled; the RT one traces its primaries.
+/// A renderer on `device` for `path`, single-sampled; the RT one traces its primaries. Up to
+/// 8192 instances per upload (the real-size fixtures).
 pub(crate) fn renderer(device: &(wgpu::Device, wgpu::Queue), path: BenchPath) -> Result<Renderer, Error> {
     let (device, queue) = device.clone();
     let options = RendererOptions { samples: SampleCount::One, ..Default::default() };
+    let limits = Limits { max_instances: 8192, ..Limits::default() };
     Ok(match path {
         BenchPath::Rt => {
             let mut r = Renderer::new_with_hardware_shadows(
-                device, queue, FORMAT, Limits::default(), options, HardwareShadowOptions::default(), SOURCE,
+                device, queue, FORMAT, limits, options, HardwareShadowOptions::default(), SOURCE,
             )?;
             r.set_primary_visibility(PrimaryVisibility::Traced)?;
             r
         }
-        BenchPath::NoRt => Renderer::new_with_options(device, queue, FORMAT, Limits::default(), options, SOURCE)?,
+        BenchPath::NoRt => Renderer::new_with_options(device, queue, FORMAT, limits, options, SOURCE)?,
     })
 }
 
@@ -137,15 +149,15 @@ pub(crate) fn box_faces(centre: Vec3, h: Vec3, inward: bool) -> Vec<([Vec3; 4], 
     .collect()
 }
 
-/// A drawable part: its mesh (also the lighting cache's software geometry), one identity
-/// instance and its material.
+/// A drawable part: its mesh (also the lighting cache's software geometry), its instances and
+/// its material.
 pub(crate) struct Part {
     pub mesh: Mesh,
     pub instances: Instances,
     pub material: Material,
 }
 /// Uploads `faces` as one mesh with a double-sided material of `program`, `albedo` and
-/// the program's `parameters`.
+/// the program's `parameters`, at one identity instance.
 pub(crate) fn part(
     r: &mut Renderer,
     faces: &[([Vec3; 4], Vec3)],
@@ -157,18 +169,29 @@ pub(crate) fn part(
     let mut indices = vec![];
     for (corners, n) in faces {
         let base = vertices.len() as u32;
-        vertices.extend(corners.iter().map(|p| Vertex {
-            position: p.to_array(),
-            normal: n.to_array(),
-            uv: [0.0; 2],
-            color: [1.0; 4],
-        }));
+        vertices.extend(corners.iter().map(|p| vertex(*p, *n)));
         indices.extend([0, 1, 2, 0, 2, 3].map(|k| base + k));
     }
+    mesh_part(r, &vertices, &indices, program, albedo, parameters, &[Mat4::IDENTITY])
+}
+/// A white vertex at `position` with `normal`.
+pub(crate) fn vertex(position: Vec3, normal: Vec3) -> Vertex {
+    Vertex { position: position.to_array(), normal: normal.to_array(), uv: [0.0; 2], color: [1.0; 4] }
+}
+/// `part` for any triangle mesh, placed at each of `transforms`.
+pub(crate) fn mesh_part(
+    r: &mut Renderer,
+    vertices: &[Vertex],
+    indices: &[u32],
+    program: &Program,
+    albedo: [f32; 3],
+    parameters: &[(&str, Value)],
+    transforms: &[Mat4],
+) -> Result<Part, Error> {
     let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
-    let mesh = admitted(r, "bench mesh", |r| r.try_upload_mesh(&MeshData { vertices: &vertices, indices: &indices }))?;
-    r.set_indirect_geometry(&mesh, &positions, &indices)?;
-    let instances = admitted(r, "bench instances", |r| r.try_upload_instances(&[Mat4::IDENTITY]))?;
+    let mesh = admitted(r, "bench mesh", |r| r.try_upload_mesh(&MeshData { vertices, indices }))?;
+    r.set_indirect_geometry(&mesh, &positions, indices)?;
+    let instances = admitted(r, "bench instances", |r| r.try_upload_instances(transforms))?;
     let material = admitted(r, "bench material", |r| {
         r.try_create_material(&MaterialDescriptor {
             base_color: [albedo[0], albedo[1], albedo[2], 1.0],

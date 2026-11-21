@@ -381,8 +381,18 @@ impl Prepared {
         r: &mut Renderer,
         programs: &[&renderlab::Program],
     ) -> Result<(), renderlab::Error> {
+        self.set_programs_with(r, |i| (programs[i % programs.len()], vec![]))
+    }
+    /// `set_programs` with each material's program and parameters chosen by its index
+    /// (the bench gives a scene dump's emitting materials their glow).
+    pub fn set_programs_with<'p>(
+        &mut self,
+        r: &mut Renderer,
+        choose: impl Fn(usize) -> (&'p renderlab::Program, Vec<(&'static str, renderlab::Value)>),
+    ) -> Result<(), renderlab::Error> {
         let mut materials = Vec::with_capacity(self.source.materials.len());
         for (i, data) in self.source.materials.iter().enumerate() {
+            let (program, parameters) = choose(i);
             let binding = |id: u32, sampler| TextureBinding {
                 texture: &self.textures[id as usize],
                 sampler,
@@ -400,7 +410,8 @@ impl Prepared {
                 metallic_roughness_texture: data
                     .metallic_roughness_texture
                     .map(|t| binding(t.texture, t.sampler)),
-                program: Some(programs[i % programs.len()]),
+                program: Some(program),
+                parameters: &parameters,
                 ..Default::default()
             };
             materials.push(loop {
