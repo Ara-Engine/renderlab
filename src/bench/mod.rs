@@ -444,10 +444,37 @@ fn json_map(items: &[(String, f64)]) -> String {
     format!("{{{}}}", body.join(","))
 }
 
+/// The GPU's graphics clock through a round: nvidia-smi sampling every 200 ms (NVIDIA only;
+/// nothing elsewhere), its median and lowest MHz, so a round the GPU spent in a slow state marks
+/// itself as `contended` does (gicut, 21 Nov: a 9.17 ms span with every pass about 3x, the clock
+/// dropping to 585-885 MHz).
+struct Clock(Option<std::process::Child>);
+impl Clock {
+    fn start() -> Self {
+        Self(
+            std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=clocks.gr", "--format=csv,noheader,nounits", "-lms", "200"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok(),
+        )
+    }
+    fn finish(self) -> Option<(f64, f64)> {
+        let mut child = self.0?;
+        let _ = child.kill();
+        let out = child.wait_with_output().ok()?;
+        let mut mhz: Vec<f64> = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect();
+        mhz.sort_by(f64::total_cmp);
+        Some((*mhz.get(mhz.len() / 2)?, mhz[0]))
+    }
+}
+
 /// Runs the rigs `run` picks once and prints their lines, first rebuilding the passes they are
-/// stale in. Returns the seconds the fixtures took.
+/// stale in, then the round's GPU clock. Returns the seconds the fixtures took.
 fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bool) -> f64 {
     wait_quiet(&o.hold);
+    let clock = Clock::start();
     let started = Instant::now();
     for rig in rigs.iter_mut().filter(|rig| run(rig)) {
         if rig.r.is_none() {
@@ -542,7 +569,11 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bo
             }
         }
     }
-    started.elapsed().as_secs_f64()
+    let seconds = started.elapsed().as_secs_f64();
+    if let Some((median, lowest)) = clock.finish() {
+        println!("lightbench: round {round} GPU clock median {median:.0} MHz, lowest {lowest:.0}");
+    }
+    seconds
 }
 
 /// The watched shader files (shaders/*.wgsl and shaders/programs/*.wgsl) and their times.
