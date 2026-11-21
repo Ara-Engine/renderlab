@@ -205,7 +205,7 @@ const GI_TERTIARY:u32=1024u;
 // Fixed update budget (gi_cache.wgsl GI_H_FIXED_RAYS): an event asked for the cell's update
 // (it is ranked above age), and the frame of its last update (mod 4096) in the top 12 bits.
 const GI_DIRTY:u32=0x40000u;
-// Fixed update budget: the cell's last gather moved its value by 1/256 or less with no hit still
+// Fixed update budget: the cell's last gather moved its value by 1/1024 or less with no hit still
 // changing; the ranking leaves it out until an event marks it dirty (not in GI_KEEP: a re-trace
 // clears it).
 const GI_SETTLED:u32=0x80000u;

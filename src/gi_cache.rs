@@ -182,6 +182,8 @@ pub(crate) fn borrow_on() -> bool {
 /// settling (shaders/gi_cache.wgsl GI_SETTLED), a quarter of it in the still-view batch, and idle
 /// once a full turn passes with no value moved (`Planner::fixed_settled`). Off by default: on the
 /// furnace these stop a slow series early (orange's red channel 0.58 against 1.0 without them).
+/// Quiet frames (`Planner::fixed_quiet`) before a still view's budget drops to the still-view batch.
+const FIXED_QUIET_STILL: u32 = 8;
 fn fixed_rest() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED_REST").is_ok_and(|v| v == "1"))
@@ -203,7 +205,7 @@ pub(crate) fn fixed_rays() -> u32 {
 }
 impl Planner {
     /// The fixed budget's rest: a still view (`still`) where no gather moved a value by more
-    /// than 1/256 over a full turn of the ranked cells (their rays over the budget, plus the
+    /// than 1/1024 over a full turn of the ranked cells (their rays over the budget, plus the
     /// readback's lag), at least 8 frames.
     fn fixed_settled(&self, still: bool) -> bool {
         let turn = self.fixed_ranked.div_ceil(fixed_rays().max(1)).max(8) + 4;
@@ -1110,6 +1112,7 @@ struct Pipelines {
     fixed_rank: Owned<wgpu::ComputePipeline>,
     fixed_select: Owned<wgpu::ComputePipeline>,
     fixed_list: Owned<wgpu::ComputePipeline>,
+    fixed_after: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
     filter: Owned<wgpu::ComputePipeline>,
     /// The kernels built on the lean layout (`lean`): their passes bind the lean group 1.
@@ -1887,7 +1890,10 @@ impl Planner {
         // the cache running: idle means nobody waits on a cell.
         let busy = (bounce && self.bounce_busy > 0) || self.external_pending > 0;
         if tick {
-            self.fixed_quiet = if self.fixed_moved > 0 { 0 } else { self.fixed_quiet.saturating_add(1) };
+            // Quiet: moved gathers (first ones included) under about 1 in 256 of the ranked cells,
+            // counted as their estimated rays over 64 (the temporal jitter's new cells pass).
+            let quiet = u64::from(self.fixed_moved) * 64 * 256 <= u64::from(self.fixed_ranked);
+            self.fixed_quiet = if quiet { self.fixed_quiet.saturating_add(1) } else { 0 };
         }
         if tick {
             self.bounce_busy = if bounce && relight != 0 {
@@ -2009,7 +2015,10 @@ impl Planner {
         // queue does; on a still view before that it runs in the still-view batch below (one frame
         // in STILL_BATCH): the budget is a ceiling, not a floor.
         let fixed_awake = bounce && fixed_rays() != 0 && !self.fixed_settled(view.idle_frames >= idle_after);
-        self.fixed_still = fixed_rest() && still_batch_on() && view.idle_frames >= STILL_BATCH;
+        // Only once values are nearly settled (FIXED_QUIET_STILL quiet frames): a still view that has
+        // not converged yet (a scene just loaded, the furnace) keeps the whole budget every frame.
+        let fixed_rested = fixed_rest() && self.fixed_quiet >= FIXED_QUIET_STILL;
+        self.fixed_still = fixed_rested && still_batch_on() && view.idle_frames >= STILL_BATCH;
         if view.idle_frames >= idle_after && flags == 0 && !busy && !fixed_awake {
             return Finished { frame, plan: None };
         }
@@ -2026,7 +2035,7 @@ impl Planner {
             && flags == 0
             && !busy
             // Without its rest rules the fixed budget works every frame, as #232's did.
-            && (!fixed_awake || fixed_rest())
+            && (!fixed_awake || fixed_rested)
             && self.since_cut.min(self.since_clear) >= STILL_BATCH_SETTLE
             && view.idle_frames % STILL_BATCH != 0
         {
@@ -3822,7 +3831,7 @@ impl Renderer {
             "gi_resolve", "gi_resolve_last", "gi_scan", "gi_setup", "gi_rays", "gi_finish", "gi_integrate",
             if priority { "gi_priority_gather_empty" } else if software { "gi_gather_batched" } else { "gi_gather" },
             "gi_fill_count", "gi_fill_select", "gi_emitters_build", "gi_emitters_publish", "gi_emitters_cdf",
-            "gi_gather_count", "gi_gather_select", "gi_fixed_rank", "gi_fixed_select", "gi_fixed_list",
+            "gi_gather_count", "gi_gather_select", "gi_fixed_rank", "gi_fixed_select", "gi_fixed_list", "gi_fixed_after",
             "gi_light", "gi_filter",
         ];
         let mut first_error = None;
@@ -3873,6 +3882,7 @@ impl Renderer {
             fixed_rank: kernel("gi_fixed_rank"),
             fixed_select: kernel("gi_fixed_select"),
             fixed_list: kernel("gi_fixed_list"),
+            fixed_after: kernel("gi_fixed_after"),
             light: kernel("gi_light"),
             filter: kernel("gi_filter"),
             lean: vec![],
@@ -4907,6 +4917,11 @@ impl GiState {
                 main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,legacy_grid);
             } else {
                 main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
+            }
+            if fixed_rays() != 0 {
+                // The budget's moved test on the listed cells (shaders/gi_cache.wgsl gi_fixed_after).
+                mark(encoder, "gi_fixed");
+                main_pass(encoder, "indirect fixed after", &p.fixed_after, u32::MAX, grid);
             }
         }
         if let Some(feedback) = &self.refill_feedback {
