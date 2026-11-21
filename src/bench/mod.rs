@@ -315,26 +315,35 @@ fn decode_reference(bytes: &[u8]) -> Option<RefImage> {
         .then(|| RefImage { size, rgb: floats.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect() })
 }
 
-/// Whether the timing-hold asks the machine to be quiet: held by a timing lease (`--timing`,
-/// whose owner file carries no `exclusive` field) or an exclusive one. Ordinary smokes and play
-/// gates write `"exclusive":false`; the bench runs beside them (docs/bench.md).
-fn quiet_wanted(hold: &Path) -> Option<String> {
-    if !hold.exists() {
-        return None;
+/// Why the machine must be quiet now, if it must: a gate's lease (the timing-hold's or the GPU
+/// lock's owner file names a `gate` tool: the clip gate, the play gate, the scoreboard), a timing
+/// lease (`--timing`, whose owner file carries no `exclusive` field) or an exclusive one. Other
+/// ordinary leases (`"exclusive":false`, no `gate`: one-off scripts) leave the bench running
+/// beside them (docs/bench.md). Main thread, 21 Nov: a bench beside a gate read slowed every pass
+/// 2.5x (a real-size fixture) or about 10% (a small one), above the gates' 0.3 ms line.
+fn quiet_wanted(hold: &Path, gpu_lock: &Path) -> Option<String> {
+    let owner = |dir: &Path| -> Option<serde_json::Value> {
+        dir.exists().then(|| std::fs::read_to_string(dir.join("owner.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default())
+    };
+    let named = |v: &serde_json::Value| format!("{} {}", v["owner"].as_str().unwrap_or("?"), v["label"].as_str().unwrap_or("")).trim().to_owned();
+    for v in [owner(hold), owner(gpu_lock)].into_iter().flatten() {
+        if let Some(gate) = v["gate"].as_str() {
+            return Some(format!("{}'s gate ({gate}: {})", v["owner"].as_str().unwrap_or("?"), v["label"].as_str().unwrap_or("")));
+        }
     }
-    let owner = std::fs::read_to_string(hold.join("owner.json")).unwrap_or_default();
-    let compact = owner.replace(' ', "");
-    let ordinary = compact.contains("\"exclusive\":false");
-    (!ordinary).then(|| owner.trim().to_owned())
+    let hold = owner(hold)?;
+    // A hold without its owner file yet (between the lease's mkdir and its write) counts as quiet.
+    (hold["exclusive"] != serde_json::Value::Bool(false)).then(|| format!("a timing lease: {}", named(&hold)))
 }
-/// Waits while a timing lease or an exclusive hold wants the machine quiet, saying so.
-fn wait_quiet(hold: &Path) {
-    let Some(owner) = quiet_wanted(hold) else { return };
-    println!("lightbench: idle, a timing lease holds the machine: {owner}");
-    while quiet_wanted(hold).is_some() {
+/// Waits while a gate, a timing lease or an exclusive hold wants the machine quiet, saying so.
+fn wait_quiet(o: &Options) {
+    let Some(why) = quiet_wanted(&o.hold, &o.gpu_lock) else { return };
+    println!("lightbench: idle: {why}");
+    let started = Instant::now();
+    while quiet_wanted(&o.hold, &o.gpu_lock).is_some() {
         std::thread::sleep(Duration::from_millis(500));
     }
-    println!("lightbench: the timing lease is gone, resuming");
+    println!("lightbench: resuming after {:.0} s idle", started.elapsed().as_secs_f64());
 }
 /// The leases running now (the timing-hold's and the GPU lock's owners): a round that overlaps
 /// one is contended, and its milliseconds are not clean.
@@ -473,7 +482,7 @@ impl Clock {
 /// Runs the rigs `run` picks once and prints their lines, first rebuilding the passes they are
 /// stale in, then the round's GPU clock. Returns the seconds the fixtures took.
 fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bool) -> f64 {
-    wait_quiet(&o.hold);
+    wait_quiet(o);
     let clock = Clock::start();
     let started = Instant::now();
     for rig in rigs.iter_mut().filter(|rig| run(rig)) {
@@ -634,7 +643,7 @@ pub fn main() -> i32 {
             base.insert((*file).to_owned(), source);
         }
     }
-    wait_quiet(&o.hold);
+    wait_quiet(&o);
     let started = Instant::now();
     let mut rigs = vec![];
     for &path in &o.paths {
@@ -707,7 +716,7 @@ pub fn main() -> i32 {
         if reload.is_empty() {
             continue;
         }
-        wait_quiet(&o.hold);
+        wait_quiet(&o);
         round += 1;
         let t = Instant::now();
         edits::reset_counts();
@@ -788,5 +797,41 @@ pub fn main() -> i32 {
         let names: Vec<&str> = reload.iter().map(|p| p.name).collect();
         println!("lightbench: round {round}: save to numbers {total:.2} s (reload {} {reload_s:.2} s, fixtures {fixtures_s:.2} s)", names.join(","));
         save(&rigs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lease directory with `owner` as its owner file (none when `owner` is None).
+    fn lease(root: &Path, name: &str, owner: Option<&str>) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(text) = owner {
+            std::fs::write(dir.join("owner.json"), text).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn the_bench_idles_under_gates_timing_and_exclusive_leases_only() {
+        let root = std::env::temp_dir().join(format!("lightbench-quiet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let free = (root.join("no-hold"), root.join("no-lock"));
+        assert_eq!(quiet_wanted(&free.0, &free.1), None, "nothing held");
+        let script = lease(&root, "script", Some(r#"{"owner":"shade","label":"timing-hold furnace","exclusive":false}"#));
+        assert_eq!(quiet_wanted(&script, &free.1), None, "a one-off script's ordinary lease");
+        let gate = lease(&root, "gate", Some(r#"{"owner":"gicut","label":"timing-hold play b","exclusive":false,"gate":"play"}"#));
+        assert_eq!(quiet_wanted(&gate, &free.1).as_deref(), Some("gicut's gate (play: timing-hold play b)"));
+        let lock = lease(&root, "lock", Some(r#"{"owner":"main","label":"smoke b","gate":"smoke"}"#));
+        assert!(quiet_wanted(&script, &lock).is_some(), "a gate's GPU lock beside an ordinary hold");
+        let timing = lease(&root, "timing", Some(r#"{"owner":"sunrt","label":"timing-hold n8"}"#));
+        assert!(quiet_wanted(&timing, &free.1).is_some(), "a timing lease");
+        let exclusive = lease(&root, "exclusive", Some(r#"{"owner":"clipmap","label":"scoreboard","exclusive":true}"#));
+        assert!(quiet_wanted(&exclusive, &free.1).is_some(), "an exclusive lease");
+        let unwritten = lease(&root, "unwritten", None);
+        assert!(quiet_wanted(&unwritten, &free.1).is_some(), "a hold between its mkdir and its owner file");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
