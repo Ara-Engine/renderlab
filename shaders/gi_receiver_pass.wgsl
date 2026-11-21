@@ -719,7 +719,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
     let at=fg_state_at(tile_slot);
     let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0xffu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
     let turn=select((group.x+group.y+frame)&1u,(group.x+2u*group.y+frame)%FG_STABLE_RATE,stable);
-    let keep=FG_HALF_RATE && turn!=0u && !s.moved && s.placement!=0u && old_w>=FG_HALF_MIN;
+    let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
     if keep {traced.placement=0u;}
     fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(tile_slot^(frame*0x27d4eb2fu)));
@@ -856,10 +856,13 @@ var<workgroup> fg_pair:array<u32,2>;
     }
     let footprint=select(0.0,fg_footprint(pixel,size,s.world),s.placement!=0u);
     let prev_idx=select(0xffffffffu,fg_find_prev_adapt(s,size,footprint),s.placement!=0u);
-    // Half rate, as the tile probes (fg_trace): on alternate frames a checkerboard of blocks
-    // carries forward a reprojected probe with history on its plane. Moving surfaces always trace.
+    // Half rate (and quarter rate once stable, matching fg_trace): on alternate frames a
+    // checkerboard of blocks carries forward a reprojected probe with history on its plane.
     let old_w=select(0.0,fg_plane(prev_idx,size).point.w,prev_idx!=0xffffffffu);
-    let keep=FG_HALF_RATE && ((block.x+block.y+frame)&1u)==1u && !s.moved && s.placement!=0u && old_w>=FG_HALF_MIN;
+    let at=fg_state_at(state_idx);
+    let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0xffu)>=FG_STABLE;
+    let turn=select((block.x+block.y+frame)&1u,(block.x+2u*block.y+frame)%FG_STABLE_RATE,stable);
+    let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=2.0;
     var traced=s;
     if keep {traced.placement=0u;}
     fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(state_idx^(frame*0x27d4eb2fu)));

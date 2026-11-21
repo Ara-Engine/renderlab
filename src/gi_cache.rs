@@ -194,14 +194,23 @@ pub(crate) fn borrow_on() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BORROW").as_deref() != Ok("0"))
 }
 /// Default whole-cache ray budgets (gathers + new-cell tracing share the budget).
-/// `RENDERLAB_GI_FIXED=N` overrides (0 restores the legacy event-driven gather queue).
-const FIXED_RAYS_SOFTWARE: u32 = 131_072;
-const FIXED_RAYS_HARDWARE: u32 = 262_144;
+/// With screen-probe final gather on, pixels never read cache cells directly — probes only sample
+/// coarse secondary bounce across a hemisphere, so a smaller cache budget keeps gi_gather fast
+/// while holding full visual quality. `RENDERLAB_GI_FIXED=N` overrides (0 restores legacy queue).
+const FIXED_RAYS_SOFTWARE: u32 = 98_304;
+const FIXED_RAYS_HARDWARE: u32 = 196_608;
+const FIXED_RAYS_FG_SOFTWARE: u32 = 32_768;
+const FIXED_RAYS_FG_HARDWARE: u32 = 65_536;
 pub(crate) fn fixed_rays(software: bool) -> u32 {
     static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     let forced = *OVERRIDE
         .get_or_init(|| std::env::var("RENDERLAB_GI_FIXED").ok().and_then(|v| v.parse().ok()));
-    forced.unwrap_or(if software { FIXED_RAYS_SOFTWARE } else { FIXED_RAYS_HARDWARE })
+    forced.unwrap_or_else(|| match (crate::program::final_gather(), software) {
+        (true, true) => FIXED_RAYS_FG_SOFTWARE,
+        (true, false) => FIXED_RAYS_FG_HARDWARE,
+        (false, true) => FIXED_RAYS_SOFTWARE,
+        (false, false) => FIXED_RAYS_HARDWARE,
+    })
 }
 /// New-cell tracing shares the fixed ray budget (on by default; `RENDERLAB_GI_FIXED_TRACE=0` off).
 fn fixed_trace_on() -> bool {
@@ -4484,8 +4493,8 @@ impl Renderer {
             if let Some(vals) = watch.collect_words() {
                 let (moved, ranked, created) = (vals[0], vals[1], vals[2]);
                 self.gi.planner.fixed_ranked = ranked;
-                // Tolerate at most a pair of edge cells TR1 sub-pixel jitter creates on static views.
-                if moved == 0 && created <= 2 {
+                // Tolerate the handful of edge cells TR1 sub-pixel jitter creates on static views.
+                if moved == 0 && created <= 6 {
                     self.gi.planner.fixed_quiet = self.gi.planner.fixed_quiet.saturating_add(1);
                 } else {
                     self.gi.planner.fixed_quiet = 0;
@@ -5336,13 +5345,13 @@ mod tests {
             skin_revisions: vec![],
         };
         let begun = planner.begin(&config, true, true, true);
-        assert_eq!(begun.header[45], FIXED_RAYS_SOFTWARE);
+        assert_eq!(begun.header[45], fixed_rays(true));
         assert_eq!(begun.header[44], 1);
         assert_eq!(begun.header[51], 1);
         // Active work before settling: not idle.
         let finished = planner.finish(&config, &begun, true, true, &mut view, inputs(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]));
         let plan = finished.plan.expect("first frame must run");
-        assert_eq!(plan.fixed_rays, FIXED_RAYS_SOFTWARE);
+        assert_eq!(plan.fixed_rays, fixed_rays(true));
         planner.advance(&begun, false);
 
         // Once the view is still for 8+ frames and GPU watch reports quiet sweeps with no

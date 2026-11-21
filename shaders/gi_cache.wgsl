@@ -2432,7 +2432,7 @@ var<workgroup> gi_wg_rank_buf:array<u32,64>;
         var moved=kept==GI_FIXED_UNSET && now!=GI_FIXED_UNSET;
         if kept!=GI_FIXED_UNSET && now!=GI_FIXED_UNSET {
             let a=bitcast<f32>(kept); let b=bitcast<f32>(now);
-            moved=abs(a-b)*512.0>max(max(a,b),1e-6);
+            moved=abs(a-b)*256.0>max(max(a,b),1e-6);
         }
         if !moved { continue; }
         atomicAdd(&gi_work[GI_W_FIXED_MOVED],1u);
