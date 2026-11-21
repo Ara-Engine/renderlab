@@ -52,6 +52,12 @@ struct Tr1Frame {
     zones:Tr1Zones,
     // x: Reconstruction::sharp_blur_budget.
     resample:vec4<f32>,
+    // Scoped TR1_BOX rigid mover zones: x box count (0..=16), y 1 for global clamp (relit/posed/fallback).
+    mover_meta:vec4<u32>,
+    // xyz unit direction toward shadowed sun (safe nonzero components), w widened disk tangent (0: none).
+    mover_light:vec4<f32>,
+    // Pairs of (lo.xyz, reach_pad), (hi.xyz, 0) for merged moving rigid bounds.
+    movers:array<vec4<f32>,32>,
 };
 const TR1_CATMULL_ROM:u32=1u;
 const TR1_SPATIAL_START:u32=2u;
@@ -207,9 +213,31 @@ fn tr1_view_turn(s:Tr1Surface)->f32 {
 // The surface neither the camera nor its vertices or placement moved: its history is its
 // own pixel's.
 fn tr1_still(s:Tr1Surface)->bool {return tr1.flags.z!=0u && !s.moved;}
-// MQ1's box over this frame's 3x3 samples (TR1_BOX frames only).
+// MQ1's box over this frame's 3x3 samples (scoped to pixels near a mover, in its swept shadow,
+// moving themselves, or on relit/posed frames).
+var<private> tr1_box_active:bool;
 var<private> tr1_box_lo:vec3<f32>;
 var<private> tr1_box_hi:vec3<f32>;
+fn tr1_mover_hit(x:vec3<f32>,lo:vec4<f32>,hi:vec4<f32>)->bool {
+    let pad=vec3<f32>(lo.w);
+    if all(x>=lo.xyz-pad) && all(x<=hi.xyz+pad) {return true;}
+    if tr1.mover_light.w<=0.0 {return false;}
+    let reach=length(max(abs(x-lo.xyz),abs(x-hi.xyz)));
+    let grow=vec3<f32>(reach*tr1.mover_light.w);
+    let rcp=vec3<f32>(1.0)/tr1.mover_light.xyz;
+    let a=(lo.xyz-grow-x)*rcp;let b=(hi.xyz+grow-x)*rcp;
+    let t0=min(a,b);let t1=max(a,b);
+    return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
+}
+fn tr1_box_applies(s:Tr1Surface)->bool {
+    if (tr1.flags.y&TR1_BOX)==0u {return false;}
+    if tr1.mover_meta.y!=0u || s.moved || tr1_near_skin {return true;}
+    if s.id==0u {return false;}
+    for(var k=0u;k<tr1.mover_meta.x;k+=1u) {
+        if tr1_mover_hit(s.point.xyz,tr1.movers[2u*k],tr1.movers[2u*k+1u]) {return true;}
+    }
+    return false;
+}
 // Placement + 1 of this frame's samples over the workgroup's 8x8 pixels and a one-pixel
 // border (TR1_NONE outside the image), loaded once per workgroup by tr1_resolve.
 var<workgroup> tr1_tile:array<u32,100>;
@@ -463,9 +491,8 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
             h.window=min(h.window,cap);
         }
     }
-    // MQ1: while placements move, light they change on other surfaces (moving shadows,
-    // reflections of moving objects) is held to this frame's 3x3 range.
-    if (tr1.flags.y&TR1_BOX)!=0u {h.colour=clamp(h.colour,tr1_box_lo,tr1_box_hi);}
+    // MQ1: clamp continued history to this frame's 3x3 range where a mover/light can affect it.
+    if tr1_box_active {h.colour=clamp(h.colour,tr1_box_lo,tr1_box_hi);}
     return h;
 }
 
@@ -679,7 +706,8 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         if v!=s.id && (other<0 || (i%2==1 && other%2==0)) {other=i;}
     }
     let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
-    if (tr1.flags.y&TR1_BOX)!=0u {
+    tr1_box_active=tr1_box_applies(s);
+    if tr1_box_active {
         tr1_box_lo=vec3<f32>(3.4e38);tr1_box_hi=vec3<f32>(-3.4e38);
         for(var i=0;i<9;i+=1) {
             let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);

@@ -67,8 +67,9 @@ fn rtvis_motion(x:vec3<f32>)->u32 {
 // The receiver's placement moved since the previous frame (object_motion.wgsl motion_rigid).
 fn rtvis_moved(slot:u32)->bool {
     let a=models[slot];let b=models[arrayLength(&models)/2u+slot];
-    return any(bitcast<vec4<u32>>(a[0])!=bitcast<vec4<u32>>(b[0]))||any(bitcast<vec4<u32>>(a[1])!=bitcast<vec4<u32>>(b[1]))
-        ||any(bitcast<vec4<u32>>(a[2])!=bitcast<vec4<u32>>(b[2]))||any(bitcast<vec4<u32>>(a[3])!=bitcast<vec4<u32>>(b[3]));
+    let eps=vec4<f32>(1e-5);
+    return any(abs(a[0]-b[0])>eps)||any(abs(a[1]-b[1])>eps)
+        ||any(abs(a[2]-b[2])>eps)||any(abs(a[3]-b[3])>eps);
 }
 // Sets HELD_STOP for this receiver: a still, unskinned receiver outside every moving
 // caster's swept shadow whose reprojected 3x3 history is one class for HELD_STREAK frames.

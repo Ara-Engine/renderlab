@@ -104,15 +104,15 @@ fn gi_rx_store_at(at:u32) {
 const FG_TILE:u32=16u;
 const FG_SLOTS:u32=2u;
 const FG_BLOCK:u32=8u;
-const FG_RAYS:u32=16u;
-const FG_HISTORY:f32=32.0;
-// Half-rate tracing (off by default: fg_trace is ~0.18 ms on RT and full-rate updates eliminate
-// half/quarter-rate checkerboard lag and speed up temporal convergence after cuts and motion).
+const FG_RAYS:u32=32u;
+const FG_HISTORY:f32=64.0;
+// Half-rate tracing (off by default: fg_trace is ~0.4 ms on RT at 32 rays and full-rate updates
+// eliminate half/quarter-rate checkerboard lag and speed up temporal convergence after cuts and motion).
 const FG_HALF_RATE:bool=false;
 const FG_HALF_MIN:f32=8.0;
-// A probe ray's cone: its share of the hemisphere (2 pi / FG_RAYS sr) as an angle, so its
+// A probe ray's cone: its share of the hemisphere (2 pi / FG_HEMI sr) as an angle, so its
 // width at distance t is FG_CONE * t (the cache answers hits whose cone covers a cell).
-const FG_CONE:f32=0.6266570686577501;
+const FG_CONE:f32=0.45764912225414734;
 // The sky a probe ray misses into: the map's own radiance in that direction (its base level).
 // The probe's rays and history average it over the hemisphere. A lookup prefiltered to the ray's
 // cone (GGX alpha 0.098) blurred the bright haze below the horizon into the directions above it:
@@ -197,8 +197,8 @@ fn fg_invalidate(index:u32,size:vec2<u32>) {
 // Per lane: its ray's terms in the probe's layout (sky L2 at 0-26 for a miss, bounce L1 at
 // FG_BOUNCE for a hit, and 1 at FG_ANSWERED, the layout's pad, when the ray counts), and its
 // emitter sample's bounce L1 terms (fg_nee).
-var<workgroup> fg_lane_sh:array<array<f32,40>,32>;
-var<workgroup> fg_nee_sh:array<array<f32,12>,32>;
+var<workgroup> fg_lane_sh:array<array<f32,40>,64>;
+var<workgroup> fg_nee_sh:array<array<f32,12>,64>;
 const FG_ANSWERED:u32=27u;
 
 fn fg_hash(x:u32)->u32 {
@@ -229,10 +229,11 @@ fn fg_surface_at(id:vec2<u32>,size:vec2<u32>,shading:bool)->FgSurface {
     if hit.placement<half {
         let cur_m=models[hit.placement];
         let prev_m=models[half+hit.placement];
-        rigid_moved=any(bitcast<vec4<u32>>(cur_m[0])!=bitcast<vec4<u32>>(prev_m[0]))
-            || any(bitcast<vec4<u32>>(cur_m[1])!=bitcast<vec4<u32>>(prev_m[1]))
-            || any(bitcast<vec4<u32>>(cur_m[2])!=bitcast<vec4<u32>>(prev_m[2]))
-            || any(bitcast<vec4<u32>>(cur_m[3])!=bitcast<vec4<u32>>(prev_m[3]));
+        let eps=vec4<f32>(1e-5);
+        rigid_moved=any(abs(cur_m[0]-prev_m[0])>eps)
+            || any(abs(cur_m[1]-prev_m[1])>eps)
+            || any(abs(cur_m[2]-prev_m[2])>eps)
+            || any(abs(cur_m[3]-prev_m[3])>eps);
         if rigid_moved { s.prev_world=(prev_m*vec4<f32>(local_p,1.0)).xyz; }
     }
     s.moved=rigid_moved || batch_skinned(primary_batch_info(hit.batch));
@@ -587,7 +588,7 @@ fn fg_reduce(lane:u32) {
             }
             fg_lane_sh[first][i]=sum;
         } else {
-            for(var l=0u;l<FG_RAYS;l+=1u) {sum+=fg_nee_sh[first+l][i-40u];}
+            for(var l=0u;l<FG_NEE;l+=1u) {sum+=fg_nee_sh[first+l][i-40u];}
             fg_nee_sh[first][i-40u]=sum;
         }
     }
@@ -607,15 +608,12 @@ fn fg_irradiance(sh:array<vec4<f32>,10>,n:vec3<f32>)->f32 {
     return dot(max(e,vec3<f32>(0.0)),vec3<f32>(0.2126,0.7152,0.0722));
 }
 // A traced update's change against the probe's history (fg_state): the relative difference of
-// their irradiance at the probe's normal. A change is one above FG_CHANGE times the probe's usual
-// change (a running mean of the updates that were not changes: a fresh update of FG_HEMI rays
-// differs from the history by its noise, which varies from probe to probe) and above
-// FG_CHANGE_MIN. Probes without FG_HALF_MIN frames of history only learn their usual change.
-// On Glint's settled views 2.5 times the usual change flagged 4-6% of updates, nearly all noise,
-// which kept three probes in four at the half rate through their neighbours; 4 times flags 1%.
-// Returns whether this update is a change.
-const FG_CHANGE:f32=4.0;
-const FG_CHANGE_MIN:f32=0.25;
+// their irradiance at the probe's normal. Requires two consecutive same-sign outliers above
+// max(FG_CHANGE * usual, FG_CHANGE_MIN) before restarting history, eliminating single-frame
+// Monte Carlo false restarts (soft dark/bright pulsing blotches on pillars and walls) while
+// still responding in 2 frames (~33 ms) to genuine lighting or shadow changes.
+const FG_CHANGE:f32=4.5;
+const FG_CHANGE_MIN:f32=0.30;
 fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:vec3<f32>)->bool {
     let at=fg_state_at(index);
     if at+1u>=arrayLength(&fg_state) {return false;}
@@ -626,20 +624,25 @@ fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:ve
     let e_old=fg_irradiance(old.sh,n);
     let r=abs(e_new-e_old)/max(max(e_new,e_old),1e-30);
     if old.point.w>=FG_HALF_MIN && r>max(FG_CHANGE*usual,FG_CHANGE_MIN) {
-        fg_state[at]=(fg_frame()&0xffffffu)<<8u;
-        return true;
+        let sign_bit=select(0u,128u,e_new>e_old);
+        let prev_pending=(word&64u)!=0u;
+        let prev_sign=word&128u;
+        if prev_pending && prev_sign==sign_bit {
+            fg_state[at]=(fg_frame()&0xffffffu)<<8u;
+            return true;
+        }
+        fg_state[at]=(word&0xffffff3fu)|64u|sign_bit;
+        return false;
     }
     usual=mix(usual,r,0.125);
-    fg_state[at]=(word&0xffffff00u)|min((word&0xffu)+1u,255u);
+    let quiet=min((word&0x3fu)+1u,63u);
+    fg_state[at]=(word&0xffffff00u)|quiet;
     fg_state[at+1u]=bitcast<u32>(usual);
     return false;
 }
-// The history a probe keeps through its own change (fg_note_change; a lighting edit's word 0 only
-// sets the rate: it is on through whole relight spreads, where restarting every probe would add
-// noise everywhere): FG_RESTART updates, so the new light takes over in a few updates instead of
-// blending in at 1/FG_HISTORY an update (a light switched on under settled probes reached 0.75
-// of its light 48 frames later), and the probe does not turn stable while far from it.
-const FG_RESTART:f32=4.0;
+// The history a probe keeps through a confirmed change: 6 updates for smooth transition without
+// injecting raw 1-frame noise.
+const FG_RESTART:f32=6.0;
 // Folds the lanes from `first` (summed into that row by fg_reduce) into probe `write_index`
 // (in write_bank), continuing from `prev_index` (in read_bank, 0xffffffffu when none) and
 // recording change state at `state_index`.
@@ -699,7 +702,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
     out.normal=vec4<f32>(s.normal,footprint);
     fg_store(write_index,size,out);
 }
-@compute @workgroup_size(32) fn fg_trace(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+@compute @workgroup_size(64) fn fg_trace(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
     let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
     let tile=group.y*tiles.x+group.x;
@@ -721,11 +724,11 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
         }
     }
     workgroupBarrier();
-    // Slot 0: center-anchored pick with 2x2 sub-tile dither, falling back to a full 4x4 sweep so
-    // thin objects (monoliths, pillars, hoops) never randomly miss and wipe probe history.
+    // Slot 0: fixed center-anchored pick (no frame-to-frame pixel dither across polygon facet
+    // seams on curved cylinders/pillars or thin rails), falling back to a 4x4 sweep if empty.
     var first:FgSurface;
     var first_pixel=vec2<u32>(0u);
-    let q0=group.xy*FG_TILE+vec2<u32>((frame&1u)+7u,((frame>>1u)&1u)+7u);
+    let q0=group.xy*FG_TILE+vec2<u32>(8u,8u);
     first=fg_surface_at(q0,size,false);
     if first.placement!=0u {
         first_pixel=q0;
@@ -759,7 +762,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
     // that has history on its plane instead of tracing it. Moving surfaces always trace.
     let old_w=select(0.0,fg_plane(prev_idx,size).point.w,prev_idx!=0xffffffffu);
     let at=fg_state_at(tile_slot);
-    let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0xffu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
+    let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
     let turn=select((group.x+group.y+frame)&1u,(group.x+2u*group.y+frame)%FG_STABLE_RATE,stable);
     let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
@@ -817,8 +820,8 @@ const FG_FILTER_SHORT:f32=6.0;
         let index=fg_tile_at(tile_slot,size,bank);
         let c=fg_plane(index,size);
         if c.point.w<=0.0 {fg_invalidate(fg_filtered(tile_slot,size),size);continue;}
-        let reach=select(1,2,c.point.w<=FG_FILTER_SHORT);
-        let sigma=f32(reach)*0.75;
+        let reach=2;
+        let sigma=select(1.25,1.5,c.point.w<=FG_FILTER_SHORT);
         fg_clear();
         fg_add(index,size,c.point.w);
         var total=c.point.w;
@@ -875,9 +878,9 @@ fn fg_pick_at(index:u32,size:vec2<u32>)->u32 { return gi_prepared[fg_at(index,si
     if pick==FG_NONE {fg_invalidate(index,size);}
 }
 var<workgroup> fg_pair:array<u32,2>;
-// Two blocks per workgroup of 32 (fg_classify picked their pixels): lanes 16 b .. 16 b + 15
+// Two blocks per workgroup of 64 (fg_classify picked their pixels): lanes 32 b .. 32 b + 31
 // trace block b's probe; a pair with no pick exits before any shading.
-@compute @workgroup_size(32) fn fg_adapt(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+@compute @workgroup_size(64) fn fg_adapt(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
     let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
     let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
@@ -904,7 +907,7 @@ var<workgroup> fg_pair:array<u32,2>;
     // checkerboard of blocks carries forward a reprojected probe with history on its plane.
     let old_w=select(0.0,fg_plane(prev_idx,size).point.w,prev_idx!=0xffffffffu);
     let at=fg_state_at(state_idx);
-    let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0xffu)>=FG_STABLE;
+    let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE;
     let turn=select((block.x+block.y+frame)&1u,(block.x+2u*block.y+frame)%FG_STABLE_RATE,stable);
     let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;

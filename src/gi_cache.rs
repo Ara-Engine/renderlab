@@ -200,7 +200,7 @@ pub(crate) fn borrow_on() -> bool {
 const FIXED_RAYS_SOFTWARE: u32 = 98_304;
 const FIXED_RAYS_HARDWARE: u32 = 196_608;
 const FIXED_RAYS_FG_SOFTWARE: u32 = 65_536;
-const FIXED_RAYS_FG_HARDWARE: u32 = 196_608;
+const FIXED_RAYS_FG_HARDWARE: u32 = 393_216;
 pub(crate) fn fixed_rays(software: bool) -> u32 {
     static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     let forced = *OVERRIDE
@@ -1800,7 +1800,12 @@ impl Planner {
             // searching the draws per placement made this loop quadratic in placements).
             for i in 0..bounds.len().max(previous.len()) {
                 let (a, b) = (previous.get(i), bounds.get(i));
-                if a == b && !crate::renderer::skinning::deformed(&previous_poses, &poses, i) {
+                let same_bounds = match (a, b) {
+                    (Some(a), Some(b)) => (0..6).all(|k| (a[k] - b[k]).abs() <= 1e-5),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if same_bounds && !crate::renderer::skinning::deformed(&previous_poses, &poses, i) {
                     continue;
                 }
                 let mut swept = [

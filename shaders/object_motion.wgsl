@@ -8,8 +8,9 @@ fn motion_previous_model(slot:u32)->mat4x4<f32> {
 }
 fn motion_rigid(slot:u32)->bool {
     let a=models[slot];let b=motion_previous_model(slot);
-    return any(bitcast<vec4<u32>>(a[0])!=bitcast<vec4<u32>>(b[0]))||any(bitcast<vec4<u32>>(a[1])!=bitcast<vec4<u32>>(b[1]))
-        ||any(bitcast<vec4<u32>>(a[2])!=bitcast<vec4<u32>>(b[2]))||any(bitcast<vec4<u32>>(a[3])!=bitcast<vec4<u32>>(b[3]));
+    let eps=vec4<f32>(1e-5);
+    return any(abs(a[0]-b[0])>eps)||any(abs(a[1]-b[1])>eps)
+        ||any(abs(a[2]-b[2])>eps)||any(abs(a[3]-b[3])>eps);
 }
 fn motion_previous_vertex(batch:u32,vertex:u32)->vec3<f32> {
     return motion_previous_vertices[batch].data[vertex*3u].xyz;

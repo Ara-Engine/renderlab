@@ -196,8 +196,9 @@ impl Reconstruction {
     }
 }
 
-/// WGSL Tr1Frame.
-const FRAME_BYTES: usize = ZONES_OFFSET + ZONES_BYTES + 16;
+/// WGSL Tr1Frame: fixed header + zones + resample + scoped mover-box table (TR1_MOVERS).
+const TR1_MOVERS: usize = 16;
+const FRAME_BYTES: usize = ZONES_OFFSET + ZONES_BYTES + 16 + 32 + TR1_MOVERS * 32;
 /// WGSL Tr1Zones (shaders/primary_rays.wgsl) and its place in Tr1Frame: where this frame's
 /// resolve restarts static receivers' histories.
 pub(crate) const ZONES_BYTES: usize = 48 + RELIT_SLOTS * 16 + 16;
@@ -1628,10 +1629,15 @@ impl Planner {
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
         }
-        // Camera stillness; MV1/SK1's surface source handles moving placements/vertices.
+        // Camera stillness (with 1e-6 tolerance so sub-micron physics contact jitter on a
+        // resting follow-target never breaks still accumulation, sun reuse or GI idling);
+        // MV1/SK1's surface source handles moving placements/vertices.
         let still = !self.reset
-            && previous_matrix.to_cols_array().map(f32::to_bits)
-                == matrix.to_cols_array().map(f32::to_bits);
+            && previous_matrix
+                .to_cols_array()
+                .iter()
+                .zip(matrix.to_cols_array())
+                .all(|(&a, b)| (a - b).abs() <= 1e-6);
         // MV1 motion-source integration: rigid casters must not enter RTDEF2's settled
         // shadow budget just because the camera is stationary. A deforming caster's swept
         // shadow does not hold the whole frame at the moving count (audit 3.3): receivers it
@@ -1760,6 +1766,38 @@ impl Planner {
         // resample.x: P-FLICKER's Catmull-Rom blur budget.
         for value in [settings.sharp_blur_budget, 0.0, 0.0, 0.0] {
             bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        // Scoped TR1_BOX mover table: rigid motion clamps only pixels near a mover, in its swept
+        // sun shadow, or on a moving surface/silhouette, so distant static surfaces keep full
+        // 256-frame temporal convergence instead of boiling whenever an object moves elsewhere.
+        let mover_boxes = if moved && !i.moving_boxes.is_empty() {
+            merge_boxes(&i.moving_boxes, TR1_MOVERS)
+        } else {
+            vec![]
+        };
+        let global_box = relit || (posed && !self.reset) || (moved && mover_boxes.is_empty());
+        for w in [mover_boxes.len() as u32, u32::from(global_box), 0u32, 0u32] {
+            bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+        let mover_light = one_sun.map_or([0.0f32; 4], |l| {
+            let safe = l.map(|c| if c.abs() < 1e-6 { 1e-6f32.copysign(c) } else { c });
+            let spread = i.directional_disk_angle.tan() * 1.01 + 1e-4;
+            [safe.x, safe.y, safe.z, spread]
+        });
+        for value in mover_light {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        for k in 0..TR1_MOVERS {
+            let row = mover_boxes.get(k).map_or([0.0f32; 8], |b| {
+                let diag = (b.max - b.min).length();
+                let reach = (2.5 * diag).clamp(4.0, 24.0);
+                let margin = Vec3::splat(1e-4) + b.min.abs().max(b.max.abs()) * 1e-5;
+                let (lo, hi) = (b.min - margin, b.max + margin);
+                [lo.x, lo.y, lo.z, reach, hi.x, hi.y, hi.z, 0.0]
+            });
+            for value in row {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
         // sunrt-7: nothing that sets a receiver's sun visibility changed since the previous
@@ -2428,8 +2466,11 @@ impl Renderer {
             let mut any_moved = false;
             rigid_only &= !edited || previous.len() == d.instances.state.models.len();
             for (&model, &previous_model) in d.instances.state.models.iter().zip(previous) {
-                let moved = model.to_cols_array().map(f32::to_bits)
-                    != previous_model.to_cols_array().map(f32::to_bits);
+                let moved = model
+                    .to_cols_array()
+                    .iter()
+                    .zip(previous_model.to_cols_array())
+                    .any(|(&a, b)| (a - b).abs() > 1e-5);
                 rigid_motion |= moved;
                 any_moved |= moved;
                 // U-RTVIS: no held stop in a moving or skinned placement's swept shadow.
