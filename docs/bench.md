@@ -75,6 +75,7 @@ Environment:
 - **Idle.** It does no GPU work while the timing-hold belongs to a timing lease or is exclusive, that is, while its `owner.json` lacks `"exclusive":false`. `n8-run.py --timing` and similar leases write no `exclusive` field; an `--exclusive` smoke writes `true`. Meanwhile it prints `lightbench: idle, a timing lease holds the machine: <owner>`. Edits saved during the idle are picked up when it resumes.
 - **Running beside a gate.** During ordinary smokes and play gates (`"exclusive":false`) it runs normally. Any fixture line whose run overlapped someone's lease (a timing-hold or `gpu-slot.lock`) ends with `| contended: <owner> <label>`, and its JSON carries `"contended"`. Nobody quotes those milliseconds as clean.
 - **What its ms are for.** The bench's ms per pass compare an edit against the round before it on the same process. They are never scoreboard numbers.
+- **GPU clock.** Each round ends with `lightbench: round N GPU clock median M MHz, lowest L` (nvidia-smi sampled every 200 ms through the round; nothing on other GPUs). A round whose clock sat low was a slow-state round: rerun it rather than quote it.
 
 ## Passes it reloads
 
