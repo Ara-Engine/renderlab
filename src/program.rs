@@ -813,6 +813,10 @@ pub(crate) fn engine_shader(name: &str, builtin: &'static str) -> std::borrow::C
 }
 /// `gi_shader`'s switches, applied to the built-in text or the bench's.
 fn gi_shader_variant<'a>(name: &str, text: &'a str) -> std::borrow::Cow<'a, str> {
+    // The cause counters, only for the cause log (src/gi_causes.rs); default kernels are the file's text.
+    if let Some(counted) = crate::renderer::gi_causes::compose(name, text) {
+        return counted.into();
+    }
     // RENDERLAB_GI_BUCKET=0: the cache's table searches walk a bucket one key word at a time.
     if name == "gi_cells.wgsl" && bucket_walk() {
         let from = "const GI_FIND_WHOLE:bool=true;";
