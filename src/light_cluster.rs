@@ -549,23 +549,22 @@ pub(crate) fn atlas_extent(maximum: u32) -> u32 {
 
 /// The physical atlas for `tiles`: tiles keep their places in `atlas_extent`'s logical square
 /// (so their texels, coordinates and filtering are unchanged), and the texture covers only
-/// their bounding box, each side rounded up to a power of two (texel-corner gathers stay
-/// exact) and at most the logical side. `RENDERLAB_LC_ATLAS=full` keeps the whole square.
+/// their bounding box, at most the logical side. The box ends on the allocator's grid (tile
+/// corners are whole texels, so gathers at them still pick the same texels in a side that is
+/// not a power of two). Measurement: `RENDERLAB_LC_ATLAS=full` keeps the whole square,
+/// `RENDERLAB_LC_ATLAS=pow2` rounds each side up to a power of two (the earlier layout:
+/// Outpost's 3,584-texel reach took 4,096, 48 MiB more).
 pub(crate) fn fitted_extent(tiles: &[Option<Tile>], maximum: u32) -> [u32; 2] {
     let full = atlas_extent(maximum);
-    static FULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *FULL.get_or_init(|| std::env::var("RENDERLAB_LC_ATLAS").is_ok_and(|v| v == "full")) {
+    static MODE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let mode = MODE.get_or_init(|| std::env::var("RENDERLAB_LC_ATLAS").unwrap_or_default());
+    if mode == "full" {
         return [full; 2];
     }
+    let pow2 = mode == "pow2";
     let reach = |axis: fn(&Tile) -> u32| {
-        tiles
-            .iter()
-            .flatten()
-            .map(|t| axis(t) + t.size)
-            .max()
-            .unwrap_or(1)
-            .next_power_of_two()
-            .min(full)
+        let reach = tiles.iter().flatten().map(|t| axis(t) + t.size).max().unwrap_or(1);
+        if pow2 { reach.next_power_of_two() } else { reach }.min(full)
     };
     [reach(|t| t.x), reach(|t| t.y)]
 }

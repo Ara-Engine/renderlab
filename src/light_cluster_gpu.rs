@@ -551,6 +551,15 @@ impl Renderer {
                         (maximum / 4).max(1)
                     };
                     shared.tiles[slot] = lc::allocate_tile(&shared.tiles, maximum, desired);
+                    // Measurement: `RENDERLAB_LC_TILE_LOG=<file>` appends each tile assignment.
+                    if let Some(path) = std::env::var_os("RENDERLAB_LC_TILE_LOG") {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                            let l = &lights[*light as usize];
+                            let tile = shared.tiles[slot].map_or(0, |t| t.size);
+                            let _ = writeln!(f, "slot {slot} light {light} cube {} pixels {pixels:.0} desired {desired} tile {tile} {l:?}", lc::cube(l));
+                        }
+                    }
                 }
                 let m = lc::matrices(&lights[*light as usize], state.settings.near);
                 faces[slot] = m.len();
