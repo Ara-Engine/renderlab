@@ -18,10 +18,11 @@ pub(crate) fn fixtures() -> Vec<Box<dyn Fixture>> {
         Box::new(City::terrain()),
         Box::new(Dump::glint()),
         Box::new(Dump::glint_course()),
+        Box::new(Dump::outpost()),
     ]
 }
 
 /// Fixtures that run only when `--fixtures` names them: the real-size scenes take about a
 /// second a round each (`glint`, a scene dump from disk, several), outside the default loop's
 /// budget.
-pub(crate) const NAMED_ONLY: &[&str] = &["city", "terrain", "glint", "glint-course"];
+pub(crate) const NAMED_ONLY: &[&str] = &["city", "terrain", "glint", "glint-course", "outpost"];
