@@ -96,6 +96,11 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
             if !(max(radiance.x,max(radiance.y,radiance.z))>0.0) { atomicAdd(&gi_work[GI_W_EMITTERS_ZERO],1u); }
             gi_table[r+9u]=bitcast<u32>(radiance.x);gi_table[r+10u]=bitcast<u32>(radiance.y);gi_table[r+11u]=bitcast<u32>(radiance.z);
             gi_table[r+12u]=b;gi_table[r+13u]=p;gi_table[r+14u]=t;
+            // Cache each triangle's power directly into its CDF slot while e1, e2, radiance are
+            // in registers, so gi_emitters_cdf scans a single contiguous array instead of 9-word strides.
+            let area=0.5*length(cross(e1,e2));
+            let power=max(dot(radiance,vec3<f32>(0.2126,0.7152,0.0722)),0.0)*3.141592653589793*area;
+            gi_table[gi_emitter_cdf_at()+k]=bitcast<u32>(power);
         }
         listed+=total;
     }
@@ -132,17 +137,19 @@ fn gi_emitter_power(k:u32) -> f32 {
     let area=0.5*length(cross(gi_emitter_vec(r+3u),gi_emitter_vec(r+6u)));
     return max(dot(gi_emitter_vec(r+9u),vec3<f32>(0.2126,0.7152,0.0722)),0.0)*3.141592653589793*area;
 }
-const GI_EMITTER_CDF_LANES:u32=64u;
-var<workgroup> gi_wg_emitter_sums:array<f32,64>;
-// The power CDF (gi_emitter_cdf_at): 64 lanes each sum a contiguous chunk, lane 0 turns the
-// chunk sums into offsets, and each lane writes its chunk's running sums. One workgroup.
-@compute @workgroup_size(64) fn gi_emitters_cdf(@builtin(local_invocation_index) lane:u32) {
+const GI_EMITTER_CDF_LANES:u32=256u;
+var<workgroup> gi_wg_emitter_sums:array<f32,256>;
+// The power CDF (gi_emitter_cdf_at): 256 lanes each compute their chunk's powers once (caching
+// each triangle's power in the CDF slot so pass 2 avoids re-reading 9 strided geometry words),
+// then prefix-sum the 256 chunk totals and write the running sums in parallel.
+@compute @workgroup_size(256) fn gi_emitters_cdf(@builtin(local_invocation_index) lane:u32) {
     let n=gi_word(GI_H_EMITTER_COUNT);
     let chunk=(n+GI_EMITTER_CDF_LANES-1u)/GI_EMITTER_CDF_LANES;
     let first=min(lane*chunk,n);
     let last=min(first+chunk,n);
+    let at=gi_emitter_cdf_at();
     var sum=0.0;
-    for(var k=first;k<last;k+=1u) { sum+=gi_emitter_power(k); }
+    for(var k=first;k<last;k+=1u) { sum+=bitcast<f32>(gi_table[at+k]); }
     gi_wg_emitter_sums[lane]=sum;
     workgroupBarrier();
     if lane==0u {
@@ -151,8 +158,7 @@ var<workgroup> gi_wg_emitter_sums:array<f32,64>;
     }
     workgroupBarrier();
     var run=gi_wg_emitter_sums[lane];
-    let at=gi_emitter_cdf_at();
-    for(var k=first;k<last;k+=1u) { run+=gi_emitter_power(k); gi_table[at+k]=bitcast<u32>(run); }
+    for(var k=first;k<last;k+=1u) { run+=bitcast<f32>(gi_table[at+k]); gi_table[at+k]=bitcast<u32>(run); }
 }
 // An emitter picked in proportion to power by u in [0, 1): its index and the probability it was
 // picked with (its power over the total), or probability 0 when nothing emits.

@@ -243,11 +243,17 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
         if own==1 { gi_shade_out[at]=vec4<f32>(gs_draw_emission(id.x),1.0); }
         if own==0 { gi_shade_out[at]=vec4<f32>(0.0); }
     }
-    // Each listed emitter triangle's mean emission, for the list's next build.
+    // Each listed emitter triangle's mean emission, for the list's next build: evaluate every
+    // unevaluated triangle immediately (w == 0) and refresh already-evaluated ones in a 1/16
+    // rotation so large static emitter meshes (Glint's 91k glowing triangles) do not re-shade every
+    // triangle every frame.
+    let emitter_frame=gi_word(GI_H_FRAME);
     for(var k=id.x;k<gi_word(GI_H_EMITTER_COUNT);k+=groups.x*64u) {
+        let out_at=gi_emitter_mean_at(k);
+        if gi_shade_out[out_at].w>0.0 && ((k+emitter_frame)&15u)!=0u { continue; }
         let own=gs_owns_draw(gi_word(gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS+12u));
-        if own==1 { gi_shade_out[gi_emitter_mean_at(k)]=vec4<f32>(gs_triangle_emission(k),1.0); }
-        if own==0 { gi_shade_out[gi_emitter_mean_at(k)]=vec4<f32>(0.0,0.0,0.0,1.0); }
+        if own==1 { gi_shade_out[out_at]=vec4<f32>(gs_triangle_emission(k),1.0); }
+        if own==0 { gi_shade_out[out_at]=vec4<f32>(0.0,0.0,0.0,1.0); }
     }
     let count=min(gi_shade_work[GS_COUNT],gi_word(GI_H_MASK)+1u);
     let queue=gi_word(GI_H_SHADE_QUEUE);

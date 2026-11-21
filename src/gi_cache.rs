@@ -92,7 +92,7 @@ fn emitters_on() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_EMITTERS").is_ok_and(|v| v == "1"))
 }
 const EMITTER_DRAW_WORDS: u64 = 8;
-const EMITTER_GROUPS: u32 = 64;
+const EMITTER_GROUPS: u32 = 256;
 /// The default per-frame gather budget (`IndirectSettings::gather_cells` 0), in cells, on both
 /// paths. G2b sized per-path budgets to about 4 ms of a cut frame's gathers (0.13 us a cell with hardware rays and
 /// 0.4 us with software rays on the quarry; docs/m7-g2b.md). Moving frames gather fewer
