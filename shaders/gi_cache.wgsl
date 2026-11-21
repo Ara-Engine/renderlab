@@ -780,19 +780,22 @@ fn gi_fill_bin(base:u32) -> u32 {
 // on the frame the cap ends.
 const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
 @compute @workgroup_size(1) fn gi_fill_select() {
-    let cap=gi_word(GI_H_FILL_CELLS);
+    let cap=select(gi_word(GI_H_FILL_CELLS),atomicLoad(&gi_work[GI_W_FIXED_FILL]),gi_fixed_trace_on());
     atomicStore(&gi_work[GI_W_FILL_PENDING],0u);
     if cap==0u { return; }
     var wanted=0u;
     for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]); }
     let pixel_cap=cap-min(wanted,cap/2u);
     var total=0u;
-    var forced=2u*GI_FILL_SPREAD;
+    // With the fixed budget nothing passes the cap: receivers read coarser levels meanwhile.
+    var forced=select(2u*GI_FILL_SPREAD,0u,gi_fixed_trace_on());
     for(var b=0u;b<GI_FILL_GATHER_BINS;b+=1u) {
-        let next=total+atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
-        if b+1u==GI_FILL_SPREAD && next!=0u { forced=GI_FILL_SPREAD; }
+        let h=atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
+        let next=total+h;
+        if b+1u==GI_FILL_SPREAD && next!=0u && !gi_fixed_trace_on() { forced=GI_FILL_SPREAD; }
         if b>=forced && next>pixel_cap {
             atomicStore(&gi_work[GI_W_FILL_CUT],b+1u);
+            atomicStore(&gi_work[GI_W_FIXED_FILL_SHARE],gi_fill_share(pixel_cap-min(total,pixel_cap),h));
             atomicStore(&gi_work[GI_W_FILL_PENDING],1u);
             break;
         }
@@ -801,8 +804,14 @@ const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
     let gather_cap=cap-min(total,cap);
     var gathers=0u;
     for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) {
-        gathers+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
-        if gathers>gather_cap { atomicStore(&gi_work[GI_W_FILL_CUT+1u],b+1u); return; }
+        let h=atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
+        let before=gathers;
+        gathers+=h;
+        if gathers>gather_cap {
+            atomicStore(&gi_work[GI_W_FILL_CUT+1u],b+1u);
+            atomicStore(&gi_work[GI_W_FIXED_FILL_SHARE+1u],gi_fill_share(gather_cap-min(before,gather_cap),h));
+            return;
+        }
     }
 }
 fn gi_claim_miss(index:u32) {
@@ -810,7 +819,11 @@ fn gi_claim_miss(index:u32) {
     if atomicLoad(&gi_work[base+5u])==GI_CREATED { return; }
     let fill_bin=gi_fill_bin(base);
     let fill_cut=atomicLoad(&gi_work[GI_W_FILL_CUT+select(0u,1u,fill_bin>=GI_FILL_GATHER_BINS)]);
-    if fill_cut!=0u && fill_bin+1u>=fill_cut {
+    // With the budget's tracing (gi_fixed_trace_on) the crossing bin admits its share by key.
+    let gathered=fill_bin>=GI_FILL_GATHER_BINS;
+    let share=atomicLoad(&gi_work[GI_W_FIXED_FILL_SHARE+select(0u,1u,gathered)]);
+    let in_share=gi_fixed_trace_on() && fill_bin+1u==fill_cut && (gi_mix(gi_miss_key(base).x^(gi_word(GI_H_FRAME)*0x85ebca6bu))&0xffffu)<share;
+    if fill_cut!=0u && fill_bin+1u>=fill_cut && !in_share {
         atomicStore(&gi_work[base+5u],GI_CREATED);
         atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u);
         return;
@@ -2206,7 +2219,37 @@ const GI_FIXED_DIRTY:u32=94u;
 const GI_FIXED_AGES:u32=93u;
 const GI_W_FIXED_CUT:u32=352u;
 const GI_W_FIXED_SHARE:u32=353u;
+// The new cells the budget admits this frame (gi_fixed_select), the first fill's cap.
+const GI_W_FIXED_FILL:u32=354u;
+// Gathers this frame that moved their cell's bounce by more than 1/256 (gi_fixed_note), and the
+// ranked cells' estimated rays (gi_fixed_select): src/gi_cache.rs idles the budget on a still
+// view once a full turn (ranked rays over the budget) passes with none moved.
+const GI_W_FIXED_MOVED:u32=355u;
+const GI_W_FIXED_RANKED:u32=356u;
+// The first fill's crossing-bin shares (pixels', gathers'), in 1/65536, under the budget's tracing.
+const GI_W_FIXED_FILL_SHARE:u32=357u;
+fn gi_fill_share(room:u32, h:u32) -> u32 { return select(0u,u32(f32(room)/f32(max(h,1u))*65536.0),gi_fixed_trace_on()); }
 fn gi_fixed_on() -> bool { return gi_word(GI_H_FIXED_RAYS)!=0u; }
+// New-cell tracing under the same budget (RENDERLAB_GI_FIXED_TRACE=1): the first fill's cap.
+const GI_H_FIXED_TRACE:u32=44u;
+// Per-cell settling (GI_SETTLED) on: RENDERLAB_GI_FIXED_REST=1 (src/gi_cache.rs fixed_rest).
+const GI_H_FIXED_SETTLE:u32=51u;
+fn gi_fixed_trace_on() -> bool { return gi_fixed_on() && gi_word(GI_H_FIXED_TRACE)!=0u; }
+// Counts a gather whose new bounce (its L0 term, `dc`) differs from the cell's last by more than
+// 1/256 of the larger. A first gather is a new cell, not a value still moving (on a still view the
+// temporal jitter makes about 50 a frame): it does not count. Call before the value is written.
+var<private> gi_fixed_calm:bool;
+fn gi_fixed_note(hot:u32, dc:vec3<f32>, quiet_hits:bool) {
+    gi_fixed_calm=false;
+    let s=bitcast<f32>(gi_table[hot+GI_HOT_BOUNCE]);
+    var old=vec3<f32>(0.0);
+    if s>0.0 { old=vec3<f32>(gi_bounce_half(hot,0u),gi_bounce_half(hot,1u),gi_bounce_half(hot,2u))*s; }
+    let first=gi_table[hot+GI_HOT_BOUNCE]==0u;
+    let moved=any(abs(dc-old)*256.0>max(max(abs(dc),abs(old)),vec3<f32>(1e-6)));
+    if !first && moved { atomicAdd(&gi_work[GI_W_FIXED_MOVED],1u); }
+    // Settles the cell at its gather's end (gi_gather_done).
+    gi_fixed_calm=!first && !moved && quiet_hits && gi_word(GI_H_FIXED_SETTLE)!=0u;
+}
 // A slot's bin, or 0xffffffff for a cell not ranked this frame (empty, not traced, an orphan,
 // queued for tracing, or not read this frame or the last).
 fn gi_fixed_bin(slot:u32) -> u32 {
@@ -2219,6 +2262,8 @@ fn gi_fixed_bin(slot:u32) -> u32 {
     // Never gathered: the bounce scale word is 0 until the first gather (gi_cells.wgsl GI_HOT_BOUNCE).
     if gi_table[gi_hot(slot)+GI_HOT_BOUNCE]==0u { return GI_FIXED_NONE; }
     if (state&GI_DIRTY)!=0u { return GI_FIXED_DIRTY; }
+    // A settled cell waits for an event (per-cell convergence).
+    if (state&GI_SETTLED)!=0u { return 0xffffffffu; }
     return min((frame-(state>>GI_STAMP_SHIFT))&0xfffu,GI_FIXED_AGES);
 }
 @compute @workgroup_size(64) fn gi_fixed_rank(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
@@ -2232,8 +2277,17 @@ fn gi_fixed_bin(slot:u32) -> u32 {
     }
 }
 @compute @workgroup_size(1) fn gi_fixed_select() {
-    let budget=gi_word(GI_H_FIXED_RAYS);
+    // New cells first: the misses the probe listed this frame take GI_DIRECTIONS tracing rays
+    // each, at most half the budget; their admission is the first fill's (gi_fill_select reads
+    // GI_W_FIXED_FILL). The gathers take the rest.
+    let rays=gi_word(GI_H_FIXED_RAYS);
+    let trace=select(0u,min(gi_miss_count()*GI_DIRECTIONS,rays/2u),gi_fixed_trace_on());
+    atomicStore(&gi_work[GI_W_FIXED_FILL],max(trace/GI_DIRECTIONS,1u));
+    let budget=rays-trace;
     atomicStore(&gi_work[gi_frame.bounce.x],0u);
+    var ranked=0u;
+    for(var b=0u;b<=GI_FIXED_NONE;b+=1u) { ranked+=atomicLoad(&gi_work[GI_W_GATHER_HIST+b]); }
+    atomicStore(&gi_work[GI_W_FIXED_RANKED],ranked);
     var total=0u;
     for(var k=0u;k<=GI_FIXED_NONE;k+=1u) {
         let b=GI_FIXED_NONE-k;
@@ -2270,7 +2324,9 @@ fn gi_gather_done(slot:u32, left:u32) {
     if gi_fixed_on() {
         let cold=gi_cold(slot);
         let state=gi_table[cold+GI_C_STATE];
-        gi_table[cold+GI_C_STATE]=(state&~(GI_DIRTY|GI_STAMP_MASK|GI_GATHER_MASK))|((gi_word(GI_H_FRAME)&0xfffu)<<GI_STAMP_SHIFT);
+        gi_table[cold+GI_C_STATE]=(state&~(GI_DIRTY|GI_STAMP_MASK|GI_GATHER_MASK|GI_SETTLED))
+            |((gi_word(GI_H_FRAME)&0xfffu)<<GI_STAMP_SHIFT)|select(0u,GI_SETTLED,gi_fixed_calm);
+        gi_fixed_calm=false;
         return;
     }
     gi_schedule(slot,left);
@@ -2550,6 +2606,10 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             var m=0.0;
             for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[j*GI_GATHER_LANES])); }
             let hot=gi_hot(slot);
+            // The fixed budget's idle test: a gather that moves its cell's value (gi_fixed_note).
+            if gi_fixed_on() && !(valued==0u && hits>0u) {
+                gi_fixed_note(hot,vec3<f32>(gi_wg_bounce[0u],gi_wg_bounce[GI_GATHER_LANES],gi_wg_bounce[2u*GI_GATHER_LANES]),atomicLoad(&gi_wg_changing)==0u);
+            }
             if valued==0u && hits>0u {
                 // Every hit was without a value: nothing to average, so the cell keeps its last
                 // bounce (its retry gathers again).

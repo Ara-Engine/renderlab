@@ -478,7 +478,10 @@ impl Fixture for Dump {
                 // Scored at arrival, until the region converges, and on the last held frame.
                 let last = k + 1 == hold;
                 let k = k as u32;
-                if k == 0 || last || converge < 0.0 {
+                // The held window's timing reads back only arrival and the last frame (a readback a
+                // frame downclocks the GPU and inflates the very passes measured).
+                let timing = std::env::var("LIGHTBENCH_DUMP_WINDOW").as_deref() == Ok("hold");
+                if k == 0 || last || (converge < 0.0 && !timing) {
                     let pixels = kit::capture_radiance(r, l.exposure)?;
                     if converge < 0.0 && (region(&pixels) / region(&reference.rgb) - 1.0).abs() <= 0.02 {
                         converge = f64::from(k);
@@ -502,8 +505,13 @@ impl Fixture for Dump {
         metrics.push(("walked_m".into(), f64::from(walked_m)));
         metrics.push(("walk_frames".into(), walking.len() as f64));
         // The bench's pass window: the walking frames, before the held ones.
-        metrics.push(("frames_measured".into(), walking.len() as f64));
-        metrics.push(("frames_after".into(), hold as f64));
+        // LIGHTBENCH_DUMP_WINDOW=hold: the pass window is the held frames instead (standing cost).
+        if std::env::var("LIGHTBENCH_DUMP_WINDOW").as_deref() == Ok("hold") && hold > 0 {
+            metrics.push(("frames_measured".into(), hold as f64));
+        } else {
+            metrics.push(("frames_measured".into(), walking.len() as f64));
+            metrics.push(("frames_after".into(), hold as f64));
+        }
         self.series = ["rays", "gather_rays", "light_rays", "created", "queued", "shades", "integrates", "traces", "gathers", "invalidated", "reshaded"]
             .into_iter()
             .map(str::to_owned)
