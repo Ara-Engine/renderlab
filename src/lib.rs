@@ -52,6 +52,7 @@ mod readback_ring;
 mod receiver_adjacency;
 /// M7 reference path tracer (measurement tooling for the GI and reflection gates).
 pub mod reference;
+mod memory_report;
 mod reference_live;
 mod reflection_software;
 mod reflections;
