@@ -487,4 +487,38 @@ fn gi_lobe_band1(roughness:f32) -> f32 {
     return (s+1.0)/(s+2.0);
 }
 
+// ---- borrowed bounce (RENDERLAB_GI_BORROW, src/gi_cache.rs borrow_on) ----
+// A cell shaded before its first gather sends its sky and lights but no bounce, and readers of
+// its outgoing radiance (gather hits, the final gather, cache-terminated reflections) took that
+// raw stand-in at full weight: a region's first gathers saw a world without bounce, and its
+// bounce series gained a term per gather round (the fixed update budget's slow fade-in, and
+// darker indirect light while walking). With the switch on, cell shading also writes each
+// slot's borrow record after the emitter means (gi_borrow_at): xyz the bounce irradiance about
+// the cell's query normal that its outgoing radiance includes (lux), w its albedo, 8 bits a
+// channel, as +-(1 + rgb24), an integer f32 holds exactly: negative once that bounce is the
+// cell's own (a gather wrote it, a gathered zero included), 0 for a slot not shaded. A reader
+// adds to a cell without its own bounce its albedo / pi times the bounce of the nearest coarser
+// cell in the same bin (up to GI_BORROW_LEVELS up) that has its own: the cache's coarser
+// estimate instead of none, replaced by the cell's own at its first gather. The bounce word
+// keeps its meaning (0 until the first gather), so the update ranking is unchanged; only cell
+// shading writes the records, after the gathers, so gather hits read them in any thread order.
+const GI_H_BORROW:u32=46u;
+const GI_BORROW_LEVELS:u32=4u;
+fn gi_borrow_on() -> bool { return gi_word(GI_H_BORROW)!=0u; }
+// Header word 60 is the emitter list's capacity (src/gi_cache.rs).
+fn gi_borrow_at(slot:u32) -> u32 { return gi_word(GI_H_EMITTER_MEANS)+gi_word(60u)+slot; }
+fn gi_borrow_record(bounce:vec3<f32>, albedo:vec3<f32>, own:bool) -> vec4<f32> {
+    let a=vec3<u32>(round(clamp(albedo,vec3<f32>(0.0),vec3<f32>(1.0))*255.0));
+    let packed=1.0+f32((a.x<<16u)|(a.y<<8u)|a.z);
+    return vec4<f32>(max(bounce,vec3<f32>(0.0)),select(packed,-packed,own));
+}
+fn gi_borrow_own(r:vec4<f32>) -> bool { return r.w<0.0; }
+// What a cell with record r adds for a lender with record lender: its albedo / pi times the
+// lender's own bounce irradiance.
+fn gi_borrow_radiance(r:vec4<f32>, lender:vec4<f32>) -> vec3<f32> {
+    let p=u32(max(abs(r.w)-1.0,0.0));
+    let albedo=vec3<f32>(f32((p>>16u)&255u),f32((p>>8u)&255u),f32(p&255u))*(1.0/255.0);
+    return albedo*lender.xyz*0.3183098861837907;
+}
+
 // ---- end of the shared cache definitions ----

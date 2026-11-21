@@ -170,12 +170,14 @@ fn stale_periods() -> [u32; 2] {
 }
 const STALE_READ: u32 = 1;
 const STALE_SWEEP: u32 = 16;
-/// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
-/// RENDERLAB_GI_FIXED=N: the cache spends a fixed N estimated gather rays a frame on cell updates,
-/// cells chosen by priority (shaders/gi_cache.wgsl gi_fixed_rank), on both paths (the bench's city
-/// and terrain price a hardware ray only 1.2-1.6x below a software one). Unset or 0 keeps the
-/// event-driven gather queue.
-/// The ara-gpu port does not encode the ranking passes: leave it unset there.
+/// RENDERLAB_GI_BORROW=1: readers of a cell's outgoing radiance (gather hits, the final gather,
+/// cache-terminated reflections) add, to a cell without a bounce value of its own yet, its albedo
+/// times the nearest coarser cell's own bounce (gi_cells.wgsl gi_borrow_*). Off by default;
+/// independent of RENDERLAB_GI_FIXED.
+pub(crate) fn borrow_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BORROW").as_deref() == Ok("1"))
+}
 /// RENDERLAB_GI_FIXED_REST=1 (with RENDERLAB_GI_FIXED): the budget rests on still views: per-cell
 /// settling (shaders/gi_cache.wgsl GI_SETTLED), a quarter of it in the still-view batch, and idle
 /// once a full turn passes with no value moved (`Planner::fixed_settled`). Off by default: on the
@@ -190,6 +192,11 @@ fn fixed_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED_TRACE").is_ok_and(|v| v == "1"))
 }
+/// RENDERLAB_GI_FIXED=N: the cache spends a fixed N estimated gather rays a frame on cell updates,
+/// cells chosen by priority (shaders/gi_cache.wgsl gi_fixed_rank), on both paths (the bench's city
+/// and terrain price a hardware ray only 1.2-1.6x below a software one). Unset or 0 keeps the
+/// event-driven gather queue.
+/// The ara-gpu port does not encode the ranking passes: leave it unset there.
 pub(crate) fn fixed_rays() -> u32 {
     static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *N.get_or_init(|| std::env::var("RENDERLAB_GI_FIXED").ok().and_then(|v| v.parse().ok()).unwrap_or(0))
@@ -203,6 +210,7 @@ impl Planner {
         fixed_rest() && still && self.fixed_quiet >= turn
     }
 }
+/// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
 fn stale_budget() -> u32 {
     static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *B.get_or_init(|| {
@@ -544,7 +552,9 @@ impl Sizes {
         // The slots' outgoing radiance, then each draw's emission (cell shading's probe).
         // Per slot its outgoing radiance, per draw its emission probe, per listed emitter triangle
         // its mean emission (gi_cells.wgsl gi_emitter_mean_at).
-        let outgoing_bytes = (u64::from(slots) + u64::from(TRACED_DRAWS) + u64::from(emitters)) * 16;
+        // With RENDERLAB_GI_BORROW=1, then each slot's borrow record (gi_cells.wgsl gi_borrow_at).
+        let borrow = if borrow_on() { u64::from(slots) } else { 0 };
+        let outgoing_bytes = (u64::from(slots) + u64::from(TRACED_DRAWS) + u64::from(emitters) + borrow) * 16;
         let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
         let raw_slots = if settings.filter != 0 { slots } else { 1 };
         let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
@@ -1602,6 +1612,9 @@ impl Planner {
         // until the cache traces the reflection BVH4.
         header[35] = u32::from(std::env::var("RENDERLAB_GI_SEE_THROUGH").as_deref() != Ok("0"));
         header[60] = c.emitters;
+        // Borrowed bounce for cells not gathered yet (gi_cells.wgsl GI_H_BORROW): its records
+        // follow the emitter means, at header[34] + header[60] + slot.
+        header[46] = u32::from(borrow_on());
         // The cache's own gathers sample the list (and subtract emission at hits) only with
         // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
         header[43] = u32::from(!emitters_on());
@@ -5475,6 +5488,12 @@ impl Renderer {
     /// instead of 0 after a reset, so a short fixture crosses a wrap of the stamp's packing.
     pub(super) fn bench_start_frame(&mut self, frame: u32) {
         self.gi.planner.frame = frame;
+    }
+    /// The prelude passes' reload (src/bench/reload.rs): every program's cell shading compiles
+    /// again when prepare or a frame next needs it.
+    pub(super) fn bench_drop_gi_shading(&mut self) {
+        self.gi.shading.clear();
+        self.gi.frame_shading.clear();
     }
     pub(super) fn bench_reload_gi(&mut self) -> Result<(), Error> {
         let slots = crate::pipeline_compilation::prepare_compile_slots();

@@ -13,10 +13,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 mod city;
 mod dump;
+pub(crate) mod edits;
+mod reload;
 mod fixtures;
 mod furnace;
+mod glass;
 pub(crate) mod kit;
+mod reflect;
 mod shadow_edges;
+mod tr1_edge;
 
 /// The two device paths every fixture runs on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -74,14 +79,20 @@ pub(crate) fn shader_text(name: &str) -> Option<String> {
     TEXT.lock().unwrap().get(name).cloned()
 }
 
-/// A pass the bench can rebuild: the shader files it composes and its rebuild.
+/// A pass the bench can rebuild: the shader files it composes, its rebuild, and the fixtures
+/// whose numbers read it (empty: every fixture). `edits`: its files' new text reaches modules
+/// through `edits` (every module the process creates) instead of `shader_text`.
 struct Pass {
     name: &'static str,
     files: &'static [&'static str],
     reload: fn(&mut Renderer) -> Result<(), Error>,
+    fixtures: &'static [&'static str],
+    edits: bool,
 }
-/// Files whose text reaches the program shading kernels through compile-time constants
-/// (program.rs) are not here yet: editing them prints that the bench cannot reload them.
+/// After a reload, only the pass's fixtures rebuild and run; the others rebuild before they next
+/// run (`Rig::stale`). The prelude passes share one rebuild (src/bench/reload.rs): their kernels
+/// all compose the traced heads, and a file of one (a reflection or TR1 view file) can compose
+/// into another's kernels too.
 const PASSES: &[Pass] = &[Pass {
     name: "gi",
     files: &[
@@ -95,6 +106,8 @@ const PASSES: &[Pass] = &[Pass {
         "gi_shade_entry.wgsl",
     ],
     reload: Renderer::bench_reload_gi,
+    fixtures: &[],
+    edits: false,
 }, Pass {
     name: "vsm",
     files: &[
@@ -105,6 +118,91 @@ const PASSES: &[Pass] = &[Pass {
         "virtual_shadow_disk.wgsl",
     ],
     reload: Renderer::bench_reload_vsm,
+    fixtures: &[],
+    edits: false,
+}, Pass {
+    name: "shading",
+    files: &[
+        "scene.wgsl",
+        "program_api.wgsl",
+        "program_traced.wgsl",
+        "program_traced_entry.wgsl",
+        "program_traced_list.wgsl",
+        "program_traced_residency.wgsl",
+        "program_view.wgsl",
+        "program_bins.wgsl",
+        "programs/standard.wgsl",
+        "programs/toon.wgsl",
+        "light_cluster_api.wgsl",
+        "light_vis_pass.wgsl",
+        "decals.wgsl",
+        "environment_lobes.wgsl",
+        "specular_filter.wgsl",
+        "shadow_visibility_filter.wgsl",
+        "gi_api.wgsl",
+    ],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["grey", "orange", "shadow-edges", "reflect"],
+    edits: true,
+}, Pass {
+    name: "reflections",
+    files: &[
+        "reflections.wgsl",
+        "reflections_composite.wgsl",
+        "reflections_deferred.wgsl",
+        "reflections_history.wgsl",
+        "reflections_lobe.wgsl",
+        "reflections_resolve.wgsl",
+        "reflections_software.wgsl",
+        "reflections_software_bvh4.wgsl",
+        "reflections_trace.wgsl",
+        "reflection_cache_hits.wgsl",
+        "reflection_hit_bins.wgsl",
+        "reflection_hit_sun.wgsl",
+        "reflection_hits.wgsl",
+    ],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["reflect"],
+    edits: true,
+}, Pass {
+    name: "transparency",
+    files: &["transparency.wgsl", "transparency_shadow.wgsl", "id_glass.wgsl", "pane_pixels.wgsl", "transmission_reduce.wgsl"],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["glass"],
+    edits: true,
+}, Pass {
+    name: "gi_receiver",
+    files: &["gi_receiver_pass.wgsl"],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["walk", "grey"],
+    edits: true,
+}, Pass {
+    name: "tr1",
+    files: &["temporal_resolve.wgsl", "temporal_zones.wgsl", "temporal_coverage_cycle.wgsl", "temporal_coverage_pack.wgsl", "temporal_view.wgsl"],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["tr1-edge"],
+    edits: true,
+}, Pass {
+    name: "visibility",
+    files: &[
+        "primary_rays.wgsl",
+        "primary_trace.wgsl",
+        "primary_interactive.wgsl",
+        "primary_edge_check.wgsl",
+        "primary_edge_queue.wgsl",
+        "visibility_buffer.wgsl",
+        "visibility_buffer_attachment.wgsl",
+        "visibility_buffer_attachment_hzb.wgsl",
+        "visibility_buffer_cull.wgsl",
+        "visibility_buffer_hzb.wgsl",
+        "visibility_buffer_raster.wgsl",
+        "visibility_buffer_reset.wgsl",
+        "visibility_buffer_resolve.wgsl",
+        "visibility_buffer_sw.wgsl",
+    ],
+    reload: Renderer::bench_reload_prelude,
+    fixtures: &["shadow-edges", "tr1-edge"],
+    edits: true,
 }];
 
 struct Options {
@@ -157,15 +255,22 @@ fn options() -> Result<Options, String> {
 /// A fixture on one path: its renderer (recreated after a fault) and cached reference.
 struct Rig {
     path: BenchPath,
-    device: (wgpu::Device, wgpu::Queue),
+    device: (crate::pipeline_compilation::PipelineDevice, wgpu::Queue),
     fixture: Box<dyn Fixture>,
     r: Option<Renderer>,
     reference: Option<RefImage>,
     /// This rig's own pass log (each renderer truncates the file it opens) and how far it was read.
     pass_log: PathBuf,
     read_to: u64,
+    /// Passes reloaded since this rig's renderer last rebuilt them: it rebuilds them before it
+    /// next runs.
+    stale: Vec<&'static Pass>,
 }
 impl Rig {
+    /// Whether a reload of `pass` runs this rig's fixture.
+    fn reads(&self, pass: &Pass) -> bool {
+        pass.fixtures.is_empty() || pass.fixtures.contains(&self.fixture.name())
+    }
     fn build(&mut self, refs: &Path) -> Result<(), Error> {
         // SAFETY: the bench's threads never read the environment; renderers read it as they are created.
         unsafe { std::env::set_var("RENDERLAB_PASS_LOG", &self.pass_log) };
@@ -210,26 +315,35 @@ fn decode_reference(bytes: &[u8]) -> Option<RefImage> {
         .then(|| RefImage { size, rgb: floats.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect() })
 }
 
-/// Whether the timing-hold asks the machine to be quiet: held by a timing lease (`--timing`,
-/// whose owner file carries no `exclusive` field) or an exclusive one. Ordinary smokes and play
-/// gates write `"exclusive":false`; the bench runs beside them (docs/bench.md).
-fn quiet_wanted(hold: &Path) -> Option<String> {
-    if !hold.exists() {
-        return None;
+/// Why the machine must be quiet now, if it must: a gate's lease (the timing-hold's or the GPU
+/// lock's owner file names a `gate` tool: the clip gate, the play gate, the scoreboard), a timing
+/// lease (`--timing`, whose owner file carries no `exclusive` field) or an exclusive one. Other
+/// ordinary leases (`"exclusive":false`, no `gate`: one-off scripts) leave the bench running
+/// beside them (docs/bench.md). Main thread, 21 Nov: a bench beside a gate read slowed every pass
+/// 2.5x (a real-size fixture) or about 10% (a small one), above the gates' 0.3 ms line.
+fn quiet_wanted(hold: &Path, gpu_lock: &Path) -> Option<String> {
+    let owner = |dir: &Path| -> Option<serde_json::Value> {
+        dir.exists().then(|| std::fs::read_to_string(dir.join("owner.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default())
+    };
+    let named = |v: &serde_json::Value| format!("{} {}", v["owner"].as_str().unwrap_or("?"), v["label"].as_str().unwrap_or("")).trim().to_owned();
+    for v in [owner(hold), owner(gpu_lock)].into_iter().flatten() {
+        if let Some(gate) = v["gate"].as_str() {
+            return Some(format!("{}'s gate ({gate}: {})", v["owner"].as_str().unwrap_or("?"), v["label"].as_str().unwrap_or("")));
+        }
     }
-    let owner = std::fs::read_to_string(hold.join("owner.json")).unwrap_or_default();
-    let compact = owner.replace(' ', "");
-    let ordinary = compact.contains("\"exclusive\":false");
-    (!ordinary).then(|| owner.trim().to_owned())
+    let hold = owner(hold)?;
+    // A hold without its owner file yet (between the lease's mkdir and its write) counts as quiet.
+    (hold["exclusive"] != serde_json::Value::Bool(false)).then(|| format!("a timing lease: {}", named(&hold)))
 }
-/// Waits while a timing lease or an exclusive hold wants the machine quiet, saying so.
-fn wait_quiet(hold: &Path) {
-    let Some(owner) = quiet_wanted(hold) else { return };
-    println!("lightbench: idle, a timing lease holds the machine: {owner}");
-    while quiet_wanted(hold).is_some() {
+/// Waits while a gate, a timing lease or an exclusive hold wants the machine quiet, saying so.
+fn wait_quiet(o: &Options) {
+    let Some(why) = quiet_wanted(&o.hold, &o.gpu_lock) else { return };
+    println!("lightbench: idle: {why}");
+    let started = Instant::now();
+    while quiet_wanted(&o.hold, &o.gpu_lock).is_some() {
         std::thread::sleep(Duration::from_millis(500));
     }
-    println!("lightbench: the timing lease is gone, resuming");
+    println!("lightbench: resuming after {:.0} s idle", started.elapsed().as_secs_f64());
 }
 /// The leases running now (the timing-hold's and the GPU lock's owners): a round that overlaps
 /// one is contended, and its milliseconds are not clean.
@@ -339,15 +453,49 @@ fn json_map(items: &[(String, f64)]) -> String {
     format!("{{{}}}", body.join(","))
 }
 
-/// Runs every rig once and prints its lines. Returns the seconds the fixtures took.
-fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
-    wait_quiet(&o.hold);
+/// The GPU's graphics clock through a round: nvidia-smi sampling every 200 ms (NVIDIA only;
+/// nothing elsewhere), its median and lowest MHz, so a round the GPU spent in a slow state marks
+/// itself as `contended` does (gicut, 21 Nov: a 9.17 ms span with every pass about 3x, the clock
+/// dropping to 585-885 MHz).
+struct Clock(Option<std::process::Child>);
+impl Clock {
+    fn start() -> Self {
+        Self(
+            std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=clocks.gr", "--format=csv,noheader,nounits", "-lms", "200"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok(),
+        )
+    }
+    fn finish(self) -> Option<(f64, f64)> {
+        let mut child = self.0?;
+        let _ = child.kill();
+        let out = child.wait_with_output().ok()?;
+        let mut mhz: Vec<f64> = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect();
+        mhz.sort_by(f64::total_cmp);
+        Some((*mhz.get(mhz.len() / 2)?, mhz[0]))
+    }
+}
+
+/// Runs the rigs `run` picks once and prints their lines, first rebuilding the passes they are
+/// stale in, then the round's GPU clock. Returns the seconds the fixtures took.
+fn run_round(rigs: &mut [Rig], o: &Options, round: u32, run: impl Fn(&Rig) -> bool) -> f64 {
+    wait_quiet(o);
+    let clock = Clock::start();
     let started = Instant::now();
-    for rig in rigs.iter_mut() {
+    for rig in rigs.iter_mut().filter(|rig| run(rig)) {
         if rig.r.is_none() {
             if let Err(error) = rig.build(&o.refs) {
                 println!("bench {} {} error: could not build the fixture: {error}", rig.fixture.name(), rig.path.name());
                 continue;
+            }
+            rig.stale.clear();
+        }
+        for pass in std::mem::take(&mut rig.stale) {
+            if let Err(error) = (pass.reload)(rig.r.as_mut().unwrap()) {
+                println!("bench {} {} error: rebuilding {}: {error}", rig.fixture.name(), rig.path.name(), pass.name);
             }
         }
         let r = rig.r.as_mut().unwrap();
@@ -430,7 +578,11 @@ fn run_round(rigs: &mut [Rig], o: &Options, round: u32) -> f64 {
             }
         }
     }
-    started.elapsed().as_secs_f64()
+    let seconds = started.elapsed().as_secs_f64();
+    if let Some((median, lowest)) = clock.finish() {
+        println!("lightbench: round {round} GPU clock median {median:.0} MHz, lowest {lowest:.0}");
+    }
+    seconds
 }
 
 /// The watched shader files (shaders/*.wgsl and shaders/programs/*.wgsl) and their times.
@@ -471,16 +623,27 @@ pub fn main() -> i32 {
     let _ = std::fs::remove_file(&compile_log);
     // SAFETY: set before any thread starts; nothing else reads the environment concurrently.
     unsafe { std::env::set_var("RENDERLAB_PIPELINE_LOG", &compile_log) };
+    // Frames keep their draws' programs, which the fixtures' live references trace (kit.rs).
+    // SAFETY: as above.
+    unsafe { std::env::set_var("RENDERLAB_LIVE_REFERENCE", "1") };
     // The passes' sources as they are on disk now, not as this binary was built.
     {
         let mut text = TEXT.lock().unwrap();
-        for file in PASSES.iter().flat_map(|p| p.files) {
+        for file in PASSES.iter().filter(|p| !p.edits).flat_map(|p| p.files) {
             if let Ok(source) = std::fs::read_to_string(o.shaders.join(file)) {
                 text.insert((*file).to_owned(), source);
             }
         }
     }
-    wait_quiet(&o.hold);
+    // The edits passes' files as the bench starts: their hunks are taken against this text,
+    // which the binary's own (`include_str!`) is assumed to match.
+    let mut base: BTreeMap<String, String> = BTreeMap::new();
+    for file in PASSES.iter().filter(|p| p.edits).flat_map(|p| p.files) {
+        if let Ok(source) = std::fs::read_to_string(o.shaders.join(file)) {
+            base.insert((*file).to_owned(), source);
+        }
+    }
+    wait_quiet(&o);
     let started = Instant::now();
     let mut rigs = vec![];
     for &path in &o.paths {
@@ -497,7 +660,7 @@ pub fn main() -> i32 {
                 continue;
             }
             let pass_log = o.runs.join(format!("passes-{pid}-{}-{}.jsonl", fixture.name(), path.name()));
-            rigs.push(Rig { path, device: device.clone(), fixture, r: None, reference: None, pass_log, read_to: 0 });
+            rigs.push(Rig { path, device: device.clone(), fixture, r: None, reference: None, pass_log, read_to: 0, stale: vec![] });
         }
     }
     for rig in &mut rigs {
@@ -508,8 +671,11 @@ pub fn main() -> i32 {
     let (built, mut compiled_to) = compiles(&compile_log, 0);
     println!("lightbench: {} fixtures on {} paths built in {:.1} s ({built}); watching {}", rigs.len() / o.paths.len().max(1), o.paths.len(), started.elapsed().as_secs_f64(), o.shaders.display());
     let mut round = 0;
-    let seconds = run_round(&mut rigs, &o, round);
+    let seconds = run_round(&mut rigs, &o, round, |_| true);
     println!("lightbench: round {round}: fixtures {seconds:.2} s");
+    // The paths' pipeline caches on disk (each facade is shared, so once per path).
+    let save = |rigs: &[Rig]| rigs.iter().for_each(|rig| rig.device.0.save_cache());
+    save(&rigs);
     if o.once {
         return 0;
     }
@@ -526,16 +692,23 @@ pub fn main() -> i32 {
         let saved = changed.iter().map(|(_, t)| *t).min().unwrap();
         // Editors write a file in more than one step: read it once it has stopped changing.
         std::thread::sleep(Duration::from_millis(20));
-        let mut reload: Vec<&Pass> = vec![];
+        let mut reload: Vec<&'static Pass> = vec![];
         let mut previous: Vec<(String, Option<String>)> = vec![];
+        let mut edited: Vec<String> = vec![];
         for (file, _) in &changed {
             let Some(pass) = PASSES.iter().find(|p| p.files.contains(&file.as_str())) else {
                 println!("lightbench: {file} changed; no bench pass reloads it yet (docs/bench.md)");
                 continue;
             };
             let Ok(source) = std::fs::read_to_string(o.shaders.join(file)) else { continue };
-            let old = TEXT.lock().unwrap().insert(file.clone(), source);
-            previous.push((file.clone(), old));
+            if pass.edits {
+                if edits::set(file, base.get(file).map_or("", String::as_str), &source) {
+                    edited.push(file.clone());
+                }
+            } else {
+                let old = TEXT.lock().unwrap().insert(file.clone(), source);
+                previous.push((file.clone(), old));
+            }
             if !reload.iter().any(|p| p.name == pass.name) {
                 reload.push(pass);
             }
@@ -543,44 +716,122 @@ pub fn main() -> i32 {
         if reload.is_empty() {
             continue;
         }
-        wait_quiet(&o.hold);
+        wait_quiet(&o);
         round += 1;
         let t = Instant::now();
-        for pass in &reload {
-            let mut failed = None;
-            for rig in rigs.iter_mut() {
-                if let Some(r) = rig.r.as_mut() {
-                    if let Err(error) = (pass.reload)(r) {
-                        failed = Some((rig.path, error));
-                        break;
+        edits::reset_counts();
+        for &pass in &reload {
+            for rig in rigs.iter_mut().filter(|rig| rig.r.is_some()) {
+                if !rig.reads(pass) {
+                    if !rig.stale.iter().any(|p| p.name == pass.name) {
+                        rig.stale.push(pass);
                     }
+                } else {
+                    rig.stale.retain(|p| p.name != pass.name);
                 }
             }
+            // The rigs' renderers rebuild at once, each on its own thread (prepare's compile
+            // slots add up), so the kernels of both paths compile together.
+            let failed = std::thread::scope(|s| {
+                let jobs: Vec<_> = rigs
+                    .iter_mut()
+                    .filter(|rig| rig.reads(pass))
+                    .filter_map(|rig| {
+                        let path = rig.path.name();
+                        rig.r.as_mut().map(|r| s.spawn(move || (path, (pass.reload)(r))))
+                    })
+                    .collect();
+                jobs.into_iter().map(|j| j.join().unwrap()).find_map(|(path, result)| result.err().map(|e| (path, e)))
+            });
+            // An edits pass's module that fails naga was created from the last working text.
+            let failed = failed.or_else(|| if pass.edits { edits::take_error().map(|e| ("naga", Error::Shader(e))) } else { None });
             if let Some((path, error)) = failed {
-                println!("lightbench: {} on {}: shader error; keeping the last working pipelines:\n{error}", pass.name, path.name());
-                let mut text = TEXT.lock().unwrap();
-                for (file, old) in previous.iter().filter(|(f, _)| pass.files.contains(&f.as_str())) {
-                    match old {
-                        Some(old) => text.insert(file.clone(), old.clone()),
-                        None => text.remove(file),
-                    };
+                println!("lightbench: {} on {path}: shader error; keeping the last working pipelines:
+{error}", pass.name);
+                if pass.edits {
+                    edits::settle(false);
+                } else {
+                    let mut text = TEXT.lock().unwrap();
+                    for (file, old) in previous.iter().filter(|(f, _)| pass.files.contains(&f.as_str())) {
+                        match old {
+                            Some(old) => text.insert(file.clone(), old.clone()),
+                            None => text.remove(file),
+                        };
+                    }
                 }
-                drop(text);
                 // Renderers rebuilt before the failing one go back to the working text.
-                for rig in rigs.iter_mut() {
+                for rig in rigs.iter_mut().filter(|rig| rig.reads(pass)) {
                     if let Some(r) = rig.r.as_mut() {
                         let _ = (pass.reload)(r);
                     }
                 }
+            } else if pass.edits {
+                edits::settle(true);
             }
         }
         let reload_s = t.elapsed().as_secs_f64();
         let (summary, end) = compiles(&compile_log, compiled_to);
         compiled_to = end;
         println!("lightbench: reloaded in {reload_s:.2} s: {summary}");
-        let fixtures_s = run_round(&mut rigs, &o, round);
+        let fixtures_s = run_round(&mut rigs, &o, round, |rig| reload.iter().any(|p| rig.reads(p)));
+        // Counted after the round: some kernels compile on first use in the fixtures' frames.
+        let reached: Vec<String> = edited.iter().map(|f| format!("{f} reached {} modules", edits::reached(f))).collect();
+        if !reached.is_empty() {
+            println!("lightbench: {}", reached.join(", "));
+        }
+        for file in edited.iter().filter(|f| edits::reached(f) == 0) {
+            println!("lightbench: warning: the edit to {file} reached no module: its numbers are the old kernels' (docs/bench.md)");
+        }
+        // A module the fixtures' frames compiled (built on first use) failed: its pipelines used
+        // the last working text; the rigs rebuild that text before they next run.
+        if let Some(error) = edits::take_error() {
+            println!("lightbench: shader error in a module built during the round; its pipelines kept the last working text:
+{error}");
+            edits::settle(false);
+            for rig in rigs.iter_mut() {
+                let stale: Vec<&'static Pass> = reload.iter().copied().filter(|p| p.edits && rig.reads(p)).collect();
+                rig.stale.extend(stale);
+            }
+        }
         let total = SystemTime::now().duration_since(saved).map_or(0.0, |d| d.as_secs_f64());
         let names: Vec<&str> = reload.iter().map(|p| p.name).collect();
         println!("lightbench: round {round}: save to numbers {total:.2} s (reload {} {reload_s:.2} s, fixtures {fixtures_s:.2} s)", names.join(","));
+        save(&rigs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A lease directory with `owner` as its owner file (none when `owner` is None).
+    fn lease(root: &Path, name: &str, owner: Option<&str>) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(text) = owner {
+            std::fs::write(dir.join("owner.json"), text).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn the_bench_idles_under_gates_timing_and_exclusive_leases_only() {
+        let root = std::env::temp_dir().join(format!("lightbench-quiet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let free = (root.join("no-hold"), root.join("no-lock"));
+        assert_eq!(quiet_wanted(&free.0, &free.1), None, "nothing held");
+        let script = lease(&root, "script", Some(r#"{"owner":"shade","label":"timing-hold furnace","exclusive":false}"#));
+        assert_eq!(quiet_wanted(&script, &free.1), None, "a one-off script's ordinary lease");
+        let gate = lease(&root, "gate", Some(r#"{"owner":"gicut","label":"timing-hold play b","exclusive":false,"gate":"play"}"#));
+        assert_eq!(quiet_wanted(&gate, &free.1).as_deref(), Some("gicut's gate (play: timing-hold play b)"));
+        let lock = lease(&root, "lock", Some(r#"{"owner":"main","label":"smoke b","gate":"smoke"}"#));
+        assert!(quiet_wanted(&script, &lock).is_some(), "a gate's GPU lock beside an ordinary hold");
+        let timing = lease(&root, "timing", Some(r#"{"owner":"sunrt","label":"timing-hold n8"}"#));
+        assert!(quiet_wanted(&timing, &free.1).is_some(), "a timing lease");
+        let exclusive = lease(&root, "exclusive", Some(r#"{"owner":"clipmap","label":"scoreboard","exclusive":true}"#));
+        assert!(quiet_wanted(&exclusive, &free.1).is_some(), "an exclusive lease");
+        let unwritten = lease(&root, "unwritten", None);
+        assert!(quiet_wanted(&unwritten, &free.1).is_some(), "a hold between its mkdir and its owner file");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

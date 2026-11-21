@@ -44,6 +44,11 @@ impl ModuleCache {
         }
         entries.push_back((Sha256::digest(source.as_bytes()).into(), module));
     }
+    /// The bench's reload (src/bench/reload.rs): its edits change modules, not composed sources.
+    #[cfg(feature = "bench")]
+    pub(super) fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
 }
 
 #[cfg(test)]

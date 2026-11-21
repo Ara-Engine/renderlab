@@ -4233,6 +4233,7 @@ impl Renderer {
             );
         }
         self.frames += 1;
+        crate::memory_report::frame(&self.device, self.frames);
         self.view.last_frame = self.frames;
         self.timed_frames += u64::from(timed);
         let frame = FrameId(self.frames);

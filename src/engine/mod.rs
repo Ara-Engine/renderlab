@@ -14,7 +14,7 @@
 //! (docs/api.md lists what is frozen).
 #[cfg(test)]
 mod casts_shadows_tests;
-mod device;
+pub(crate) mod device;
 mod prewarm;
 pub(crate) mod ids;
 mod scene;
