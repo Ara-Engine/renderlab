@@ -309,16 +309,56 @@ fn local_shadow_atlas_fits_its_tiles() {
     for (slot, expected) in
         [(0, [1024, 1024]), (1, [2048, 1024]), (2, [3072, 1024]), (3, [4096, 1024]), (4, [4096, 2048])]
     {
-        tiles[slot] = lc::allocate_tile(&tiles, 1024, 1024);
+        tiles[slot] = lc::allocate_tile(&tiles, 1024, 1024, true, 6);
         assert_eq!(lc::fitted_extent(&tiles, 1024), expected, "after slot {slot}");
     }
     let mut all = vec![None; lc::MAX_SLOTS as usize];
     for i in 0..all.len() {
-        all[i] = lc::allocate_tile(&all, 1001, 1001);
+        all[i] = lc::allocate_tile(&all, 1001, 1001, true, 6);
     }
     let [w, h] = lc::fitted_extent(&all, 1001);
     assert!(w <= lc::atlas_extent(1001) && h <= lc::atlas_extent(1001));
     assert!(all.iter().flatten().all(|t| t.x + t.size <= w && t.y + t.size <= h));
+}
+
+/// Single-face spot lights pack across the 6 array layers of one 2D footprint when cube lights
+/// already allocate 6 layers, and `needed_layers` never drops below any live spot tile's slice.
+#[test]
+fn spot_lights_pack_across_atlas_layers() {
+    let mut tiles = vec![None; 6];
+    // One cube light + four full-size spot lights: all four spots share one 1024x1024 footprint
+    // across layers 0..3 alongside the cube light, instead of taking four 2D footprints.
+    tiles[0] = lc::allocate_tile(&tiles, 1024, 1024, true, 6);
+    for slot in 1..=4 {
+        tiles[slot] = lc::allocate_tile(&tiles, 1024, 1024, false, 6);
+    }
+    assert_eq!(lc::fitted_extent(&tiles, 1024), [2048, 1024]);
+    assert_eq!(lc::needed_layers(&tiles), 6);
+    let spot_layers: Vec<u32> = tiles[1..=4].iter().map(|t| t.unwrap().layer).collect();
+    assert_eq!(spot_layers, vec![0, 1, 2, 3]);
+    assert!(tiles[1..=4]
+        .iter()
+        .all(|t| t.unwrap().x == tiles[1].unwrap().x && t.unwrap().y == tiles[1].unwrap().y));
+    // Releasing the cube light keeps enough layers for the surviving spots on slices 0..3.
+    tiles[0] = None;
+    assert_eq!(lc::needed_layers(&tiles), 4);
+    // Mixed 128-slot stress test stays 3D-disjoint and fits every slot.
+    let mut mixed = vec![None; lc::MAX_SLOTS as usize];
+    for i in 0..lc::MAX_SLOTS as usize {
+        let is_cube = i % 3 != 0;
+        let tile = lc::allocate_tile(&mixed, 1024, 1024, is_cube, 6).expect("every mixed slot fits");
+        for prev in mixed[..i].iter().flatten() {
+            let disjoint_2d = tile.x + tile.size <= prev.x
+                || prev.x + prev.size <= tile.x
+                || tile.y + tile.size <= prev.y
+                || prev.y + prev.size <= tile.y;
+            assert!(
+                disjoint_2d || (!tile.cube && !prev.cube && tile.layer != prev.layer),
+                "overlap between {tile:?} and {prev:?}"
+            );
+        }
+        mixed[i] = Some(tile);
+    }
 }
 
 #[test]
@@ -326,7 +366,7 @@ fn local_shadow_tiles_stay_disjoint_and_fades_release_before_reuse() {
     for maximum in [1, 2, 7, 768, 1001, 1024] {
         let mut tiles = vec![None; lc::MAX_SLOTS as usize];
         for i in 0..lc::MAX_SLOTS as usize {
-            let tile = lc::allocate_tile(&tiles, maximum, maximum).expect("every slot fits");
+            let tile = lc::allocate_tile(&tiles, maximum, maximum, true, 6).expect("every slot fits");
             assert!(tile.size <= maximum);
             tiles[i] = Some(tile);
         }

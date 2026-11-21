@@ -18,7 +18,7 @@ pub(super) struct Atlas {
     stride: u64,
     resolution: u32,
     slots: u32,
-    cube_layers: bool,
+    layer_count: u32,
     /// The texture's width and height (`lc::fitted_extent`): the tiles' bounding box.
     extent: [u32; 2],
     clear: Option<Arc<Owned<wgpu::RenderPipeline>>>,
@@ -73,14 +73,14 @@ impl Atlas {
         bindings: Option<&wgpu::BindGroupLayout>,
         resolution: u32,
         slots: u32,
-        cube_layers: bool,
+        layer_count: u32,
         extent: [u32; 2],
         prepared_clear: Option<Arc<Owned<wgpu::RenderPipeline>>>,
     ) -> Self {
         let (size, layers) = if slots == 0 {
             ([1, 1], 1)
         } else {
-            (extent, if cube_layers { 6 } else { 1 })
+            (extent, layer_count.clamp(1, 6))
         };
         let texture = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
@@ -164,7 +164,7 @@ impl Atlas {
             stride,
             resolution,
             slots,
-            cube_layers,
+            layer_count: layers,
             extent: size,
             clear,
             _allocation: ledger.allocate(AllocationKind::Shadow, bytes),
@@ -358,7 +358,7 @@ pub(super) struct LocalMaps {
 impl LocalMaps {
     pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
         Self {
-            atlas: Atlas::new(device, ledger, None, 1, 0, false, [1, 1], None),
+            atlas: Atlas::new(device, ledger, None, 1, 0, 1, [1, 1], None),
             prepared_clear: None,
             retired: vec![],
             generation: 0,
@@ -508,6 +508,66 @@ impl Renderer {
         } else {
             vec![]
         };
+        let mut layers = vec![glam::Mat4::IDENTITY; count as usize * 6];
+        let mut faces = vec![0usize; count as usize];
+        shared.tiles.resize(count as usize, None);
+        if shared.atlas.resolution != state.settings.resolution {
+            shared.tiles.fill(None);
+        }
+        for slot in 0..count as usize {
+            if slots.get(slot).is_none_or(Option::is_none) || previous.get(slot) != slots.get(slot)
+            {
+                shared.tiles[slot] = None;
+            }
+        }
+        let has_cube = slots
+            .iter()
+            .flatten()
+            .any(|&i| lc::cube(&lights[i as usize]));
+        let atlas_layers = if has_cube {
+            6
+        } else {
+            lc::needed_layers(&shared.tiles)
+        };
+        let vp = camera.matrix(viewport[0], viewport[1]);
+        for (slot, light) in slots.iter().enumerate() {
+            if let Some(light) = light {
+                if shared.tiles[slot].is_none() {
+                    let pixels = lc::coverage(&lights[*light as usize], vp).sqrt()
+                        * viewport[0].max(viewport[1]) as f32;
+                    let is_cube = lc::cube(&lights[*light as usize]);
+                    // A six-face cubemap splits the influence sphere's projected span across
+                    // orthogonal 90-degree faces (~half the linear footprint per face), whereas
+                    // a single-face spot concentrates its entire cone on one face.
+                    let face_pixels = if is_cube { pixels * 0.5 } else { pixels };
+                    let maximum = state.settings.resolution;
+                    let desired = if face_pixels > maximum as f32 * 0.5 {
+                        maximum
+                    } else if face_pixels > maximum as f32 * 0.25 {
+                        (maximum / 2).max(1)
+                    } else if face_pixels > maximum as f32 * 0.125 {
+                        (maximum / 4).max(1)
+                    } else {
+                        (maximum / 8).max(1)
+                    };
+                    shared.tiles[slot] =
+                        lc::allocate_tile(&shared.tiles, maximum, desired, is_cube, atlas_layers);
+                    // Measurement: `RENDERLAB_LC_TILE_LOG=<file>` appends each tile assignment.
+                    if let Some(path) = std::env::var_os("RENDERLAB_LC_TILE_LOG") {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                            let l = &lights[*light as usize];
+                            let (tile, layer) =
+                                shared.tiles[slot].map_or((0, 0), |t| (t.size, t.layer));
+                            let _ = writeln!(f, "slot {slot} light {light} cube {is_cube} layer {layer} pixels {pixels:.0} desired {desired} tile {tile} {l:?}");
+                        }
+                    }
+                }
+                let m = lc::matrices(&lights[*light as usize], state.settings.near);
+                faces[slot] = m.len();
+                layers[slot * 6..slot * 6 + m.len()].copy_from_slice(&m);
+            }
+        }
         for (index, record) in self
             .lighting
             .pending
@@ -522,52 +582,16 @@ impl Renderer {
                     .iter()
                     .position(|s| *s == Some(index as u32))
                     .map_or(0, |slot| {
-                        (slot as u32 + 1) | if lc::cube(&lights[index]) { 0x10000 } else { 0 }
+                        let base = slot as u32 + 1;
+                        if lc::cube(&lights[index]) {
+                            base | 0x10000
+                        } else {
+                            let layer = shared.tiles[slot].map_or(0, |t| t.layer);
+                            base | (layer << 17)
+                        }
                     })
             };
             record[60..64].copy_from_slice(&w.to_ne_bytes());
-        }
-        let mut layers = vec![glam::Mat4::IDENTITY; count as usize * 6];
-        let mut faces = vec![0usize; count as usize];
-        shared.tiles.resize(count as usize, None);
-        if shared.atlas.resolution != state.settings.resolution {
-            shared.tiles.fill(None);
-        }
-        for slot in 0..count as usize {
-            if slots.get(slot).is_none_or(Option::is_none) || previous.get(slot) != slots.get(slot)
-            {
-                shared.tiles[slot] = None;
-            }
-        }
-        let vp = camera.matrix(viewport[0], viewport[1]);
-        for (slot, light) in slots.iter().enumerate() {
-            if let Some(light) = light {
-                if shared.tiles[slot].is_none() {
-                    let pixels = lc::coverage(&lights[*light as usize], vp).sqrt()
-                        * viewport[0].max(viewport[1]) as f32;
-                    let maximum = state.settings.resolution;
-                    let desired = if pixels > maximum as f32 * 0.5 {
-                        maximum
-                    } else if pixels > maximum as f32 * 0.25 {
-                        (maximum / 2).max(1)
-                    } else {
-                        (maximum / 4).max(1)
-                    };
-                    shared.tiles[slot] = lc::allocate_tile(&shared.tiles, maximum, desired);
-                    // Measurement: `RENDERLAB_LC_TILE_LOG=<file>` appends each tile assignment.
-                    if let Some(path) = std::env::var_os("RENDERLAB_LC_TILE_LOG") {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-                            let l = &lights[*light as usize];
-                            let tile = shared.tiles[slot].map_or(0, |t| t.size);
-                            let _ = writeln!(f, "slot {slot} light {light} cube {} pixels {pixels:.0} desired {desired} tile {tile} {l:?}", lc::cube(l));
-                        }
-                    }
-                }
-                let m = lc::matrices(&lights[*light as usize], state.settings.near);
-                faces[slot] = m.len();
-                layers[slot * 6..slot * 6 + m.len()].copy_from_slice(&m);
-            }
         }
         let clustered = state.enabled && lights.len() <= lc::MAX_CLUSTERED;
         let mut header = lc::header(camera, viewport, lights.len() as u32, clustered, &layers);
@@ -608,17 +632,15 @@ impl Renderer {
         let maps = maps && slots.iter().any(Option::is_some);
         if maps {
             // P-MEM allocation seam only: keep slots, tile coordinates, resolutions,
-            // matrices and cache keys. A transitioning point slot still needs its cube.
-            let cube_layers = slots
-                .iter()
-                .flatten()
-                .any(|&i| lc::cube(&lights[i as usize]));
+            // matrices and cache keys. Single-face spots may share layers 0..6 when a
+            // cube light is present, and the atlas never drops below any live spot slice.
+            let needed_layers = lc::needed_layers(&shared.tiles);
             // The tiles' bounding box: a new tile beyond it grows the texture (every map is
             // drawn again, at the same places); otherwise the texture keeps its size.
             let extent = lc::fitted_extent(&shared.tiles, state.settings.resolution);
             if shared.atlas.slots != count
                 || shared.atlas.resolution != state.settings.resolution
-                || shared.atlas.cube_layers != cube_layers
+                || shared.atlas.layer_count != needed_layers
                 || shared.atlas.extent[0] < extent[0]
                 || shared.atlas.extent[1] < extent[1]
             {
@@ -628,7 +650,7 @@ impl Renderer {
                     Some(&self.view.shadows.bindings),
                     state.settings.resolution,
                     count,
-                    cube_layers,
+                    needed_layers,
                     extent,
                     shared.prepared_clear.clone(),
                 );
@@ -704,6 +726,7 @@ impl Renderer {
                     .chain_update(tile.x.to_ne_bytes())
                     .chain_update(tile.y.to_ne_bytes())
                     .chain_update(tile.size.to_ne_bytes())
+                    .chain_update(tile.layer.to_ne_bytes())
                     .chain_update(state.settings.near.to_ne_bytes())
                     .chain_update(state.settings.resolution.to_ne_bytes());
                 let slot_key: [u8; 32] = slot_base.clone().chain_update(scene).finalize().into();
@@ -783,8 +806,10 @@ impl Renderer {
             vec![1.0; stats.shadowed.len()]
         };
         stats.atlas_bytes = if maps {
-            let layers = if shared.atlas.cube_layers { 6 } else { 1 };
-            layers * 4 * u64::from(shared.atlas.extent[0]) * u64::from(shared.atlas.extent[1])
+            u64::from(shared.atlas.layer_count)
+                * 4
+                * u64::from(shared.atlas.extent[0])
+                * u64::from(shared.atlas.extent[1])
         } else {
             0
         };
@@ -842,14 +867,22 @@ impl Renderer {
             pass.dispatch_workgroups(lc::CLUSTERS.div_ceil(64), 1, 1);
         }
         let state = &self.local_maps;
-        // Batch all dirty tiles sharing a cube-face array layer into one render pass
-        // (at most 6 passes instead of one per face): tiles are disjoint rectangles, so
-        // clearing every dirty tile on the face then drawing all casters is exact.
+        let physical_slice = |layer: u32| -> usize {
+            let tile = state.tiles[layer as usize / 6].unwrap();
+            if tile.cube {
+                layer as usize % 6
+            } else {
+                tile.layer as usize
+            }
+        };
+        // Batch all dirty tiles sharing a physical array layer into one render pass
+        // (at most 6 passes instead of one per face): tiles on the same slice are disjoint
+        // rectangles, so clearing every dirty tile on the slice then drawing all casters is exact.
         for face in 0..state.atlas.layers.len() {
             if !frame
                 .redraw
                 .iter()
-                .any(|(layer, _)| *layer as usize % 6 == face)
+                .any(|(layer, _)| physical_slice(*layer) == face)
             {
                 continue;
             }
@@ -868,7 +901,7 @@ impl Renderer {
             });
             pass.set_pipeline(state.atlas.clear.as_ref().unwrap());
             for (layer, _) in &frame.redraw {
-                if *layer as usize % 6 != face {
+                if physical_slice(*layer) != face {
                     continue;
                 }
                 let tile = state.tiles[*layer as usize / 6].unwrap();
@@ -886,7 +919,7 @@ impl Renderer {
             pass.set_pipeline(&self.pipeline.shadow);
             let (mut instances, mut material, mut mesh) = (None, None, None);
             for (layer, casters) in &frame.redraw {
-                if *layer as usize % 6 != face || casters.is_empty() {
+                if physical_slice(*layer) != face || casters.is_empty() {
                     continue;
                 }
                 let tile = state.tiles[*layer as usize / 6].unwrap();

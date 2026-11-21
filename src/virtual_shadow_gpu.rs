@@ -1223,13 +1223,15 @@ fn requests_hold_on() -> bool {
 /// Answer reuse (WGSL `vd_lookup`): a pixel whose surface point was on screen last frame, out
 /// of the moving casters' swept shadow, with its own and its 3x3 neighbours' answers one fully
 /// lit or fully shadowed class settled over several walks, keeps the answer without a walk.
-/// The sun's answer at a world point does not depend on the camera. Off by default
-/// (`RENDERLAB_VD_REUSE=1` turns it on): TR1's swept zone covers only skinned poses, so a rigid
-/// mover (Glint's spinning bars) left stale shadowed tiles behind it. It returns once its
-/// invalidation is per mover.
+/// Answer reuse for `VirtualLookup::Disk` (WGSL `vd_lookup`): a pixel whose point was on screen
+/// last frame at the same depth, out of every moved caster's light-space rectangle (`vsm.rects`
+/// + `vd.tops`, covering both rigid and skinned movers), with its own and its 3x3 neighbours'
+/// answers one fully lit or fully shadowed class settled over several walks, keeps the answer
+/// without a walk. Default on (`RENDERLAB_VD_REUSE=0` turns it off); moving frames with many
+/// mover rectangles skip reuse so per-pixel rectangle testing never outweighs walking.
 fn reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_REUSE").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_REUSE").map_or(true, |v| v.trim() != "0"))
 }
 /// TR1 history frames before answers are reused: the pages of a cut's new view have arrived.
 const REUSE_AFTER: u32 = 8;
@@ -2462,9 +2464,16 @@ impl Renderer {
             && let Some(r) = state.resources.as_ref()
         {
             let mode = match () {
-                _ if !reuse_on() || history < REUSE_AFTER => 0u32,
+                _ if !reuse_on()
+                    || history < REUSE_AFTER
+                    || state.stats.invalidated_levels != 0 =>
+                {
+                    0u32
+                }
                 _ if unchanged => 2,
-                _ if sun_still => 1,
+                // Moving reuse tests every moved caster's light-space rectangle per pixel;
+                // beyond 16 rectangles (e.g. dense spinning obstacles), walking is cheaper.
+                _ if sun_still && state.stats.moved_rects <= 16 => 1,
                 _ => 0,
             };
             // reuse.z (the history half this frame writes) stays as the frame upload set it.

@@ -541,6 +541,21 @@ pub(crate) struct Tile {
     pub x: u32,
     pub y: u32,
     pub size: u32,
+    /// Physical atlas array layer (0..6) for single-face spot lights; always 0 for six-face
+    /// cube lights, which occupy all six slices at (x, y).
+    pub layer: u32,
+    /// True for six-face cube tiles (point and wide spot lights), false for single-face spots.
+    pub cube: bool,
+}
+
+/// Physical atlas array layers required by `tiles`: 6 if any tile is a six-face cube,
+/// otherwise enough to cover the highest allocated spot slice (at least 1).
+pub(crate) fn needed_layers(tiles: &[Option<Tile>]) -> u32 {
+    if tiles.iter().flatten().any(|t| t.cube) {
+        6
+    } else {
+        tiles.iter().flatten().map(|t| t.layer + 1).max().unwrap_or(1)
+    }
 }
 
 pub(crate) fn atlas_extent(maximum: u32) -> u32 {
@@ -571,35 +586,99 @@ pub(crate) fn fitted_extent(tiles: &[Option<Tile>], maximum: u32) -> [u32; 2] {
 
 /// A small aligned square allocator. Existing tiles never move when the camera moves.
 /// Resolution falls back by halves when larger squares cannot fit; no silent eviction.
-pub(crate) fn allocate_tile(existing: &[Option<Tile>], maximum: u32, desired: u32) -> Option<Tile> {
+/// Single-face spot tiles pack across the available `atlas_layers` (up to 6 when point lights
+/// are present), reusing already-occupied spot footprints before expanding the 2D atlas.
+pub(crate) fn allocate_tile(
+    existing: &[Option<Tile>],
+    maximum: u32,
+    desired: u32,
+    is_cube: bool,
+    atlas_layers: u32,
+) -> Option<Tile> {
     let minimum = (maximum / 8).max(1);
     // Quantize to a shared grid even for non-power-of-two maxima. Otherwise a
     // 1001-square tile can strand thin strips and invalidate the reserved-area bound.
     let extent = atlas_extent(maximum) / minimum * minimum;
     let units = (desired.min(maximum).max(minimum) / minimum).max(1);
     let mut size = minimum * (1 << (31 - units.leading_zeros()));
-    let occupied: u64 = existing
-        .iter()
-        .flatten()
-        .map(|t| u64::from(t.size).pow(2))
-        .sum();
+    let layers = if is_cube { 1 } else { atlas_layers.clamp(1, 6) };
+    // Track the exact 2D union of occupied minimum-sized cells so stacked spot tiles on
+    // different layers do not double-count against the reserved-area bound.
+    // `extent / minimum` is at most 60 for every positive `maximum`, so each row fits in u64.
+    let mut blocked = [0u64; 64];
+    for t in existing.iter().flatten() {
+        let cx0 = (t.x / minimum) as usize;
+        let cy0 = (t.y / minimum) as usize;
+        let span = (t.size / minimum) as usize;
+        let mask = ((1u64 << span) - 1) << cx0;
+        for row in &mut blocked[cy0..cy0 + span] {
+            *row |= mask;
+        }
+    }
+    let occupied_cells: u64 = blocked.iter().map(|r| u64::from(r.count_ones())).sum();
+    let total_cells = u64::from(extent / minimum).pow(2);
     let remaining = existing
         .len()
-        .saturating_sub(existing.iter().flatten().count() + 1);
+        .saturating_sub(existing.iter().flatten().count() + 1) as u64;
+    let added_cells = |x: u32, y: u32, s: u32| -> u64 {
+        let cx0 = (x / minimum) as usize;
+        let cy0 = (y / minimum) as usize;
+        let span = (s / minimum) as usize;
+        let mask = ((1u64 << span) - 1) << cx0;
+        let mut added = 0u64;
+        for row in &blocked[cy0..cy0 + span] {
+            added += u64::from((mask & !row).count_ones());
+        }
+        added
+    };
+    let free_at = |x: u32, y: u32, s: u32, layer: u32| -> bool {
+        existing.iter().flatten().all(|t| {
+            let disjoint_2d =
+                x + s <= t.x || t.x + t.size <= x || y + s <= t.y || t.y + t.size <= y;
+            disjoint_2d || (!is_cube && !t.cube && t.layer != layer)
+        })
+    };
     loop {
-        let fits_budget =
-            occupied + u64::from(size).pow(2) + remaining as u64 * u64::from(minimum).pow(2)
-                <= u64::from(extent).pow(2);
-        for y in (0..extent).step_by(size as usize).filter(|_| fits_budget) {
+        // First pass for single-face spots when multiple layers exist: stack onto an already
+        // occupied spot footprint (zero extra 2D cells, zero atlas extent growth).
+        if !is_cube && layers > 1 {
+            for y in (0..extent).step_by(size as usize) {
+                for x in (0..extent).step_by(size as usize) {
+                    if x + size > extent || y + size > extent || added_cells(x, y, size) != 0 {
+                        continue;
+                    }
+                    for layer in 0..layers {
+                        if free_at(x, y, size, layer) {
+                            return Some(Tile {
+                                x,
+                                y,
+                                size,
+                                layer,
+                                cube: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for y in (0..extent).step_by(size as usize) {
             for x in (0..extent).step_by(size as usize) {
                 if x + size > extent || y + size > extent {
                     continue;
                 }
-                let free = existing.iter().flatten().all(|t| {
-                    x + size <= t.x || t.x + t.size <= x || y + size <= t.y || t.y + t.size <= y
-                });
-                if free {
-                    return Some(Tile { x, y, size });
+                if occupied_cells + added_cells(x, y, size) + remaining > total_cells {
+                    continue;
+                }
+                for layer in 0..layers {
+                    if free_at(x, y, size, layer) {
+                        return Some(Tile {
+                            x,
+                            y,
+                            size,
+                            layer,
+                            cube: is_cube,
+                        });
+                    }
                 }
             }
         }
