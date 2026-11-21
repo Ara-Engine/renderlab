@@ -105,10 +105,11 @@ const FG_TILE:u32=16u;
 const FG_SLOTS:u32=2u;
 const FG_BLOCK:u32=8u;
 const FG_RAYS:u32=16u;
-const FG_HISTORY:f32=16.0;
-// Half-rate tracing (fg_trace and fg_adapt) for probes with at least FG_HALF_MIN frames of history.
-const FG_HALF_RATE:bool=true;
-const FG_HALF_MIN:f32=4.0;
+const FG_HISTORY:f32=32.0;
+// Half-rate tracing (off by default: fg_trace is ~0.18 ms on RT and full-rate updates eliminate
+// half/quarter-rate checkerboard lag and speed up temporal convergence after cuts and motion).
+const FG_HALF_RATE:bool=false;
+const FG_HALF_MIN:f32=8.0;
 // A probe ray's cone: its share of the hemisphere (2 pi / FG_RAYS sr) as an angle, so its
 // width at distance t is FG_CONE * t (the cache answers hits whose cone covers a cell).
 const FG_CONE:f32=0.6266570686577501;
@@ -272,10 +273,15 @@ fn fg_basis(n:vec3<f32>)->mat3x3<f32> {
 // evenly. A side x side grid left two cells near the zenith empty at 14 rays: the irradiance's
 // cosine term then read low (gicut's furnace: a slab under an open sky 8% dark).
 fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
-    let jitter=vec2<f32>(f32(r&0xffffu),f32(r>>16u))*(1.0/65536.0);
-    let z=(f32(k)+jitter.x)/f32(count);
+    // Per-probe fixed spatial hash advanced temporally by the R2 low-discrepancy sequence, with
+    // per-ray golden-ratio z stratification so consecutive frames converge smoothly without
+    // correlated elevation-ring oscillation.
+    let base=vec2<f32>(f32(r&0xffffu),f32(r>>16u))*(1.0/65536.0);
+    let t=f32(fg_frame()&1023u);
+    let seq=fract(base+vec2<f32>(0.754877666,0.569840296)*t);
+    let z=(f32(k)+fract(seq.x+f32(k)*0.3819660113))/f32(count);
     let rr=sqrt(max(1.0-z*z,0.0));
-    let phi=6.283185307179586*fract(f32(k)*0.6180339887498949+jitter.y);
+    let phi=6.283185307179586*fract(f32(k)*0.6180339887498949+seq.y);
     return fg_basis(n)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
 }
 // Incoming radiance (unexposed) along d from `origin`. A hit reads its lighting-cache cell's
@@ -398,19 +404,22 @@ fn fg_find_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
     let rp=fg_reproject_pixel(s.prev_world,size);
     if rp.z<=0.0 {return 0xffffffffu;}
     let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
-    let base=vec2<i32>(floor(rp.xy/f32(FG_TILE)-vec2<f32>(0.5)));
+    let center=vec2<i32>(floor(rp.xy/f32(FG_TILE)));
     let bank=fg_read_bank();
     var best=0.0;
     var chosen=0xffffffffu;
-    for(var k=0u;k<4u*FG_SLOTS;k+=1u) {
-        let o=vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
-        let t=clamp(base+o,vec2<i32>(0),tiles-vec2<i32>(1));
-        let idx=fg_tile_at(u32(t.y*tiles.x+t.x)*FG_SLOTS+k/4u,size,bank);
-        let p=fg_plane(idx,size);
-        let tol=0.5*FG_PLANE*max(footprint,p.normal.w);
-        if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.9 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
-        let score=fg_on_plane(p,s.prev_world,s.normal)*p.point.w;
-        if score>best {best=score;chosen=idx;}
+    for(var oy=-1;oy<=1;oy+=1) {
+        for(var ox=-1;ox<=1;ox+=1) {
+            let t=clamp(center+vec2<i32>(ox,oy),vec2<i32>(0),tiles-vec2<i32>(1));
+            for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
+                let idx=fg_tile_at(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size,bank);
+                let p=fg_plane(idx,size);
+                let tol=FG_PLANE*max(footprint,p.normal.w);
+                if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.78 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
+                let score=fg_on_plane(p,s.prev_world,s.normal)*p.point.w;
+                if score>best {best=score;chosen=idx;}
+            }
+        }
     }
     return chosen;
 }
@@ -428,8 +437,8 @@ fn fg_find_prev_adapt(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
         let b=clamp(base+o,vec2<i32>(0),blocks-vec2<i32>(1));
         let idx=fg_adaptive_in(vec2<u32>(b),size,bank);
         let p=fg_plane(idx,size);
-        let tol=0.5*FG_PLANE*max(footprint,p.normal.w);
-        if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.9 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
+        let tol=FG_PLANE*max(footprint,p.normal.w);
+        if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.78 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
         let score=fg_on_plane(p,s.prev_world,s.normal)*p.point.w;
         if score>best {best=score;chosen=idx;}
     }
@@ -476,16 +485,16 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     for(var i=0u;i<12u;i+=1u) {fg_nee_sh[lane][i]=0.0;}
     if s.placement!=0u {
         if ray<FG_NEE {
-            // An emitter sample takes this lane's one ray (fg_nee).
-            fg_nee(lane,ray,s,r);
+            // An emitter sample takes this lane's one ray (fg_nee), rotated across frames.
+            fg_nee(lane,ray,s,fg_hash(r^(fg_frame()*0x27d4eb2fu)));
         } else {
             d=fg_direction(s.normal,ray-FG_NEE,FG_HEMI,r);
             radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
             atomicAdd(&fg_rays[0],1u);
             if fg_hit && fg_no_value && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
-            // A hit no cache level answers yet is left out of the probe's average (fg_accumulate
-            // counts the answered rays in the pad float FG_ANSWERED): counted as black, it
-            // darkened probes after a cut until the cells it asked for were shaded.
+            // A hit no cache level answers yet is left out of the bounce average (fg_accumulate
+            // counts answered rays in FG_ANSWERED) while sky rays always keep their exact
+            // 2*pi/FG_HEMI solid-angle share so missing cache cells never over-brighten sky light.
             answered=!(fg_hit && fg_unanswered);
         }
     }
@@ -554,10 +563,28 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
 // rows of 52 alone, its probe's other lanes idle, cost 0.45 ms on Glint without ray hardware.
 fn fg_reduce(lane:u32) {
     let first=(lane/FG_RAYS)*FG_RAYS;
+    // Exposure-invariant lone-ray firefly clamp on bounce SH (analogous to reflections.wgsl's
+    // lone-stratum bound): suppresses single-ray hits on tiny bright emitters without biasing
+    // large area lights hit by multiple rays.
+    var total_luma=0.0;
+    var max_luma=0.0;
+    var max_lane=0u;
+    for(var l=0u;l<FG_RAYS;l+=1u) {
+        let c=vec3<f32>(fg_lane_sh[first+l][FG_BOUNCE],fg_lane_sh[first+l][FG_BOUNCE+1u],fg_lane_sh[first+l][FG_BOUNCE+2u])
+            +vec3<f32>(fg_lane_sh[first+l][0u],fg_lane_sh[first+l][1u],fg_lane_sh[first+l][2u]);
+        let y=dot(max(c,vec3<f32>(0.0)),vec3<f32>(0.2126,0.7152,0.0722));
+        total_luma+=y;
+        if y>max_luma {max_luma=y;max_lane=l;}
+    }
+    let rest_mean=max(total_luma-max_luma,0.0)/f32(max(FG_HEMI-1u,1u));
+    let cap_scale=select(1.0,min(1.0,(3.0*rest_mean)/max(max_luma,1e-30)),max_luma>3.0*rest_mean && rest_mean>1e-6);
     for(var i=lane%FG_RAYS;i<52u;i+=FG_RAYS) {
         var sum=0.0;
         if i<40u {
-            for(var l=0u;l<FG_RAYS;l+=1u) {sum+=fg_lane_sh[first+l][i];}
+            for(var l=0u;l<FG_RAYS;l+=1u) {
+                let w=select(1.0,cap_scale,l==max_lane && i>=FG_BOUNCE);
+                sum+=fg_lane_sh[first+l][i]*w;
+            }
             fg_lane_sh[first][i]=sum;
         } else {
             for(var l=0u;l<FG_RAYS;l+=1u) {sum+=fg_nee_sh[first+l][i-40u];}
@@ -588,7 +615,7 @@ fn fg_irradiance(sh:array<vec4<f32>,10>,n:vec3<f32>)->f32 {
 // which kept three probes in four at the half rate through their neighbours; 4 times flags 1%.
 // Returns whether this update is a change.
 const FG_CHANGE:f32=4.0;
-const FG_CHANGE_MIN:f32=0.15;
+const FG_CHANGE_MIN:f32=0.25;
 fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:vec3<f32>)->bool {
     let at=fg_state_at(index);
     if at+1u>=arrayLength(&fg_state) {return false;}
@@ -640,13 +667,24 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
         }
         return;
     }
-    // Uniform hemisphere: pdf 1/(2 pi), over the rays with an answer (the others stand for their
-    // average). The emitter samples were divided by the full ray count's scale (fg_nee).
-    let scale=6.283185307179586/answered;
+    // Uniform hemisphere: pdf 1/(2 pi). Sky rays ALWAYS carry their exact 2*pi / FG_HEMI share so
+    // unanswered geometry hits never over-amplify sky light (which caused bright flashes whenever
+    // moving into uncached geometry or after mover invalidation). Unanswered bounce hits borrow
+    // their missing fraction from valid on-plane history, or gently clamp to at most 2x when cold.
+    let hemi_scale=6.283185307179586/f32(FG_HEMI);
+    let missing_frac=clamp((f32(FG_HEMI)-answered)/f32(FG_HEMI),0.0,1.0);
     sh[FG_ANSWERED]=0.0;
-    for(var i=0u;i<40u;i+=1u) {sh[i]*=scale;}
-    for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]+=nee[i]*(6.283185307179586/f32(FG_HEMI));}
-    let max_hist=select(FG_HISTORY,8.0,s.moved);
+    for(var i=0u;i<FG_BOUNCE;i+=1u) {sh[i]*=hemi_scale;}
+    if has_old && old.point.w>0.0 && missing_frac>0.0 {
+        for(var i=0u;i<12u;i+=1u) {
+            let b=FG_BOUNCE+i;
+            sh[b]=sh[b]*hemi_scale+old.sh[b/4u][b%4u]*missing_frac+nee[i]*hemi_scale;
+        }
+    } else {
+        let bounce_scale=min(6.283185307179586/answered,2.0*hemi_scale);
+        for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*bounce_scale+nee[i]*hemi_scale;}
+    }
+    let max_hist=select(FG_HISTORY,16.0,s.moved);
     var count=1.0;
     if has_old && old.point.w>0.0 {
         count=min(old.point.w+1.0,max_hist);
@@ -683,15 +721,20 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
         }
     }
     workgroupBarrier();
-    // Slot 0: the first covered pixel of four the frame picks in the tile. Slot 1: the first of
-    // eight more off slot 0's plane (every lane of a slot computes the same).
+    // Slot 0: center-anchored pick with 2x2 sub-tile dither, falling back to a full 4x4 sweep so
+    // thin objects (monoliths, pillars, hoops) never randomly miss and wipe probe history.
     var first:FgSurface;
     var first_pixel=vec2<u32>(0u);
-    for(var k=0u;k<4u;k+=1u) {
-        let h=fg_hash(tile*16u+k+frame*0x632be5abu);
-        let q=group.xy*FG_TILE+vec2<u32>(h%FG_TILE,(h>>8u)%FG_TILE);
-        first=fg_surface_at(q,size,false);
-        if first.placement!=0u {first_pixel=q;break;}
+    let q0=group.xy*FG_TILE+vec2<u32>((frame&1u)+7u,((frame>>1u)&1u)+7u);
+    first=fg_surface_at(q0,size,false);
+    if first.placement!=0u {
+        first_pixel=q0;
+    } else {
+        for(var k=0u;k<16u;k+=1u) {
+            let q=group.xy*FG_TILE+vec2<u32>((k&3u)*4u+2u,(k>>2u)*4u+2u);
+            let c=fg_surface_at(q,size,false);
+            if c.placement!=0u {first=c;first_pixel=q;break;}
+        }
     }
     var s=first;
     var pixel=first_pixel;
@@ -701,9 +744,8 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
             var probe:FgPlane;
             probe.point=vec4<f32>(first.world,1.0);
             probe.normal=vec4<f32>(first.normal,fg_footprint(first_pixel,size,first.world));
-            for(var k=4u;k<12u;k+=1u) {
-                let h=fg_hash(tile*16u+k+frame*0x632be5abu);
-                let q=group.xy*FG_TILE+vec2<u32>(h%FG_TILE,(h>>8u)%FG_TILE);
+            for(var k=0u;k<16u;k+=1u) {
+                let q=group.xy*FG_TILE+vec2<u32>((k&3u)*4u+1u,(k>>2u)*4u+1u);
                 let c=fg_surface_at(q,size,false);
                 if c.placement!=0u && fg_on_plane(probe,c.world,c.normal)<0.37 {s=c;pixel=q;break;}
             }
@@ -722,7 +764,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
     let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
     if keep {traced.placement=0u;}
-    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(tile_slot^(frame*0x27d4eb2fu)));
+    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(tile_slot));
     workgroupBarrier();
     fg_reduce(lane);
     workgroupBarrier();
@@ -817,8 +859,10 @@ fn fg_pick_at(index:u32,size:vec2<u32>)->u32 { return gi_prepared[fg_at(index,si
     let q=group.xy*FG_BLOCK+local.xy;
     let mine=fg_surface_at(q,size,false);
     if mine.placement!=0u && fg_tiles(q,size,mine,false)<=1e-4 {
-        // 17 is odd, so the turned order is a permutation of the 64 lanes.
-        atomicMin(&fg_orphan,(((lane*17u+frame*29u)&63u)<<6u)|lane);
+        // Pick the covered orphan pixel closest to block center so adaptive probes on curved
+        // surfaces and edges keep stable normals across frames instead of resetting history.
+        let dx=i32(local.x)-4;let dy=i32(local.y)-4;
+        atomicMin(&fg_orphan,(u32(dx*dx+dy*dy)<<6u)|lane);
     }
     workgroupBarrier();
     if lane!=0u {return;}
@@ -862,10 +906,10 @@ var<workgroup> fg_pair:array<u32,2>;
     let at=fg_state_at(state_idx);
     let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0xffu)>=FG_STABLE;
     let turn=select((block.x+block.y+frame)&1u,(block.x+2u*block.y+frame)%FG_STABLE_RATE,stable);
-    let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=2.0;
+    let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
     if keep {traced.placement=0u;}
-    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(state_idx^(frame*0x27d4eb2fu)));
+    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(state_idx));
     workgroupBarrier();
     fg_reduce(lane);
     workgroupBarrier();

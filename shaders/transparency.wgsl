@@ -179,6 +179,7 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
     let depth=dot(input.world-tp.eye.xyz,tp.forward.xyz);
     if depth>textureLoad(tp_depth,pixel,0).x { discard; }
     rl_indirect_prepare(surface_input);
+    rl_lights_prepare(input.world);
     let lit=rl_finite(shade(surface_output,surface_input));
     let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,transparent_ior(material));
     // AT1 fog and aerial perspective over the surface's own light, and the share of the

@@ -110,6 +110,15 @@ pub(crate) fn glass_source(head: &str, rt: bool, program: &str, parameters: bool
             "fn gi_prepare(input:SurfaceInput) { gi_rx_valid=false; }",
         );
     }
+    // Transparent glass only evaluates direct specular highlights (zero diffuse) on top of
+    // transmitted light; one center shadow ray per shadowed local light avoids 4x overwork
+    // across covered glass pixels and multi-sample pane edges while keeping crisp highlights.
+    if rt {
+        composed.source = composed.source.replace(
+            "let samples=select(1u,max(rl_local_rays,4u),radius>0.0);",
+            "let samples=1u;",
+        );
+    }
     // TP2: paired profiling variants change only this pass, in the same test binary.
     #[cfg(test)]
     let composed = {

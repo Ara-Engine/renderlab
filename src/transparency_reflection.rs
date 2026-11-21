@@ -60,7 +60,14 @@ pub(crate) fn source(head: &str, program: &str, parameters: bool) -> String {
             "rl_load_parameters(rl_glass_parameter_batch(h.batch));",
         )
         // Glass draws after TR1: fixed glossy strata avoid unfiltered frame rotation.
-        .replace("let frame=primary_frame.sided.y;", "let frame=0u;");
+        .replace("let frame=primary_frame.sided.y;", "let frame=0u;")
+        // Glass Fresnel reflections (~4% dielectric at normal incidence) use a single center
+        // shadow ray per shadowed local light instead of 4 soft-disk rays per hit, avoiding
+        // 12+ shadow rays per pixel inside multi-light glass corridors.
+        .replace(
+            "let samples=select(1u,max(rl_local_rays,4u),radius>0.0);",
+            "let samples=1u;",
+        );
     s.push_str(r#"
 @group(0) @binding(31) var tp_reflection_position:texture_2d<f32>;
 @group(0) @binding(32) var tp_reflection_normal:texture_2d<f32>;
