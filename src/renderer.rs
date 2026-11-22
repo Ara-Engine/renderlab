@@ -1717,8 +1717,20 @@ impl Renderer {
                 Ok(self.receiver_adjacency_fits(sizes, tangent_bytes))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        Ok(crate::receiver_adjacency::prepare_uploads(
-            primitives, eligible,
+        let build_clusters =
+            self.view.primary.is_some() && visibility_buffer::supported(&self.device);
+        let build_nonrt_bvh = self.hardware_shadows.is_none();
+        let max_reflection_bytes = self
+            .device
+            .limits()
+            .max_storage_buffer_binding_size
+            .min(self.device.limits().max_buffer_size);
+        Ok(crate::receiver_adjacency::prepare_uploads_full(
+            primitives,
+            eligible,
+            build_clusters,
+            build_nonrt_bvh,
+            max_reflection_bytes,
         ))
     }
 
@@ -1776,12 +1788,12 @@ impl Renderer {
         let adjacency_bytes = sizes.1 + 4;
         let adjacency_fits = self.receiver_adjacency_fits(sizes, tangent_bytes);
         let adjacency_started = Instant::now();
-        let prepared = prepared
+        let pre_adjacency = prepared
             .and_then(|p| p.adjacency.as_ref())
             .filter(|_| adjacency_fits);
         let built =
-            (adjacency_fits && prepared.is_none()).then(|| crate::receiver_adjacency::build(data));
-        let adjacency = prepared.or(built.as_ref());
+            (adjacency_fits && pre_adjacency.is_none()).then(|| crate::receiver_adjacency::build(data));
+        let adjacency = pre_adjacency.or(built.as_ref());
         let adjacency_build = adjacency_started.elapsed();
         let adjacency_bytes = if adjacency.is_some() {
             adjacency_bytes
@@ -1992,40 +2004,55 @@ impl Renderer {
             ..CpuFrame::default()
         };
         self.check_fault()?;
-        let clusters = (self.view.primary.is_some() && visibility_buffer::supported(&self.device))
-            .then(|| {
-                let b = visibility_buffer::source_clusters(data);
-                self.upload_clusters(b.clusters, &b.words, vec![[0., 0., 0., 0., f32::MAX]])
-            });
-        // M7-R1n: non-RT visibility-buffer renderers trace reflections in software over
-        // each mesh's drawn triangles (reflection_software.rs), up to its triangle cap and
-        // the device's storage-buffer binding limit.
+        let want_clusters =
+            self.view.primary.is_some() && visibility_buffer::supported(&self.device);
         let max_reflection_bytes = self
             .device
             .limits()
             .max_storage_buffer_binding_size
             .min(self.device.limits().max_buffer_size);
         let tri_count = data.indices.len() / 3;
-        let reflection = (clusters.is_some()
+        let want_reflection = want_clusters
             && self.hardware_shadows.is_none()
             && tri_count <= crate::reflection_software::MAX_TRIANGLES
-            && (tri_count as u64).saturating_mul(64) <= max_reflection_bytes / 2)
-            .then(|| {
-                let started = Instant::now();
-                let positions: Vec<[f32; 3]> = data.vertices.iter().map(|v| v.position).collect();
-                let blas = crate::reflection_software::Blas::build(&positions, data.indices);
-                #[cfg(test)]
-                eprintln!(
-                    "software_reflection_bvh triangles={} bytes={} build_ms={:.3}",
-                    data.indices.len() / 3,
-                    blas.as_ref().map_or(0, |b| b.bytes()),
-                    started.elapsed().as_secs_f64() * 1000.
-                );
-                let _ = started;
-                blas
-            })
-            .flatten()
-            .map(Arc::new);
+            && (tri_count as u64).saturating_mul(64) <= max_reflection_bytes / 2;
+        let pre_clusters = prepared.and_then(|p| p.clusters.as_ref());
+        let pre_reflection = prepared.and_then(|p| p.reflection.as_ref()).cloned();
+        let (built_clusters, built_reflection) = if pre_clusters.is_some()
+            && (!want_reflection || pre_reflection.is_some())
+        {
+            (None, None)
+        } else {
+            rayon::join(
+                || (want_clusters && pre_clusters.is_none()).then(|| visibility_buffer::source_clusters(data)),
+                || {
+                    (want_reflection && pre_reflection.is_none())
+                        .then(|| {
+                            let started = Instant::now();
+                            let positions: Vec<[f32; 3]> =
+                                data.vertices.iter().map(|v| v.position).collect();
+                            let blas =
+                                crate::reflection_software::Blas::build(&positions, data.indices);
+                            #[cfg(test)]
+                            eprintln!(
+                                "software_reflection_bvh triangles={} bytes={} build_ms={:.3}",
+                                data.indices.len() / 3,
+                                blas.as_ref().map_or(0, |b| b.bytes()),
+                                started.elapsed().as_secs_f64() * 1000.
+                            );
+                            let _ = started;
+                            blas
+                        })
+                        .flatten()
+                        .map(Arc::new)
+                },
+            )
+        };
+        let clusters = pre_clusters
+            .or(built_clusters.as_ref())
+            .filter(|_| want_clusters)
+            .map(|b| self.upload_clusters(b.clusters.clone(), &b.words, vec![[0., 0., 0., 0., f32::MAX]]));
+        let reflection = pre_reflection.or(built_reflection).filter(|_| want_reflection);
         Ok(Some(Mesh {
             reflection,
             skin: None,

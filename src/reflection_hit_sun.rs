@@ -12,7 +12,7 @@ const ACCESS: &str = include_str!("../shaders/reflection_hit_sun.wgsl");
 const SEAM: &str = "    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n";
 const REPLACEMENT: &str = "    if rl_reflection_hit {return rl_hit_sun(lights[s.index],input.receiver,s.direction);}\n";
 /// The group the map binds at in the hit pipelines.
-pub(super) const GROUP: u32 = 4;
+pub(in crate::renderer) const GROUP: u32 = 4;
 
 pub(crate) fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -23,7 +23,7 @@ pub(crate) fn on() -> bool {
 /// helpers (shaders/virtual_shadow.wgsl before its page requests, with the frame at group 4
 /// binding 0; its `Tr1Zones` is primary_rays.wgsl's, already declared) and the accessor. None
 /// when the module has no sun seam to take (another switch already replaced it).
-pub(super) fn compose(source: String) -> Option<String> {
+pub(in crate::renderer) fn compose(source: String) -> Option<String> {
     if source.matches(SEAM).count() != 1 {
         return None;
     }
@@ -46,7 +46,7 @@ pub(super) fn compose(source: String) -> Option<String> {
 }
 
 /// Group 4's layout: the map's frame, top layer and page state.
-pub(super) fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+pub(in crate::renderer) fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let storage = |binding| wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -79,7 +79,7 @@ pub(super) fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 impl Renderer {
     /// The map's buffers when the hit pass may read it: without ray hardware, with the map
     /// built, on a device that allows the fifth group.
-    pub(super) fn hit_sun_buffers(&self) -> Option<[&wgpu::Buffer; 3]> {
+    pub(in crate::renderer) fn hit_sun_buffers(&self) -> Option<[&wgpu::Buffer; 3]> {
         if !on()
             || self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             || self.device.limits().max_bind_groups <= GROUP

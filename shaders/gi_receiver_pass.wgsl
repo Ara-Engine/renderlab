@@ -457,6 +457,7 @@ fn fg_frame()->u32 { return fg_state[1]; }
 fn fg_changed_recently(word:u32,frame:u32)->bool { return ((frame-(word>>8u))&0xffffffu)<=1u; }
 var<workgroup> fg_moved:atomic<u32>;
 var<workgroup> fg_asked:array<atomic<u32>,2>;
+var<workgroup> fg_trace_mask:array<u32,2>;
 // The workgroup's probe rays and emitter shadow rays, added to the external list's spare words 2
 // and 3, which the GI log prints as fg_rays and fg_shadow_rays.
 var<workgroup> fg_rays:array<atomic<u32>,2>;
@@ -767,11 +768,15 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,f
     let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
     if keep {traced.placement=0u;}
-    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(tile_slot));
-    workgroupBarrier();
-    fg_reduce(lane);
-    workgroupBarrier();
-    fg_count_rays(lane);
+    if lane%FG_RAYS==0u {fg_trace_mask[slot]=u32(traced.placement!=0u);}
+    let trace_mask=workgroupUniformLoad(&fg_trace_mask);
+    if trace_mask[0]!=0u || trace_mask[1]!=0u {
+        fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(tile_slot));
+        workgroupBarrier();
+        fg_reduce(lane);
+        workgroupBarrier();
+        fg_count_rays(lane);
+    }
     if lane%FG_RAYS!=0u || any(group.xy>=tiles) {return;}
     if s.placement==0u {fg_invalidate(write_idx,size);return;}
     if keep {
@@ -903,20 +908,24 @@ var<workgroup> fg_pair:array<u32,2>;
     }
     let footprint=select(0.0,fg_footprint(pixel,size,s.world),s.placement!=0u);
     let prev_idx=select(0xffffffffu,fg_find_prev_adapt(s,size,footprint),s.placement!=0u);
-    // Half rate (and quarter rate once stable, matching fg_trace): on alternate frames a
-    // checkerboard of blocks carries forward a reprojected probe with history on its plane.
+    // Half rate (and quarter/eighth rate once stable, matching fg_trace): align turn parity to
+    // the 2-block workgroup (group.x) so both blocks sharing one warp skip together cleanly.
     let old_w=select(0.0,fg_plane(prev_idx,size).point.w,prev_idx!=0xffffffffu);
     let at=fg_state_at(state_idx);
     let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE;
-    let turn=select((block.x+block.y+frame)&1u,(block.x+2u*block.y+frame)%FG_STABLE_RATE,stable);
+    let turn=select((group.x+block.y+frame)&1u,(group.x+2u*block.y+frame)%FG_STABLE_RATE,stable);
     let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
     if keep {traced.placement=0u;}
-    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(state_idx));
-    workgroupBarrier();
-    fg_reduce(lane);
-    workgroupBarrier();
-    fg_count_rays(lane);
+    if lane%FG_RAYS==0u {fg_trace_mask[b]=u32(traced.placement!=0u);}
+    let trace_mask=workgroupUniformLoad(&fg_trace_mask);
+    if trace_mask[0]!=0u || trace_mask[1]!=0u {
+        fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(state_idx));
+        workgroupBarrier();
+        fg_reduce(lane);
+        workgroupBarrier();
+        fg_count_rays(lane);
+    }
     if lane%FG_RAYS!=0u || pick==FG_NONE {return;}
     if s.placement==0u {fg_invalidate(write_idx,size);return;}
     if keep {

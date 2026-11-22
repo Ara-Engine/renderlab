@@ -176,7 +176,43 @@ pub(crate) fn glass_source(head: &str, rt: bool, program: &str, parameters: bool
         replace_function(
             &source,
             "specular_incident",
-            "fn specular_incident(input:SurfaceInput)->vec4<f32> { if tp.misc.w==0.0 {return vec4<f32>(0.0);} return textureLoad(tp_reflected,vec2<i32>(input.pixel),0); }",
+            "fn specular_incident(input:SurfaceInput)->vec4<f32> {\n\
+                if tp.misc.w==0.0 { return vec4<f32>(0.0); }\n\
+                let p=vec2<i32>(input.pixel);\n\
+                let r=textureLoad(tp_reflected,p,0);\n\
+                if r.w>0.0 { return r; }\n\
+                let hi=vec2<i32>(textureDimensions(tp_reflected))-vec2<i32>(1);\n\
+                var sum=vec4<f32>(0.0);\n\
+                var n=0.0;\n\
+                let c0=textureLoad(tp_reflected,clamp(p+vec2<i32>(-1,0),vec2<i32>(0),hi),0);\n\
+                let c1=textureLoad(tp_reflected,clamp(p+vec2<i32>(1,0),vec2<i32>(0),hi),0);\n\
+                let c2=textureLoad(tp_reflected,clamp(p+vec2<i32>(0,-1),vec2<i32>(0),hi),0);\n\
+                let c3=textureLoad(tp_reflected,clamp(p+vec2<i32>(0,1),vec2<i32>(0),hi),0);\n\
+                if c0.w>0.0 { sum+=c0; n+=1.0; }\n\
+                if c1.w>0.0 { sum+=c1; n+=1.0; }\n\
+                if c2.w>0.0 { sum+=c2; n+=1.0; }\n\
+                if c3.w>0.0 { sum+=c3; n+=1.0; }\n\
+                if n>0.0 { return sum/n; }\n\
+                let d0=textureLoad(tp_reflected,clamp(p+vec2<i32>(-1,-1),vec2<i32>(0),hi),0);\n\
+                let d1=textureLoad(tp_reflected,clamp(p+vec2<i32>(1,-1),vec2<i32>(0),hi),0);\n\
+                let d2=textureLoad(tp_reflected,clamp(p+vec2<i32>(-1,1),vec2<i32>(0),hi),0);\n\
+                let d3=textureLoad(tp_reflected,clamp(p+vec2<i32>(1,1),vec2<i32>(0),hi),0);\n\
+                if d0.w>0.0 { sum+=d0; n+=1.0; }\n\
+                if d1.w>0.0 { sum+=d1; n+=1.0; }\n\
+                if d2.w>0.0 { sum+=d2; n+=1.0; }\n\
+                if d3.w>0.0 { sum+=d3; n+=1.0; }\n\
+                if n>0.0 { return sum/n; }\n\
+                let e0=textureLoad(tp_reflected,clamp(p+vec2<i32>(-2,0),vec2<i32>(0),hi),0);\n\
+                let e1=textureLoad(tp_reflected,clamp(p+vec2<i32>(2,0),vec2<i32>(0),hi),0);\n\
+                let e2=textureLoad(tp_reflected,clamp(p+vec2<i32>(0,-2),vec2<i32>(0),hi),0);\n\
+                let e3=textureLoad(tp_reflected,clamp(p+vec2<i32>(0,2),vec2<i32>(0),hi),0);\n\
+                if e0.w>0.0 { sum+=e0; n+=1.0; }\n\
+                if e1.w>0.0 { sum+=e1; n+=1.0; }\n\
+                if e2.w>0.0 { sum+=e2; n+=1.0; }\n\
+                if e3.w>0.0 { sum+=e3; n+=1.0; }\n\
+                if n>0.0 { return sum/n; }\n\
+                return vec4<f32>(0.0);\n\
+            }",
         )
     } else {
         source
@@ -1774,11 +1810,18 @@ impl Renderer {
         {
             opaque.sort_unstable();
             opaque.dedup();
+            let sun_map = !rt && self.hit_sun_planned();
             for program in opaque {
                 let slot = self.program_slot(program);
-                let key = reflection::key(&self.source_digest, &slot.digest, slot.layout.is_some(), rt);
+                let key = reflection::key(
+                    &self.source_digest,
+                    &slot.digest,
+                    slot.layout.is_some(),
+                    rt,
+                    sun_map,
+                );
                 if self.transparency.reflection_pipelines.iter().any(|p| p.key == key) { continue; }
-                let built = self.tp_reflection_pipeline(program, rt)?;
+                let built = self.tp_reflection_pipeline(program, rt, sun_map)?;
                 self.transparency.reflection_pipelines.retain(|p| p.program != program);
                 self.transparency.reflection_pipelines.push(built);
             }
@@ -2127,11 +2170,13 @@ impl Renderer {
         if reflect {
             let primary_program = self.view.primary.as_ref().unwrap().program;
             let program = self.program_slot(primary_program);
+            let sun_map = !rt && self.hit_sun_buffers().is_some();
             let key = reflection::key(
                 &self.source_digest,
                 &program.digest,
                 program.layout.is_some(),
                 rt,
+                sun_map,
             );
             if self
                 .view
@@ -2139,7 +2184,7 @@ impl Renderer {
                 .as_ref()
                 .is_none_or(|r| r.position.texture.size() != size || r.key != key)
             {
-                self.view.transparency_reflections = Some(self.tp_reflections(size, rt)?);
+                self.view.transparency_reflections = Some(self.tp_reflections(size, rt, sun_map)?);
             }
             // MP1 integration: R1 shades foreign-program hits with the first opaque
             // program's response and parameters, as MP1's existing fallback does.
@@ -2947,6 +2992,25 @@ impl Renderer {
                 ],
             })
         });
+        let reflection_sun_group = reflect
+            .then(|| {
+                let reflection = self.view.transparency_reflections.as_ref()?;
+                if !reflection.sun_map {
+                    return None;
+                }
+                let buffers = self.hit_sun_buffers()?;
+                Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("TP2 glass reflection sun map"),
+                    layout: &reflection.pipeline.get_bind_group_layout(
+                        primary_ray_gpu::reflection_hits_gpu::hit_sun::GROUP,
+                    ),
+                    entries: &[0u32, 1, 2].map(|binding| wgpu::BindGroupEntry {
+                        binding,
+                        resource: buffers[binding as usize].as_entire_binding(),
+                    }),
+                }))
+            })
+            .flatten();
         fn rect_entry(buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
             wgpu::BindGroupEntry {
                 binding: 59,
@@ -3192,23 +3256,149 @@ impl Renderer {
             .film_order
             .as_ref()
             .map(|(buffer, _)| &**buffer);
+        // Keep the receiver set and its cached sun map stable as the camera moves;
+        // cull empty draw rectangles only after fitting the map and sorting items.
+        if bounded {
+            items.retain(|(_, item)| {
+                !matches!(
+                    item,
+                    Item::Draw(i) if draw_rects[*i][2] <= draw_rects[*i][0] || draw_rects[*i][3] <= draw_rects[*i][1]
+                )
+            });
+        }
+        let pad_rect = |r: [u32; 4], pad: u32| -> [u32; 4] {
+            [
+                r[0].saturating_sub(pad),
+                r[1].saturating_sub(pad),
+                r[2].saturating_add(pad).min(size.width),
+                r[3].saturating_add(pad).min(size.height),
+            ]
+        };
+        let rects_overlap = |a: [u32; 4], b: [u32; 4]| -> bool {
+            a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+        };
+        // Precompute multi-instance overlap spans for non-film, non-pane glass draws so we know
+        // which draws can join a screen-disjoint glass batch in one lobe/reflect/MSAA pass.
+        let draw_spans: Vec<Option<Vec<(std::ops::Range<u32>, [u32; 4])>>> = transparent
+            .iter()
+            .enumerate()
+            .map(|(i, draw)| {
+                (!films[i]
+                    && pane_records[i].is_empty()
+                    && draw.instances.state.models.len() <= SPAN_INSTANCES)
+                    .then(|| {
+                        let screen = [size.width, size.height];
+                        let rects: Vec<_> = draw
+                            .instances
+                            .state
+                            .models
+                            .iter()
+                            .map(|m| panes::rect(&draw.mesh.bounds, *m, matrix, screen))
+                            .collect();
+                        instance_spans(&rects)
+                    })
+            })
+            .collect();
+        let single_span = |i: usize| draw_spans[i].as_ref().is_none_or(|s| s.len() <= 1);
+        // Refraction reads up to 16 px outside a thick glass mesh; thin panes (thickness == 0)
+        // only read their own pixel plus MSAA reflection edge neighbours (3 px keeps 2x2-snapped
+        // non-RT reflect dispatches and 3x3 bilinear edge gathers strictly disjoint).
+        let draw_pad: Vec<u32> = transparent
+            .iter()
+            .map(|draw| {
+                if draw
+                    .material
+                    .and_then(|m| m.transparency)
+                    .is_some_and(|t| t.thickness > 0.0)
+                {
+                    16
+                } else {
+                    3
+                }
+            })
+            .collect();
+        // Reorder contiguous runs of eligible glass draws into topological back-to-front layers
+        // by padded screen-rect overlap. Overlapping draws always preserve strict back-to-front
+        // order (layer[front] > layer[back]), while all draws in a layer are pairwise disjoint
+        // and batch into one lobe/MSAA pass.
+        if bounded {
+            let eligible = |item: &Item| {
+                matches!(
+                    *item,
+                    Item::Draw(j) if !films[j] && pane_records[j].is_empty() && single_span(j)
+                )
+            };
+            let mut s = 0;
+            while s < items.len() {
+                if !eligible(&items[s].1) {
+                    s += 1;
+                    continue;
+                }
+                let mut e = s + 1;
+                while e < items.len() && eligible(&items[e].1) {
+                    e += 1;
+                }
+                if e - s > 2 {
+                    let rects: Vec<[u32; 4]> = (s..e)
+                        .map(|k| match items[k].1 {
+                            Item::Draw(j) => pad_rect(draw_rects[j], draw_pad[j]),
+                            Item::Emitter(_) => unreachable!(),
+                        })
+                        .collect();
+                    let mut layers = vec![0usize; e - s];
+                    for k in 0..(e - s) {
+                        let mut layer = 0usize;
+                        for p in 0..k {
+                            if rects_overlap(rects[p], rects[k]) {
+                                layer = layer.max(layers[p] + 1);
+                            }
+                        }
+                        layers[k] = layer;
+                    }
+                    let mut tagged: Vec<(usize, (f32, Item))> =
+                        layers.into_iter().zip(items.drain(s..e)).collect();
+                    tagged.sort_by_key(|(layer, _)| *layer);
+                    items.splice(s..s, tagged.into_iter().map(|(_, item)| item));
+                }
+                s = e;
+            }
+        }
         let film_at =
             |k: usize| matches!(items.get(k).map(|item| &item.1), Some(Item::Draw(j)) if films[*j]);
         let mut copied = false;
         let mut dirty: Option<[u32; 4]> = None;
         let mut index = 0;
         while index < items.len() {
-            // Keep the receiver set and its cached sun map stable as the camera moves;
-            // cull empty draw rectangles only after fitting the map and sorting items.
-            if bounded && let Item::Draw(i) = items[index].1 {
-                let r = draw_rects[i];
-                if r[2] <= r[0] || r[3] <= r[1] {
-                    index += 1;
-                    continue;
-                }
-            }
             let glass = matches!(items[index].1, Item::Draw(_));
             let aa = glass && glass_samples() == 4;
+            // Consecutive non-film, non-pane glass draws whose padded screen rectangles are
+            // pairwise disjoint share one HDR copy, one lobe clear/pass, per-draw tight reflect
+            // dispatches and one 4x MSAA raster pass, preserving exact back-to-front order and
+            // refraction while avoiding dozens of redundant 66 MB full-screen lobe clears.
+            let mut run_end = index + 1;
+            if bounded
+                && let Item::Draw(first) = items[index].1
+                && !films[first]
+                && pane_records[first].is_empty()
+                && single_span(first)
+            {
+                let mut placed = vec![pad_rect(draw_rects[first], draw_pad[first])];
+                while run_end < items.len() {
+                    let Item::Draw(j) = items[run_end].1 else {
+                        break;
+                    };
+                    if films[j] || !pane_records[j].is_empty() || !single_span(j) {
+                        break;
+                    }
+                    let padded = pad_rect(draw_rects[j], draw_pad[j]);
+                    if placed.iter().any(|&p| rects_overlap(p, padded)) {
+                        break;
+                    }
+                    placed.push(padded);
+                    run_end += 1;
+                }
+            }
+            let disjoint_run = run_end > index + 1;
             if glass {
                 let region = if copied { dirty } else { Some(view_rect) };
                 if let Some(r) = region.filter(|r| r[2] > r[0] && r[3] > r[1]) {
@@ -3238,14 +3428,20 @@ impl Renderer {
                 dirty = None;
                 if let (Item::Draw(first), Some(group)) = (&items[index].1, &reflection_group) {
                     let reflection = self.view.transparency_reflections.as_ref().unwrap();
-                    // A run of films shares one lobe pass and one trace: where films overlap,
-                    // each reads the reflection of the one drawn last there.
+                    // A run of films or screen-disjoint glass draws shares one lobe pass and trace.
                     let run: Vec<usize> = if films[*first] {
                         (index..items.len())
                             .take_while(|&k| film_at(k))
                             .map(|k| match items[k].1 {
                                 Item::Draw(j) => j,
                                 Item::Emitter(_) => unreachable!("film_at"),
+                            })
+                            .collect()
+                    } else if disjoint_run {
+                        (index..run_end)
+                            .map(|k| match items[k].1 {
+                                Item::Draw(j) => j,
+                                Item::Emitter(_) => unreachable!("disjoint_run"),
                             })
                             .collect()
                     } else {
@@ -3264,13 +3460,40 @@ impl Renderer {
                         });
                         m.counts.nonreflective_lobe_runs += u64::from(!reflective);
                     }
-                    // The run's rectangle: its draws' conservative bounds.
-                    let run_rect = run.iter().map(|&j| draw_rects[j]).reduce(union).unwrap_or([0; 4]);
+                    // The run's rectangle: its draws' conservative bounds, padded so tp_reflect
+                    // clears the immediate border for 3x3 MSAA-edge / 2x1 checkerboard gathers.
+                    let reflect_rect_of = |r: [u32; 4]| -> [u32; 4] {
+                        if rt {
+                            pad_rect(r, 1)
+                        } else {
+                            let p = pad_rect(r, 2);
+                            [
+                                p[0] & !1,
+                                p[1],
+                                (p[2].saturating_add(1) & !1).min(size.width),
+                                p[3],
+                            ]
+                        }
+                    };
+                    let run_rect = reflect_rect_of(
+                        run.iter().map(|&j| draw_rects[j]).reduce(union).unwrap_or([0; 4]),
+                    );
                     let rect_mode = bounded && rect_reflect();
-                    let direct = rect_mode && measurement::area(run_rect) <= RECT_DIRECT_PIXELS;
+                    let per_draw_reflect = disjoint_run && rect_mode;
+                    let direct =
+                        per_draw_reflect || (rect_mode && measurement::area(run_rect) <= RECT_DIRECT_PIXELS);
                     let queried = bounded && !direct;
                     let slot = if rect_mode { (*first as u64 + 1) * RECT_SLOT } else { 0 };
-                    if rect_mode {
+                    if per_draw_reflect {
+                        for &j in &run {
+                            let r = reflect_rect_of(draw_rects[j]);
+                            self.queue.write_buffer(
+                                reflect_rects.as_ref().unwrap(),
+                                (j as u64 + 1) * RECT_SLOT,
+                                &r.map(u32::to_ne_bytes).concat(),
+                            );
+                        }
+                    } else if rect_mode {
                         self.queue.write_buffer(
                             reflect_rects.as_ref().unwrap(),
                             slot,
@@ -3368,8 +3591,15 @@ impl Renderer {
                     part!("transparency.reflection");
                     if let Some(m) = &mut measurement {
                         m.counts.reflection_dispatches += 1;
-                        m.counts.reflection_pixels +=
-                            u64::from(size.width) * u64::from(size.height);
+                        m.counts.reflection_pixels += if per_draw_reflect {
+                            run.iter()
+                                .map(|&j| measurement::area(pad_rect(draw_rects[j], 1)))
+                                .sum()
+                        } else if direct {
+                            measurement::area(run_rect)
+                        } else {
+                            u64::from(size.width) * u64::from(size.height)
+                        };
                     }
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("TP2 R1 glass reflection"),
@@ -3388,21 +3618,45 @@ impl Renderer {
                         pass.dispatch_workgroups_indirect(&gpu.lobe_args, 12);
                     }
                     pass.set_pipeline(&reflection.pipeline);
-                    pass.set_bind_group(0, group, &[slot as u32]);
                     pass.set_bind_group(1, arrays, &[]);
                     pass.set_bind_group(2, materials, &[]);
                     pass.set_bind_group(3, self.lighting.bind(), &[]);
-                    if direct {
+                    if let Some(sun_group) = &reflection_sun_group {
+                        pass.set_bind_group(
+                            primary_ray_gpu::reflection_hits_gpu::hit_sun::GROUP,
+                            sun_group,
+                            &[],
+                        );
+                    }
+                    let tile_x = if rt { 8u32 } else { 16u32 };
+                    if per_draw_reflect {
+                        for &j in &run {
+                            let r = reflect_rect_of(draw_rects[j]);
+                            let width = r[2].saturating_sub(r[0]);
+                            let height = r[3].saturating_sub(r[1]);
+                            if width > 0 && height > 0 {
+                                pass.set_bind_group(
+                                    0,
+                                    group,
+                                    &[((j as u64 + 1) * RECT_SLOT) as u32],
+                                );
+                                pass.dispatch_workgroups(width.div_ceil(tile_x), height.div_ceil(8), 1);
+                            }
+                        }
+                    } else if direct {
+                        pass.set_bind_group(0, group, &[slot as u32]);
                         let width = run_rect[2].saturating_sub(run_rect[0]);
                         let height = run_rect[3].saturating_sub(run_rect[1]);
                         if width > 0 && height > 0 {
-                            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+                            pass.dispatch_workgroups(width.div_ceil(tile_x), height.div_ceil(8), 1);
                         }
                     } else if bounded {
+                        pass.set_bind_group(0, group, &[slot as u32]);
                         pass.dispatch_workgroups_indirect(&gpu.lobe_args, 0);
                     } else {
+                        pass.set_bind_group(0, group, &[slot as u32]);
                         pass.dispatch_workgroups(
-                            size.width.div_ceil(8),
+                            size.width.div_ceil(tile_x),
                             size.height.div_ceil(8),
                             1,
                         );
@@ -3517,18 +3771,9 @@ impl Renderer {
             // and the ara-gpu port's raster do. In one pass a front pane overwrote the pane
             // behind it with the colour from before the draw.
             let spans = match items[index].1 {
-                Item::Draw(i)
-                    if glass
-                        && !films[i]
-                        && transparent[i].instances.state.models.len() <= SPAN_INSTANCES =>
-                {
-                    let draw = transparent[i];
-                    let screen = [size.width, size.height];
-                    let rects: Vec<_> = (draw.instances.state.models.iter())
-                        .map(|m| panes::rect(&draw.mesh.bounds, *m, matrix, screen))
-                        .collect();
-                    instance_spans(&rects)
-                }
+                Item::Draw(i) if glass && !disjoint_run => draw_spans[i]
+                    .clone()
+                    .unwrap_or_else(|| vec![(0..u32::MAX, view_rect)]),
                 _ => vec![(0..u32::MAX, view_rect)],
             };
             let first = index;
@@ -3567,6 +3812,14 @@ impl Renderer {
                         if films[i] {
                             (first..items.len())
                                 .take_while(|&k| film_at(k))
+                                .filter_map(|k| match items[k].1 {
+                                    Item::Draw(j) => Some(draw_rects[j]),
+                                    Item::Emitter(_) => None,
+                                })
+                                .reduce(union)
+                                .unwrap_or(view_rect)
+                        } else if disjoint_run {
+                            (first..run_end)
                                 .filter_map(|k| match items[k].1 {
                                     Item::Draw(j) => Some(draw_rects[j]),
                                     Item::Emitter(_) => None,
@@ -3701,10 +3954,11 @@ impl Renderer {
                     }
                     index += 1;
                     // A transparent draw next needs the colour this pass has written so far,
-                    // unless this pass and the next draw are both films: they blend over it.
-                    let films_on = film_at(index - 1) && film_at(index);
+                    // unless it continues a film run or a screen-disjoint glass run.
+                    let stay = (film_at(index - 1) && film_at(index))
+                        || (disjoint_run && index < run_end);
                     if index == items.len()
-                        || (glass && !films_on)
+                        || (glass && !stay)
                         || (!glass && matches!(items[index].1, Item::Draw(_)))
                     {
                         break;

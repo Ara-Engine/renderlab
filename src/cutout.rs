@@ -11,6 +11,7 @@
 //! the cell polygon is clipped to the triangle in uv. Vertices interpolate the source
 //! triangle's attributes; winding follows the source triangle.
 use crate::{MeshData, Vertex};
+use rayon::prelude::*;
 
 /// A coverage mask over uv, sampled bilinearly with repeat wrapping and texel centres at
 /// `(i + 0.5) / width`, as the base-colour texture is.
@@ -93,14 +94,58 @@ pub fn cutout(
             "cutout needs a nonempty mask, cells > 0, finite factors and valid triangles",
         ));
     }
-    let mut out = CutoutMesh::default();
     let grid = f64::from(cells);
-    for triangle in data.indices.chunks_exact(3) {
-        let v = [0, 1, 2].map(|k| data.vertices[triangle[k] as usize]);
+    let tri_count = data.indices.len() / 3;
+    let out = if tri_count >= 16 {
+        let threads = rayon::current_num_threads().max(1);
+        let chunk_tris = (tri_count / (threads * 4)).clamp(1, 64);
+        let chunks: Vec<CutoutMesh> = data
+            .indices
+            .par_chunks(chunk_tris * 3)
+            .map(|tris| cutout_chunk(tris, data.vertices, mask, opacity, cutoff, grid))
+            .collect::<Result<Vec<_>, _>>()?;
+        let total_v: usize = chunks.iter().map(|c| c.vertices.len()).sum();
+        let total_i: usize = chunks.iter().map(|c| c.indices.len()).sum();
+        let mut combined = CutoutMesh {
+            vertices: Vec::with_capacity(total_v),
+            indices: Vec::with_capacity(total_i),
+        };
+        for chunk in chunks {
+            let base = combined.vertices.len() as u32;
+            combined.vertices.extend(chunk.vertices);
+            combined.indices.extend(chunk.indices.into_iter().map(|i| i + base));
+        }
+        combined
+    } else {
+        cutout_chunk(data.indices, data.vertices, mask, opacity, cutoff, grid)?
+    };
+    let extent = data
+        .vertices
+        .iter()
+        .flat_map(|v| v.position)
+        .fold(1e-6f32, |m, c| m.max(c.abs()));
+    Ok(weld(out, extent))
+}
+
+fn cutout_chunk(
+    indices: &[u32],
+    vertices: &[Vertex],
+    mask: &AlphaMask,
+    opacity: f32,
+    cutoff: f32,
+    grid: f64,
+) -> Result<CutoutMesh, crate::Error> {
+    let mut out = CutoutMesh::default();
+    let mut below: Vec<f64> = Vec::new();
+    let mut above: Vec<f64> = Vec::new();
+    for triangle in indices.chunks_exact(3) {
+        let v = [0, 1, 2].map(|k| vertices[triangle[k] as usize]);
         let uv = v.map(|v| [f64::from(v.uv[0]), f64::from(v.uv[1])]);
         let field = |p: [f64; 2]| {
             let w = barycentric(&uv, p).unwrap_or([1.0 / 3.0; 3]);
-            let alpha: f64 = (0..3).map(|k| w[k] * f64::from(v[k].color[3])).sum();
+            let alpha = w[0] * f64::from(v[0].color[3])
+                + w[1] * f64::from(v[1].color[3])
+                + w[2] * f64::from(v[2].color[3]);
             f64::from(opacity * mask.sample([p[0] as f32, p[1] as f32])) * alpha - f64::from(cutoff)
         };
         let area = cross(sub(uv[1], uv[0]), sub(uv[2], uv[0]));
@@ -121,9 +166,11 @@ pub fn cutout(
         }
         // Corner values of one grid row, shared by its cells so neighbours agree exactly.
         let node = |i: i64, j: i64| [i as f64 / grid, j as f64 / grid];
-        let mut below: Vec<f64> = (lo[0]..=hi[0]).map(|i| field(node(i, lo[1]))).collect();
+        below.clear();
+        below.extend((lo[0]..=hi[0]).map(|i| field(node(i, lo[1]))));
         for j in lo[1]..hi[1] {
-            let above: Vec<f64> = (lo[0]..=hi[0]).map(|i| field(node(i, j + 1))).collect();
+            above.clear();
+            above.extend((lo[0]..=hi[0]).map(|i| field(node(i, j + 1))));
             for i in lo[0]..hi[0] {
                 let k = (i - lo[0]) as usize;
                 let corners = [
@@ -133,24 +180,20 @@ pub fn cutout(
                     node(i, j + 1),
                 ];
                 let values = [below[k], below[k + 1], above[k + 1], above[k]];
-                for polygon in cell_polygons(corners, values, || {
+                let (polygons, poly_count) = cell_polygons(corners, values, || {
                     field([(i as f64 + 0.5) / grid, (j as f64 + 0.5) / grid])
-                }) {
-                    let clipped = clip_to_triangle(polygon, &uv, area > 0.0);
-                    if clipped.len() >= 3 {
-                        push_polygon(&mut out, &v, &uv, &clipped, area > 0.0);
+                });
+                for polygon in &polygons[..poly_count] {
+                    let clipped = clip_to_triangle(*polygon, &uv, area > 0.0);
+                    if clipped.len >= 3 {
+                        push_polygon(&mut out, &v, &uv, clipped.as_slice(), area > 0.0);
                     }
                 }
             }
-            below = above;
+            std::mem::swap(&mut below, &mut above);
         }
     }
-    let extent = data
-        .vertices
-        .iter()
-        .flat_map(|v| v.position)
-        .fold(1e-6f32, |m, c| m.max(c.abs()));
-    Ok(weld(out, extent))
+    Ok(out)
 }
 
 /// Joins vertices that share a position and uv (cells emit their own; neighbours compute
@@ -216,6 +259,28 @@ fn barycentric(uv: &[[f64; 2]; 3], p: [f64; 2]) -> Option<[f64; 3]> {
     Some([1.0 - b - c, b, c])
 }
 
+/// Stack-allocated convex uv polygon (a 6-gon clipped by 3 triangle edges has at most 9 vertices).
+#[derive(Clone, Copy)]
+struct Poly {
+    pts: [[f64; 2]; 12],
+    len: usize,
+}
+impl Poly {
+    const EMPTY: Self = Self {
+        pts: [[0.0; 2]; 12],
+        len: 0,
+    };
+    #[inline]
+    fn push(&mut self, p: [f64; 2]) {
+        self.pts[self.len] = p;
+        self.len += 1;
+    }
+    #[inline]
+    fn as_slice(&self) -> &[[f64; 2]] {
+        &self.pts[..self.len]
+    }
+}
+
 /// The inside (value >= 0) region of one cell as counter-clockwise uv polygons.
 /// Corners are counter-clockwise from (i, j). A saddle is one polygon when the centre
 /// is inside, two corner triangles otherwise.
@@ -223,10 +288,10 @@ fn cell_polygons(
     corners: [[f64; 2]; 4],
     values: [f64; 4],
     centre: impl FnOnce() -> f64,
-) -> Vec<Vec<[f64; 2]>> {
+) -> ([Poly; 2], usize) {
     let inside = values.map(|v| v >= 0.0);
     if inside.iter().all(|&i| !i) {
-        return vec![];
+        return ([Poly::EMPTY; 2], 0);
     }
     // Interpolated from the edge's lower (y, then x) node, so the two cells sharing an
     // edge compute the same point bit for bit.
@@ -245,15 +310,16 @@ fn cell_polygons(
     let saddle = inside == [true, false, true, false] || inside == [false, true, false, true];
     if saddle && centre() < 0.0 {
         let first = if inside[0] { 0 } else { 1 };
-        return [first, first + 2]
-            .into_iter()
-            .map(|k| {
-                let (prev, next) = ((k + 3) % 4, (k + 1) % 4);
-                vec![corners[k], crossing(k, next), crossing(k, prev)]
-            })
-            .collect();
+        let mut out = [Poly::EMPTY; 2];
+        for (slot, k) in [first, first + 2].into_iter().enumerate() {
+            let (prev, next) = ((k + 3) % 4, (k + 1) % 4);
+            out[slot].push(corners[k]);
+            out[slot].push(crossing(k, next));
+            out[slot].push(crossing(k, prev));
+        }
+        return (out, 2);
     }
-    let mut polygon = Vec::with_capacity(8);
+    let mut polygon = Poly::EMPTY;
     for k in 0..4 {
         let next = (k + 1) % 4;
         if inside[k] {
@@ -263,11 +329,11 @@ fn cell_polygons(
             polygon.push(crossing(k, next));
         }
     }
-    vec![polygon]
+    ([polygon, Poly::EMPTY], 1)
 }
 
 /// Sutherland-Hodgman clip of a convex counter-clockwise polygon by the uv triangle.
-fn clip_to_triangle(mut polygon: Vec<[f64; 2]>, uv: &[[f64; 2]; 3], ccw: bool) -> Vec<[f64; 2]> {
+fn clip_to_triangle(mut polygon: Poly, uv: &[[f64; 2]; 3], ccw: bool) -> Poly {
     for k in 0..3 {
         let (a, b) = if ccw {
             (uv[k], uv[(k + 1) % 3])
@@ -275,9 +341,9 @@ fn clip_to_triangle(mut polygon: Vec<[f64; 2]>, uv: &[[f64; 2]; 3], ccw: bool) -
             (uv[(k + 1) % 3], uv[k])
         };
         let side = |p: [f64; 2]| cross(sub(b, a), sub(p, a));
-        let mut next = Vec::with_capacity(polygon.len() + 2);
-        for i in 0..polygon.len() {
-            let (p, q) = (polygon[i], polygon[(i + 1) % polygon.len()]);
+        let mut next = Poly::EMPTY;
+        for i in 0..polygon.len {
+            let (p, q) = (polygon.pts[i], polygon.pts[(i + 1) % polygon.len]);
             let (sp, sq) = (side(p), side(q));
             if sp >= 0.0 {
                 next.push(p);
@@ -294,7 +360,7 @@ fn clip_to_triangle(mut polygon: Vec<[f64; 2]>, uv: &[[f64; 2]; 3], ccw: bool) -
             }
         }
         polygon = next;
-        if polygon.len() < 3 {
+        if polygon.len < 3 {
             break;
         }
     }
@@ -312,20 +378,26 @@ fn push_polygon(
     let base = out.vertices.len() as u32;
     for &p in polygon {
         let w = barycentric(uv, p).unwrap_or([1.0 / 3.0; 3]);
-        let mix = |f: &dyn Fn(&Vertex) -> f32| -> f32 {
-            (0..3).map(|k| w[k] * f64::from(f(&v[k]))).sum::<f64>() as f32
+        let mix3 = |a: [f32; 3], b: [f32; 3], c: [f32; 3]| -> [f32; 3] {
+            [0, 1, 2].map(|i| {
+                (w[0] * f64::from(a[i]) + w[1] * f64::from(b[i]) + w[2] * f64::from(c[i])) as f32
+            })
         };
-        let normal = [0, 1, 2].map(|a| mix(&|x| x.normal[a]));
-        let length = normal.iter().map(|n| n * n).sum::<f32>().sqrt();
+        let normal = mix3(v[0].normal, v[1].normal, v[2].normal);
+        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         out.vertices.push(Vertex {
-            position: [0, 1, 2].map(|a| mix(&|x| x.position[a])),
+            position: mix3(v[0].position, v[1].position, v[2].position),
             normal: if length > 1e-20 {
                 normal.map(|n| n / length)
             } else {
                 v[0].normal
             },
             uv: [p[0] as f32, p[1] as f32],
-            color: [0, 1, 2, 3].map(|a| mix(&|x| x.color[a])),
+            color: [0, 1, 2, 3].map(|a| {
+                (w[0] * f64::from(v[0].color[a])
+                    + w[1] * f64::from(v[1].color[a])
+                    + w[2] * f64::from(v[2].color[a])) as f32
+            }),
         });
     }
     for k in 1..polygon.len() as u32 - 1 {
@@ -508,18 +580,18 @@ mod tests {
 
     #[test]
     fn saddle_cells_split_by_their_centre() {
-        let polygons = cell_polygons(
+        let (_, split_count) = cell_polygons(
             [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             [1.0, -1.0, 1.0, -1.0],
             || -0.5,
         );
-        assert_eq!(polygons.len(), 2);
-        let joined = cell_polygons(
+        assert_eq!(split_count, 2);
+        let (joined, joined_count) = cell_polygons(
             [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             [1.0, -1.0, 1.0, -1.0],
             || 0.5,
         );
-        assert_eq!(joined.len(), 1);
-        assert_eq!(joined[0].len(), 6);
+        assert_eq!(joined_count, 1);
+        assert_eq!(joined[0].len, 6);
     }
 }

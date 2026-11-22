@@ -38,7 +38,7 @@ mod reflection_list_dump;
 #[path = "light_vis_pass.rs"]
 pub(crate) mod light_vis_pass;
 #[path = "reflection_hits_gpu.rs"]
-mod reflection_hits_gpu;
+pub(super) mod reflection_hits_gpu;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 // Lean shading's background-compiled pipelines (program::lean_variant).
 #[path = "lean_gpu.rs"]

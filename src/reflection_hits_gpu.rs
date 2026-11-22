@@ -15,7 +15,7 @@
 use super::*;
 use crate::program::{self, Stage};
 #[path = "reflection_hit_sun.rs"]
-mod hit_sun;
+pub(in crate::renderer) mod hit_sun;
 
 /// Measurement only (`RENDERLAB_RL_HIT_SUN_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`, whose
 /// `floored_inline` pair then holds them): the hits that ask the map for the sun (word 7) and

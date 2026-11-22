@@ -166,27 +166,81 @@ pub(crate) fn repair_candidates(data: &MeshData<'_>, adjacency: &Adjacency) -> V
 }
 
 /// Owned immutable CPU geometry prepared for upload. Created by
-/// `Renderer::prepare_mesh_uploads`; moving source vectors avoids geometry copies
-/// and keeps the adjacency inseparable from the exact vertices/indices it describes.
+/// `Renderer::prepare_mesh_uploads` or `Engine::prepare_meshes`; moving source vectors avoids
+/// geometry copies and prepares adjacency, visibility clusters, and non-RT reflection/GI BVHs
+/// in parallel across CPU cores (sharing one SAH BVH4 build per mesh instead of building twice).
 pub struct MeshUpload {
     pub(crate) primitive: crate::asset::Primitive,
     pub(crate) adjacency: Option<Adjacency>,
+    pub(crate) clusters: Option<crate::renderer::visibility_buffer::ClusterBuilder>,
+    pub(crate) reflection: Option<std::sync::Arc<crate::reflection_software::Blas>>,
+    pub(crate) indirect: Option<crate::gi_bvh::Blas>,
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_uploads(
     primitives: Vec<crate::asset::Primitive>,
     eligible: Vec<bool>,
 ) -> Vec<MeshUpload> {
+    prepare_uploads_full(primitives, eligible, false, false, 0)
+}
+
+pub(crate) fn prepare_uploads_full(
+    primitives: Vec<crate::asset::Primitive>,
+    eligible: Vec<bool>,
+    build_clusters: bool,
+    build_nonrt_bvh: bool,
+    max_reflection_bytes: u64,
+) -> Vec<MeshUpload> {
     let prepare = |(primitive, eligible): (crate::asset::Primitive, bool)| {
-        let adjacency = eligible.then(|| {
-            build(&MeshData {
-                vertices: &primitive.vertices,
-                indices: &primitive.indices,
-            })
-        });
+        let data = MeshData {
+            vertices: &primitive.vertices,
+            indices: &primitive.indices,
+        };
+        let adjacency = eligible.then(|| build(&data));
+        let clusters = build_clusters.then(|| crate::renderer::visibility_buffer::source_clusters(&data));
+        let (reflection, indirect) = if build_nonrt_bvh {
+            let positions: Vec<[f32; 3]> = primitive.vertices.iter().map(|v| v.position).collect();
+            let tri_count = primitive.indices.len() / 3;
+            let want_reflection = clusters.is_some()
+                && tri_count <= crate::reflection_software::MAX_TRIANGLES
+                && (tri_count as u64).saturating_mul(64) <= max_reflection_bytes / 2;
+            match crate::gi_bvh::build(&positions, &primitive.indices) {
+                Ok(bvh) => {
+                    let reflection = want_reflection
+                        .then(|| {
+                            if crate::reflection_software::bvh4_enabled() {
+                                crate::reflection_software::Blas::from_bvh(
+                                    &positions,
+                                    &primitive.indices,
+                                    &bvh,
+                                )
+                            } else {
+                                crate::reflection_software::Blas::build(
+                                    &positions,
+                                    &primitive.indices,
+                                )
+                            }
+                        })
+                        .flatten()
+                        .map(std::sync::Arc::new);
+                    let indirect = crate::gi_bvh::Blas::new(bvh, 0).ok().map(|mut blas| {
+                        blas.exact = true;
+                        blas
+                    });
+                    (reflection, indirect)
+                }
+                Err(_) => (None, None),
+            }
+        } else {
+            (None, None)
+        };
         MeshUpload {
             primitive,
             adjacency,
+            clusters,
+            reflection,
+            indirect,
         }
     };
     #[cfg(test)]
@@ -197,6 +251,9 @@ pub(crate) fn prepare_uploads(
             .map(|primitive| MeshUpload {
                 primitive,
                 adjacency: None,
+                clusters: None,
+                reflection: None,
+                indirect: None,
             })
             .collect();
     }

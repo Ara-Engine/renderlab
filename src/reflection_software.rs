@@ -97,10 +97,20 @@ impl Blas {
     }
 
     fn build_sah4(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
-        use crate::asset::cluster_bvh::{EMPTY, LEAF_BIT};
         // The shared builder limits SAH to 15 BVH4 levels (median fallback beyond
         // that): at most 1 + 3*15 pending children, fitting WGSL's 48 entries.
         let bvh = crate::asset::near_field::build_bvh_sah(positions, indices).ok()?;
+        Self::from_bvh(positions, indices, &bvh)
+    }
+
+    /// Packs software reflection geometry from an already-built SAH BVH4 (`build_bvh_sah`),
+    /// avoiding a duplicate BVH build when the non-RT GI cache also needs the same mesh BVH.
+    pub(crate) fn from_bvh(
+        positions: &[[f32; 3]],
+        indices: &[u32],
+        bvh: &crate::asset::cluster_bvh::Bvh,
+    ) -> Option<Self> {
+        use crate::asset::cluster_bvh::{EMPTY, LEAF_BIT};
         let tag = |child: u32| {
             if child == EMPTY {
                 return EMPTY;
@@ -119,19 +129,27 @@ impl Blas {
             nodes.extend(node.lower.map(u32::from_le_bytes));
             nodes.extend(node.upper.map(u32::from_le_bytes));
         }
-        // Recover every original primitive, including identical index triplets.
-        // Map iteration never controls output: each reordered triplet pops its
-        // next original ID, deterministically, with source winding unchanged.
-        let mut ids = std::collections::HashMap::<[u32; 3], Vec<u32>>::new();
+        // Recover every original primitive, including identical index triplets, with one flat
+        // linked-list array (zero per-triangle Vec allocations). Pushing in reverse makes the
+        // head pop ascending original IDs, matching the previous Vec::pop order identically.
+        let tri_count = indices.len() / 3;
+        let mut head = std::collections::HashMap::<[u32; 3], u32>::with_capacity(tri_count);
+        let mut next = vec![u32::MAX; tri_count];
         for (id, tri) in indices.chunks_exact(3).enumerate().rev() {
-            ids.entry([tri[0], tri[1], tri[2]])
-                .or_default()
-                .push(id as u32);
+            let key = [tri[0], tri[1], tri[2]];
+            if let Some(prev) = head.insert(key, id as u32) {
+                next[id] = prev;
+            }
         }
         let mut triangles = Vec::with_capacity(bvh.indices.len() / 3 * TRIANGLE_WORDS);
         for tri in bvh.indices.chunks_exact(3) {
             let key = [tri[0], tri[1], tri[2]];
-            let id = ids.get_mut(&key)?.pop()?;
+            let slot = head.get_mut(&key)?;
+            let id = *slot;
+            if id == u32::MAX {
+                return None;
+            }
+            *slot = next[id as usize];
             let [a, b, c] = key.map(|i| positions[i as usize]);
             let e1: [f32; 3] = std::array::from_fn(|i| b[i] - a[i]);
             let e2: [f32; 3] = std::array::from_fn(|i| c[i] - a[i]);

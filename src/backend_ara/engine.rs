@@ -618,6 +618,40 @@ impl Engine {
     pub fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
         self.insert_mesh(data, None)
     }
+    pub fn prepare_meshes(
+        &self,
+        primitives: Vec<crate::engine::Primitive>,
+    ) -> Result<Vec<crate::engine::MeshUpload>, Error> {
+        for p in &primitives {
+            if let Some(t) = &p.tangents {
+                crate::asset::validate_tangents(&p.vertices, &p.indices, t)
+                    .map_err(|_| Error::InvalidInput("invalid unit tangent frame or handedness"))?;
+            }
+        }
+        Ok(primitives
+            .into_iter()
+            .map(|primitive| crate::engine::MeshUpload {
+                primitive,
+                adjacency: None,
+                clusters: None,
+                reflection: None,
+                indirect: None,
+            })
+            .collect())
+    }
+    pub fn create_prepared_mesh(
+        &mut self,
+        prepared: crate::engine::MeshUpload,
+    ) -> Result<MeshId, Error> {
+        let p = prepared.primitive;
+        self.meshes += 1;
+        Ok(self.state.meshes.insert(Mesh::Static {
+            key: self.meshes,
+            vertices: p.vertices,
+            indices: p.indices,
+            tangents: p.tangents,
+        }))
+    }
     fn insert_mesh(
         &mut self,
         data: &MeshData<'_>,

@@ -48,7 +48,7 @@ pub use crate::{
     AtmosphereMedium, Camera, ColorKey, ColourLut, Decal, DecalBlend, DecalTexture,
     DecalTextureKind, DecalTextures, DepthOfField, EmitterDescriptor, Error, Events, Flipbook,
     Forces, FrameId, FrameReport, HeightFog, Light, Limits, LocalShadows, MAX_CURVE_KEYS,
-    MAX_PARTICLES, Mat4, MeshData, PlaneCollision, PostSettings, ReflectionSettings, ReloadError,
+    MAX_PARTICLES, Mat4, MeshData, MeshUpload, PlaneCollision, PostSettings, ReflectionSettings, ReloadError,
     ReloadReport, RenderScale, Renderer, SizeKey, SpawnShape, SpriteAlignment, Tonemapper,
     Transparency, Value, Vec3, Vertex, ViewId, ViewMode, VolumetricFog,
 };
@@ -467,11 +467,49 @@ impl Engine {
         }
         Ok(id)
     }
+    /// Prepares owned primitives concurrently on CPU worker threads (receiver adjacency,
+    /// visibility clusters, and on non-RT a single shared SAH BVH4 for both software reflections
+    /// and GI). Upload each result in order with [`Self::create_prepared_mesh`].
+    pub fn prepare_meshes(&self, primitives: Vec<Primitive>) -> Result<Vec<MeshUpload>, Error> {
+        self.renderer.prepare_mesh_uploads(primitives)
+    }
+    /// Uploads a mesh prepared by [`Self::prepare_meshes`], reusing its prebuilt CPU structures
+    /// without rebuilding adjacency, clusters or BVHs on the render thread.
+    pub fn create_prepared_mesh(&mut self, mut prepared: MeshUpload) -> Result<MeshId, Error> {
+        let mesh = self.admit("mesh upload admission timed out", |r| {
+            r.try_upload_prepared_mesh(&prepared)
+        })?;
+        let indirect = prepared.indirect.take();
+        let id = self.insert_mesh_with_blas(
+            mesh,
+            &prepared.primitive.vertices,
+            &prepared.primitive.indices,
+            indirect,
+        )?;
+        if let Some(dump) = &mut self.dump {
+            dump.mesh(
+                id,
+                &prepared.primitive.vertices,
+                &prepared.primitive.indices,
+                prepared.primitive.tangents.as_ref(),
+            );
+        }
+        Ok(id)
+    }
     fn insert_mesh(
         &mut self,
         mesh: Mesh,
         vertices: &[Vertex],
         indices: &[u32],
+    ) -> Result<MeshId, Error> {
+        self.insert_mesh_with_blas(mesh, vertices, indices, None)
+    }
+    fn insert_mesh_with_blas(
+        &mut self,
+        mesh: Mesh,
+        vertices: &[Vertex],
+        indices: &[u32],
+        indirect: Option<crate::gi_bvh::Blas>,
     ) -> Result<MeshId, Error> {
         if crate::renderer::change_log::enabled() {
             crate::renderer::change_log::report(
@@ -486,9 +524,13 @@ impl Engine {
             );
         }
         if self.path == RenderPath::NonRt {
-            let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
-            self.renderer
-                .set_indirect_geometry(&mesh, &positions, indices)?;
+            if let Some(blas) = indirect {
+                self.renderer.set_indirect_blas(&mesh, blas)?;
+            } else {
+                let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
+                self.renderer
+                    .set_indirect_geometry(&mesh, &positions, indices)?;
+            }
         }
         Ok(self.state.meshes.insert(MeshEntry::Static(mesh)))
     }

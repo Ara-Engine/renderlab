@@ -199,7 +199,7 @@ pub(crate) fn borrow_on() -> bool {
 /// while holding full visual quality. `RENDERLAB_GI_FIXED=N` overrides (0 restores legacy queue).
 const FIXED_RAYS_SOFTWARE: u32 = 98_304;
 const FIXED_RAYS_HARDWARE: u32 = 196_608;
-const FIXED_RAYS_FG_SOFTWARE: u32 = 65_536;
+const FIXED_RAYS_FG_SOFTWARE: u32 = 12_288;
 const FIXED_RAYS_FG_HARDWARE: u32 = 393_216;
 pub(crate) fn fixed_rays(software: bool) -> u32 {
     static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
@@ -363,7 +363,7 @@ const NEAR_OCCLUDED_RAYS: u32 = 4;
 /// timing changed which frames ran: the multi-view test failed on some runs.
 /// `RENDERLAB_GI_STILL_BATCH=0` runs every frame.
 const STILL_BATCH: u32 = 4;
-const STILL_BATCH_SETTLE: u32 = 48;
+const STILL_BATCH_SETTLE: u32 = 24;
 /// Play loop (sunrt, 2026-11-16): a re-skinned mesh's software geometry is patched in place
 /// (`patch_skinned_blas`); `RENDERLAB_GI_SKIN_PATCH=0` repacks every mesh, as before.
 /// Play loop (sunrt, 2026-11-16): a re-skinned mesh refits its software tree to each pose
@@ -3193,7 +3193,7 @@ impl Renderer {
         }
         Ok(())
     }
-    fn set_indirect_blas(&mut self, mesh: &Mesh, blas: Blas) -> Result<(), Error> {
+    pub(crate) fn set_indirect_blas(&mut self, mesh: &Mesh, blas: Blas) -> Result<(), Error> {
         if !Arc::ptr_eq(&self.identity, &mesh.renderer) {
             return Err(Error::InvalidInput("mesh belongs to another renderer"));
         }

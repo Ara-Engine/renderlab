@@ -113,6 +113,38 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     // The gather's kernels are in the kernel half whether or not it runs.
     composed.source.push_str(&emitter_readers());
     let mut kernel = SOURCE.split_once(ENTRY_SEAM).unwrap().1.to_string();
+    // On the non-RT software-BVH path, tracing 32 rays/probe every single frame costs ~21 ms at
+    // 1080p. Use 16 rays/probe (1 warp = 32 lanes for 2 slots/blocks) plus adaptive half/quarter
+    // update rate (full rate on cuts/disocclusions/movers, half rate in motion, quarter rate once
+    // settled), keeping RT at full-rate 32 rays untouched.
+    if head.contains(program::SOFTWARE_REFLECTION_GEOMETRY) {
+        for (old, new) in [
+            ("const FG_RAYS:u32=32u;", "const FG_RAYS:u32=16u;"),
+            ("const FG_HALF_RATE:bool=false;", "const FG_HALF_RATE:bool=true;"),
+            ("const FG_HALF_MIN:f32=8.0;", "const FG_HALF_MIN:f32=2.0;"),
+            ("const FG_STABLE_RATE:u32=4u;", "const FG_STABLE_RATE:u32=8u;"),
+            ("const FG_CONE:f32=0.45764912225414734;", "const FG_CONE:f32=0.6699245760027112;"),
+            (
+                "var<workgroup> fg_lane_sh:array<array<f32,40>,64>;",
+                "var<workgroup> fg_lane_sh:array<array<f32,40>,32>;",
+            ),
+            (
+                "var<workgroup> fg_nee_sh:array<array<f32,12>,64>;",
+                "var<workgroup> fg_nee_sh:array<array<f32,12>,32>;",
+            ),
+            (
+                "@compute @workgroup_size(64) fn fg_trace(",
+                "@compute @workgroup_size(32) fn fg_trace(",
+            ),
+            (
+                "@compute @workgroup_size(64) fn fg_adapt(",
+                "@compute @workgroup_size(32) fn fg_adapt(",
+            ),
+        ] {
+            assert_eq!(kernel.matches(old).count(), 1, "non-RT final gather seam: {old}");
+            kernel = kernel.replacen(old, new, 1);
+        }
+    }
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
     // no line break and is applied to the kernel text alone: the earlier two-line pattern on the
@@ -836,6 +868,59 @@ mod tests {
                     naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), Some(&pipeline))
                 }));
                 assert!(matches!(written, Ok(Ok(_))), "SPIR-V of {}", entry.name);
+            }
+        }
+    }
+    #[test]
+    fn kernel_module_validates_both_rt_and_non_rt_paths() {
+        let prelude = include_str!("../shaders/scene.wgsl");
+        let mut rt_head = super::super::shading_heads(prelude).unwrap()[0].clone();
+        let mut non_rt_head = super::super::non_rt_sources(prelude).unwrap().1[0].clone();
+        default_head_for(&mut rt_head, true, None);
+        default_head_for(&mut non_rt_head, true, None);
+        for (label, head, expect_half_rate) in [
+            ("rt", &rt_head, false),
+            ("non_rt", &non_rt_head, true),
+        ] {
+            let composed = kernel_module(head);
+            assert_eq!(
+                composed.source.contains("const FG_HALF_RATE:bool=true;"),
+                expect_half_rate,
+                "{label} FG_HALF_RATE mismatch"
+            );
+            let module = naga::front::wgsl::parse_str(&composed.source)
+                .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&composed.source)));
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+            let (module, info) = naga::back::pipeline_constants::process_overrides(
+                &module,
+                &info,
+                None,
+                &Default::default(),
+            )
+            .unwrap();
+            for entry in module
+                .entry_points
+                .iter()
+                .filter(|e| e.name.starts_with("fg_") || e.name == "gi_receiver_pass")
+            {
+                let pipeline = naga::back::spv::PipelineOptions {
+                    shader_stage: naga::ShaderStage::Compute,
+                    entry_point: entry.name.clone(),
+                };
+                let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    naga::back::spv::write_vec(
+                        &module,
+                        &info,
+                        &naga::back::spv::Options::default(),
+                        Some(&pipeline),
+                    )
+                }));
+                assert!(matches!(written, Ok(Ok(_))), "{label} SPIR-V of {}", entry.name);
             }
         }
     }
