@@ -112,7 +112,8 @@ fn gi_hit_identity(inst:u32, tri:vec3<u32>) -> u32 {
     if d.x==0u || inst<d.y || inst-d.y>=d.z { return 0u; }
     return ((d.x<<16u)|(inst-d.y))+1u;
 }
-fn gi_hit_primitive(tri:vec3<u32>) -> u32 { return tri.x; }
+fn gi_hit_primitive(inst:u32, tri:vec3<u32>) -> u32 { return tri.x; }
+fn gi_hit_placement(inst:u32) -> u32 { return inst; }
 // A gather hit's receiver: the traced shading receiver of its triangle (point, plane normal
 // turned toward the ray's origin) and its bin source, the interpolated vertex normal on that
 // side, as gi_probe forms a pixel's.

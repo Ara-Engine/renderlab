@@ -121,9 +121,8 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
         for (old, new) in [
             ("const FG_RAYS:u32=32u;", "const FG_RAYS:u32=16u;"),
             ("const FG_HALF_RATE:bool=false;", "const FG_HALF_RATE:bool=true;"),
-            ("const FG_HALF_MIN:f32=8.0;", "const FG_HALF_MIN:f32=2.0;"),
-            ("const FG_STABLE_RATE:u32=4u;", "const FG_STABLE_RATE:u32=8u;"),
-            ("const FG_CONE:f32=0.45764912225414734;", "const FG_CONE:f32=0.6699245760027112;"),
+            ("const FG_HALF_MIN:f32=8.0;", "const FG_HALF_MIN:f32=12.0;"),
+            ("const FG_STABLE_RATE:u32=4u;", "const FG_STABLE_RATE:u32=4u;"),
             (
                 "var<workgroup> fg_lane_sh:array<array<f32,40>,64>;",
                 "var<workgroup> fg_lane_sh:array<array<f32,40>,32>;",
@@ -368,6 +367,9 @@ pub(super) struct Targets {
     /// frame: 20-word header (recently_changed, gather_frame, bank parity, has_prev, previous VP),
     /// then two words a probe, zero at creation.
     probe_state: Option<Buffer>,
+    /// Per-pixel linear camera ray distance written by `fg_classify` and sampled by `fg_resolve`
+    /// for short-range sub-probe corner contact AO (binding 32, zero extra geometry decode pass).
+    fg_depth: Option<Buffer>,
     gather_frame: u32,
     previous_vp: Option<glam::Mat4>,
     size: [u32; 2],
@@ -444,6 +446,14 @@ impl Renderer {
                     "final gather probe state",
                     FG_STATE_HEAD * 4 + probes * 8,
                     wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                )
+            }),
+            fg_depth: program::final_gather().then(|| {
+                Buffer::new(
+                    self,
+                    "final gather linear depth",
+                    (u64::from(size.width) * u64::from(size.height) * 4).max(4),
+                    wgpu::BufferUsages::STORAGE,
                 )
             }),
             gather_frame: 0,
@@ -637,7 +647,7 @@ impl Renderer {
             let group = self.ledger.own(
                 self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("final gather, group 2"),
-                    entries: &[storage(30, 16), storage(31, FG_STATE_HEAD * 4)],
+                    entries: &[storage(30, 16), storage(31, FG_STATE_HEAD * 4), storage(32, 4)],
                 }),
                 ResourceKind::BindGroupLayout,
             );
@@ -715,11 +725,12 @@ impl Renderer {
         let bindings = state.bindings.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let shade = &**bindings.shade[shading as usize].as_ref().unwrap();
-        if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in), Some(probe_state)) = (
+        if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in), Some(probe_state), Some(fg_depth)) = (
             pipelines.gather.as_ref(),
             pipelines.gather_group.as_ref(),
             target.requests_stand_in.as_ref(),
             target.probe_state.as_ref(),
+            target.fg_depth.as_ref(),
         ) {
             // The cache's list is replaced when its table grows, so the group follows it each frame.
             let requests = self.gi.external_requests();
@@ -730,6 +741,7 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupEntry { binding: 30, resource: requests.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 31, resource: probe_state.value.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 32, resource: fg_depth.value.as_entire_binding() },
                 ],
             });
             // Grids: probe tiles, the filter's 8x4 tiles a group, blocks, two blocks a group,

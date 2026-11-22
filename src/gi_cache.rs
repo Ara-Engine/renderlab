@@ -199,7 +199,7 @@ pub(crate) fn borrow_on() -> bool {
 /// while holding full visual quality. `RENDERLAB_GI_FIXED=N` overrides (0 restores legacy queue).
 const FIXED_RAYS_SOFTWARE: u32 = 98_304;
 const FIXED_RAYS_HARDWARE: u32 = 196_608;
-const FIXED_RAYS_FG_SOFTWARE: u32 = 12_288;
+const FIXED_RAYS_FG_SOFTWARE: u32 = 196_608;
 const FIXED_RAYS_FG_HARDWARE: u32 = 393_216;
 pub(crate) fn fixed_rays(software: bool) -> u32 {
     static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
@@ -1620,9 +1620,14 @@ impl Planner {
         header[11] = s.direction_phases;
         header[12] = s.level_blend.to_bits();
         header[13] = if s.parallel_rays { RAY_ITEMS } else { 0 };
-        // The cut refill: S groups over the S cache frames that start at a reset.
+        let budget = if c.fixed_budget && bounce { fixed_rays(software) } else { 0 };
+        let fixed_trace = budget != 0 && fixed_trace_on();
+        let fixed_settle = budget != 0 && fixed_rest_on();
+        // The cut refill: S groups over the S cache frames that start at a reset. When the fixed
+        // ray budget already paces new-cell tracing (`fixed_trace`), trace every admitted cell's
+        // full directions at once instead of holding them GI_PARTIAL for 4 extra frames.
         let cut_phases = match s.cut_phases {
-            0 if software => 4,
+            0 if software && !fixed_trace => 4,
             0 => 1,
             phases => phases,
         };
@@ -1677,9 +1682,6 @@ impl Planner {
         // (unless claims are set explicitly); steady frames keep main's uncapped claims.
         // Software rays' gathers are held to GATHER_RAYS_SOFTWARE estimated rays a frame
         // instead of a cell count (shaders/gi_cache.wgsl gi_gather_rays).
-        let budget = if c.fixed_budget && bounce { fixed_rays(software) } else { 0 };
-        let fixed_trace = budget != 0 && fixed_trace_on();
-        let fixed_settle = budget != 0 && fixed_rest_on();
         let since_fill = since_clear.min(self.since_cut);
         let fill = first_fill_on(software) && s.claim_cells == u32::MAX && since_fill < FILL_CLAIM_FRAMES;
         let ray_budget = first_fill_on(software) && software && s.gather_cells == 0 && !cut_window;
@@ -2774,15 +2776,19 @@ impl Renderer {
             .filter(|b| b.exact && b.bvh.positions.len() == positions.len() && b.bvh.indices.len() == indices.len())
             .map(|b| {
                 let mut bvh = b.bvh.clone();
-                crate::asset::near_field::refit_bvh(&mut bvh, positions).map(|()| bvh)
+                let primitives = b.primitives.clone();
+                crate::asset::near_field::refit_bvh(&mut bvh, positions).map(|()| (bvh, primitives))
             });
         let refit_ok = matches!(refit, Some(Ok(_)));
-        let bvh = match refit {
-            Some(Ok(bvh)) => bvh,
-            _ => gi_bvh::build(positions, indices)?,
+        let blas = match refit {
+            Some(Ok((bvh, primitives))) => {
+                let mut blas = Blas::new(bvh, 0)?;
+                blas.exact = true;
+                blas.primitives = primitives;
+                blas
+            }
+            _ => Blas::with_primitives(gi_bvh::build(positions, indices)?, indices)?,
         };
-        let mut blas = Blas::new(bvh, 0)?;
-        blas.exact = true;
         let build_ms = built.elapsed().as_secs_f64() * 1000.;
         // Measurement only (change log): why a pose could not patch.
         let diagnosis = super::change_log::enabled().then(|| {
@@ -2841,6 +2847,7 @@ impl Renderer {
                 && a.bvh.leaves.len() == b.bvh.leaves.len()
                 && a.bvh.positions.len() == b.bvh.positions.len()
                 && a.bvh.indices.len() == b.bvh.indices.len()
+                && a.primitives.len() == b.primitives.len()
                 && a.near.is_empty()
                 && b.near.is_empty()
         };
@@ -3112,8 +3119,7 @@ impl Renderer {
         indices: &[u32],
     ) -> Result<(), Error> {
         let bvh = gi_bvh::build(positions, indices)?;
-        let mut blas = Blas::new(bvh, 0)?;
-        blas.exact = true;
+        let blas = Blas::with_primitives(bvh, indices)?;
         self.set_indirect_blas(mesh, blas)
     }
     /// P-S4B: `mesh`'s software geometry when it is the mesh's own full-detail triangles
@@ -4321,12 +4327,18 @@ impl Renderer {
         let mut at = 0;
         for (di, ((d, blas), entry)) in draws.iter().zip(&blases).zip(&p.entry).enumerate() {
             for (ii, model) in d.instances.state.models.iter().enumerate() {
+                let placement = at as u32;
                 let covered = p.covered.get(at).copied().unwrap_or(false);
                 at += 1;
                 if covered {
                     continue;
                 }
                 let e = entry.unwrap();
+                let prim_base = if blas.primitives.is_empty() {
+                    0
+                } else {
+                    p.offsets[e][3] + blas.bvh.indices.len() as u32
+                };
                 records.push((
                     *model,
                     &**blas,
@@ -4338,8 +4350,8 @@ impl Renderer {
                     0,
                     0,
                     u32::from(!d.instances.state.casts_shadows(ii)),
-                    0,
-                    0,
+                    prim_base,
+                    placement,
                     0,
                     0,
                 ]);
@@ -4444,6 +4456,13 @@ impl Renderer {
         if let Some(path) = probe_log_path() {
             let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
             self.gi.probe_log.get_or_insert_with(|| ProbeWatch::new(&self.device)).collect(path, slots);
+        }
+        // Final Gather reads coarse cone cells via gi_external_requests instead of direct per-pixel
+        // cache lookups; mark external_readers before frame 0's encode so gi_probe never floods
+        // the cache with unused fine pixel cells.
+        if crate::program::final_gather() && super::primary_ray_gpu::gi_receiver_pass::enabled(&self.device) {
+            self.gi.request_external();
+            self.gi.request_emitters();
         }
         if self.gi.external_readers {
             let device = &self.device;
@@ -5020,15 +5039,18 @@ impl GiState {
         // when profiling they are empty passes, so every stamp is written.
         let profiling = queries.is_some();
         // Environment-only frames run only scan and integrate; when profiling, the other
-        // passes are empty, so every stamp is written.
+        // passes are empty, so every stamp is written. When Final Gather owns primary GI
+        // (`self.external_readers`), skip gi_probe so the cache only allocates and gathers the
+        // coarse cone cells probes actually sample (no 280k-cell fine pixel cache starvation).
         let traced = !plan.environment_only;
-        if traced || profiling {
+        let probe = traced && !self.external_readers;
+        if probe || profiling {
             main_pass(
                 encoder,
                 "indirect cache probe",
                 &p.probe,
                 0,
-                traced.then_some(plan.groups),
+                probe.then_some(plan.groups),
             );
         }
         if let Some(probe)=self.queue_probe.as_mut() {

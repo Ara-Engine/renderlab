@@ -108,6 +108,7 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
     let inv=gi_safe_inverse(d);
     let nodes=gi_geometry[r+18u];let leaves=gi_geometry[r+19u];
     let positions=gi_geometry[r+20u];let indices=gi_geometry[r+21u];
+    let prim_base=select(gi_geometry[r+28u],0u,GI_SW_SEE_THROUGH && st_mode);
     (*stack)[0]=gi_geometry[r+22u];
     var sp=1u;
     while sp>0u {
@@ -143,7 +144,9 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
                         if any_hit { (*best).hit=true; return true; }
                         gi_hit_transmission*=gi_st_share(r,direction,unit_normal(n));
                     } else {
-                        *best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(ia,ib,ic),h.yz);
+                        var hit_tri=vec3<u32>(ia,ib,ic);
+                        if !any_hit && prim_base!=0u { hit_tri=vec3<u32>(gi_geometry[prim_base+(first+k)/3u],0u,0u); }
+                        *best=GiHit(true,h.x,unit_normal(n),i,hit_tri,h.yz);
                         if any_hit { return true; }
                     }
                 }
@@ -155,7 +158,9 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
                             if any_hit { (*best).hit=true; return true; }
                             gi_hit_transmission*=gi_st_share(r,direction,unit_normal(n));
                         } else {
-                            *best=GiHit(true,h2.x,unit_normal(n),i,vec3<u32>(ja,jb,jc),h2.yz);
+                            var hit_tri=vec3<u32>(ja,jb,jc);
+                            if !any_hit && prim_base!=0u { hit_tri=vec3<u32>(gi_geometry[prim_base+(first+k)/3u+1u],0u,0u); }
+                            *best=GiHit(true,h2.x,unit_normal(n),i,hit_tri,h2.yz);
                             if any_hit { return true; }
                         }
                     }
@@ -302,10 +307,23 @@ fn gi_hit_identity(inst:u32, tri:vec3<u32>) -> u32 {
     }
     return found;
 }
-fn gi_hit_primitive(tri:vec3<u32>) -> u32 { return GI_NO_PRIMITIVE; }
-// A gather hit's receiver: its point, and its plane normal turned toward the ray's origin as
-// the bin source (no vertex normals here).
+fn gi_hit_primitive(inst:u32, tri:vec3<u32>) -> u32 {
+    if inst>=gi_geometry[0] || gi_geometry[16u+inst*GI_INSTANCE_WORDS+28u]==0u { return GI_NO_PRIMITIVE; }
+    return tri.x;
+}
+fn gi_hit_placement(inst:u32) -> u32 {
+    return gi_geometry[16u+inst*GI_INSTANCE_WORDS+29u];
+}
+// A gather hit's receiver: exact interpolated vertex normal & world position when the mesh
+// carries render primitive indices (matching RT), falling back to the facet plane normal on
+// cooked far-field cuts.
 fn gi_hit_receiver(origin:vec3<f32>, d:vec3<f32>, h:GiHit) -> GiReceiver {
+    let primitive=gi_hit_primitive(h.inst,h.tri);
+    if primitive!=GI_NO_PRIMITIVE {
+        let r=gi_receiver(vec4<u32>(gi_hit_placement(h.inst)+1u,primitive,bitcast<vec2<u32>>(h.bary)));
+        let viewed=select(-r.geometric,r.geometric,dot(r.geometric,-d)>=0.0);
+        return GiReceiver(r.world,viewed,gi_bin_source(viewed,r.vertex));
+    }
     let viewed=select(-h.normal,h.normal,dot(h.normal,-d)>=0.0);
     return GiReceiver(origin+d*h.t,viewed,viewed);
 }

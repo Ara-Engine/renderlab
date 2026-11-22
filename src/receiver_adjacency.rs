@@ -224,10 +224,7 @@ pub(crate) fn prepare_uploads_full(
                         })
                         .flatten()
                         .map(std::sync::Arc::new);
-                    let indirect = crate::gi_bvh::Blas::new(bvh, 0).ok().map(|mut blas| {
-                        blas.exact = true;
-                        blas
-                    });
+                    let indirect = crate::gi_bvh::Blas::with_primitives(bvh, &primitive.indices).ok();
                     (reflection, indirect)
                 }
                 Err(_) => (None, None),

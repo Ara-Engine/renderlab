@@ -108,6 +108,9 @@ const GI_H_PIXEL_CELLS:u32=28u;
 // Levels above the pixels' that a gather hit inside a moved caster's swept bounds reads at
 // least (gi_hit_level; 0: none): src/gi_cache.rs IndirectSettings::mover_hit_levels.
 const GI_H_MOVER_LEVELS:u32=29u;
+// Fixed whole-cache update budget & per-cell settling header words (gi_cache.wgsl / reflection_cache_hits.wgsl).
+const GI_H_FIXED_RAYS:u32=45u;
+const GI_H_FIXED_SETTLE:u32=51u;
 const GI_FILTER_SKY:u32=1u;
 const GI_FILTER_BOUNCE:u32=2u;
 // Bit 2: contrast refine (gi_filter_cell), with the sky filter.

@@ -95,7 +95,8 @@ fn gs_triangle_input(p:u32, primitive:u32, bary:vec2<f32>, q:vec3<f32>, nc:vec3<
     let info=primary_placements[p];
     let batch=info&0x1fffffffu;
     let frame=gi_basis(nc);
-    let dx=frame[0]*edge;let dy=frame[1]*edge;
+    let grad_edge=edge*0.25;
+    let dx=frame[0]*grad_edge;let dy=frame[1]*grad_edge;
     let material=primary_materials[batch].value;
     let eye=q+nc;
     if primitive==GI_NO_PRIMITIVE {

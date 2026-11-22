@@ -54,6 +54,10 @@ pub(crate) struct Blas {
     /// (`set_indirect_geometry`), so its triangles are the render triangles that sun visibility
     /// may test exactly (src/sunvis_s4.rs).
     pub exact: bool,
+    /// Original render primitive index per triangle in `bvh.indices` (empty for cooked cuts and
+    /// merged worlds). Lets non-RT GI cell shading and gathers evaluate exact UVs, vertex colors,
+    /// and smooth vertex normals instead of collapsing to a 1x1 mip (`GI_NO_PRIMITIVE`).
+    pub primitives: Vec<u32>,
 }
 impl Blas {
     /// Level `level` of `bvh` (a zero-error regular build has one).
@@ -71,13 +75,22 @@ impl Blas {
             hi,
             near: vec![],
             exact: false,
+            primitives: vec![],
         })
+    }
+    /// Exact full-detail BLAS retaining each BVH triangle's original render primitive index.
+    pub(crate) fn with_primitives(bvh: Bvh, indices: &[u32]) -> Result<Self, Error> {
+        let mut blas = Self::new(bvh, 0)?;
+        blas.exact = true;
+        blas.primitives = map_primitives(&blas.bvh.indices, indices);
+        Ok(blas)
     }
     pub(crate) fn words(&self) -> usize {
         self.bvh.nodes.len() * NODE_WORDS
             + self.bvh.leaves.len() * LEAF_WORDS
             + self.bvh.positions.len() * POSITION_WORDS
             + self.bvh.indices.len()
+            + self.primitives.len()
     }
     /// The base word of the near-field masks cooked under exactly `model`, given this
     /// mesh's mask bases in the packed buffer; 0 when none matches.
@@ -89,6 +102,37 @@ impl Blas {
             .find(|(n, _)| bits(&n.model) == bits(model))
             .map_or(0, |(_, &b)| b)
     }
+}
+/// Recovers each reordered BVH triangle's original render primitive index in O(N) using one flat
+/// linked-list array (handling duplicate index triplets cleanly).
+fn map_primitives(bvh_indices: &[u32], source_indices: &[u32]) -> Vec<u32> {
+    let tri_count = source_indices.len() / 3;
+    let bvh_tris = bvh_indices.len() / 3;
+    if tri_count == 0 || bvh_tris == 0 {
+        return vec![];
+    }
+    let mut head = std::collections::HashMap::<[u32; 3], u32>::with_capacity(tri_count);
+    let mut next = vec![u32::MAX; tri_count];
+    for (id, tri) in source_indices.chunks_exact(3).enumerate().rev() {
+        let key = [tri[0], tri[1], tri[2]];
+        if let Some(prev) = head.insert(key, id as u32) {
+            next[id] = prev;
+        }
+    }
+    let mut primitives = Vec::with_capacity(bvh_tris);
+    for tri in bvh_indices.chunks_exact(3) {
+        let key = [tri[0], tri[1], tri[2]];
+        let Some(slot) = head.get_mut(&key) else {
+            return vec![];
+        };
+        let id = *slot;
+        if id == u32::MAX {
+            return vec![];
+        }
+        *slot = next[id as usize];
+        primitives.push(id);
+    }
+    primitives
 }
 fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
     points.fold(
@@ -170,6 +214,10 @@ pub(crate) fn mesh_words(
             at += POSITION_WORDS;
         }
         words[at..at + b.bvh.indices.len()].copy_from_slice(&b.bvh.indices);
+        at += b.bvh.indices.len();
+        if !b.primitives.is_empty() {
+            words[at..at + b.primitives.len()].copy_from_slice(&b.primitives);
+        }
         for (n, &base) in b.near.iter().zip(bases) {
             words[base as usize..base as usize + n.masks.len()].copy_from_slice(&n.masks);
         }
@@ -368,5 +416,29 @@ mod tests {
         assert!((row0[0] * 5.0 + row0[3]).abs() < 1e-6);
         assert!(instance_words(&[(Mat4::ZERO, &blas, offsets[0], 0)]).is_err());
         assert!(build(&[[0.0; 3]], &[0, 0]).is_err());
+    }
+
+    #[test]
+    fn with_primitives_maps_reordered_triangles_including_duplicates() {
+        let (p, mut i) = grid(6);
+        // Append a duplicate triangle to confirm the flat linked-list mapper assigns distinct IDs.
+        i.extend_from_slice(&[i[0], i[1], i[2]]);
+        let bvh = build(&p, &i).unwrap();
+        let blas = Blas::with_primitives(bvh, &i).unwrap();
+        let tri_count = i.len() / 3;
+        assert!(blas.exact);
+        assert_eq!(blas.primitives.len(), tri_count);
+        let mut seen = vec![false; tri_count];
+        for (bvh_tri, &orig_prim) in blas.bvh.indices.chunks_exact(3).zip(&blas.primitives) {
+            let p_idx = orig_prim as usize;
+            assert!(!seen[p_idx], "duplicate primitive id {p_idx}");
+            seen[p_idx] = true;
+            assert_eq!(bvh_tri, &i[p_idx * 3..p_idx * 3 + 3]);
+        }
+        assert!(seen.iter().all(|&s| s));
+        let (offsets, near, total) = layout(&[&blas], 1);
+        let words = mesh_words(&[&blas], &offsets, &near, total);
+        let prim_base = offsets[0][3] as usize + blas.bvh.indices.len();
+        assert_eq!(&words[prim_base..prim_base + tri_count], &blas.primitives);
     }
 }

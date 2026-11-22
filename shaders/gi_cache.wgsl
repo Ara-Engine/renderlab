@@ -1475,9 +1475,10 @@ fn gi_setup_point(slot:u32, r:GiCandidate, split:bool) {
     let cold=gi_cold(slot);
     for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_POINT+i]=bitcast<u32>(r.q[i]); }
     var axis=r.n.xyz;
-    let primitive=gi_hit_primitive(r.tri.xyz);
+    let inst=r.tri.w&0x7fffffffu;
+    let primitive=gi_hit_primitive(inst,r.tri.xyz);
     if primitive!=GI_NO_PRIMITIVE {
-        let rec=gi_receiver(vec4<u32>((r.tri.w&0x7fffffffu)+1u,primitive,bitcast<vec2<u32>>(r.bary)));
+        let rec=gi_receiver(vec4<u32>(gi_hit_placement(inst)+1u,primitive,bitcast<vec2<u32>>(r.bary)));
         if dot(rec.vertex,rec.vertex)>1e-12 {
             let v=normalize(rec.vertex);
             axis=select(-v,v,dot(v,r.n.xyz)>=0.0);
@@ -1487,9 +1488,8 @@ fn gi_setup_point(slot:u32, r:GiCandidate, split:bool) {
     gi_table[cold+GI_C_STATE]=GI_QUEUED|select(0u,GI_SPLIT,split)
         |(gi_table[cold+GI_C_STATE]&(GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_SHADE));
     for(var w=0u;w<GI_MAX_WORDS;w+=1u) { gi_table[cold+GI_C_NEAR+w]=0u; }
-    let inst=r.tri.w&0x7fffffffu;
     gi_table[cold+GI_C_MATERIAL]=gi_hit_identity(inst,r.tri.xyz);
-    gi_table[cold+GI_C_PRIMITIVE]=gi_hit_primitive(r.tri.xyz);
+    gi_table[cold+GI_C_PRIMITIVE]=primitive;
     gi_table[cold+GI_C_BARY]=pack2x16unorm(r.bary);
 }
 // Lane 0's part of setup for a cell with a query point: the pending directions (into the
@@ -2275,9 +2275,7 @@ var<workgroup> gi_wg_valued:atomic<u32>;
 // (gi_schedule) only mark cells; a gather stamps its cell and schedules nothing (gi_gather_done).
 // Convergence comes from the age order: every used cell is gathered again in turn, each gather
 // reading the others' last values (the bounce series' next term).
-const GI_H_FIXED_RAYS:u32=45u;
 const GI_H_FIXED_TRACE:u32=44u;
-const GI_H_FIXED_SETTLE:u32=51u;
 const GI_FIXED_NONE:u32=95u;
 const GI_FIXED_DIRTY:u32=94u;
 const GI_FIXED_AGES:u32=93u;

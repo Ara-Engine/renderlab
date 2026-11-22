@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 /// The white-furnace fixture (analytic scenes for every indirect-light estimator).
 #[path = "gi_furnace_tests.rs"]
 mod furnace;
+/// Reference-backed GI/RT quality, parity, corner-AO, and 1080p stability suite.
+#[path = "gi_quality_tests.rs"]
+mod quality;
 // DC1 reuses the existing headless devices, quarry loader and image/timing helpers.
 #[path = "decal_gpu_tests.rs"]
 mod decal_tests;
@@ -3319,6 +3322,9 @@ fn gpu_software_hit_normals_follow_instance_transforms() {
     );
     let source = [
         "fn unit_normal(n:vec3<f32>) -> vec3<f32> { return normalize(n); }",
+        "struct GiReceiver { world:vec3<f32>, geometric:vec3<f32>, vertex:vec3<f32> };",
+        "fn gi_receiver(r:vec4<u32>) -> GiReceiver { return GiReceiver(vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0)); }",
+        "fn gi_bin_source(v:vec3<f32>, n:vec3<f32>) -> vec3<f32> { return v; }",
         // gi_rays_software.wgsl's gi_hit_primitive returns gi_cells.wgsl's sentinel.
         "const GI_NO_PRIMITIVE:u32=0xffffffffu;",
         include_str!("../shaders/gi_rays_software.wgsl"),

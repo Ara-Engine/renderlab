@@ -116,7 +116,11 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
             rl_cache_slots=vec2<u32>(slot,at_start);
             var rgb=o.rgb;
             if o.w==0.5 || o.w==1.5 { rgb+=rl_cache_borrow(world,l,bin,slot); }
-            return vec4<f32>(rgb,1.0);
+            // Report w=0.5 while the hit cell is still ungathered or actively bouncing so final
+            // gather probes avoid locking cold startup/cut zero-bounce cache frames into long history.
+            let fixed_settle=gi_word(GI_H_FIXED_RAYS)!=0u && gi_word(GI_H_FIXED_SETTLE)!=0u;
+            let cold=o.w<1.0 || o.w==1.5 || (fixed_settle && (gi_word(gi_cold(slot)+GI_C_STATE)&GI_SETTLED)==0u);
+            return vec4<f32>(rgb,select(1.0,0.5,cold));
         }
     }
     rl_cache_slots.y=at_start;
