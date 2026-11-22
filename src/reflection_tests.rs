@@ -73,6 +73,31 @@ fn reflection_composition_contract() {
     );
 }
 
+#[test]
+fn reflection_composite_shader_validates() {
+    let source = crate::program::rl_pass_switches(
+        include_str!("../shaders/reflections_composite.wgsl").to_owned(),
+    );
+    let module = naga::front::wgsl::parse_str(&source).expect("parse reflections_composite.wgsl");
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .expect("validate reflections_composite.wgsl");
+    let names: Vec<&str> = module.entry_points.iter().map(|e| e.name.as_str()).collect();
+    for expected in [
+        "rl_composite_vs",
+        "rl_composite_fs",
+        "rl_scatter_fs",
+        "rl_atrous1_fs",
+        "rl_filter_fs",
+    ] {
+        assert!(names.contains(&expected), "missing entry point {expected}");
+    }
+}
+
 fn device() -> (wgpu::Device, wgpu::Queue) {
     assert_eq!(
         std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),

@@ -269,9 +269,11 @@ pub(in crate::renderer) struct PassTargets {
     pub frame: Buffer,
     pub hits: Buffer,
     pub samples: Depth,
-    /// Scratch screen targets for the two-pass denoised composite (`denoise()`): raw strata mean
-    /// + GGX alpha (`Rgba16Float`) and octahedral lobe normal (`R32Uint`).
+    /// Scratch screen targets for the denoised composite (`denoise()`): raw strata mean + GGX
+    /// alpha (`Rgba16Float`), step-1 à-trous ping (`Rgba16Float`), and lobe normal + bitcast
+    /// world origin (`Rgba32Uint`).
     pub glossy_raw: Option<Depth>,
+    pub glossy_ping: Option<Depth>,
     pub glossy_meta: Option<Depth>,
     /// The view's size (the room's cap is ROOM_PER_PIXEL of its pixels).
     pub size: [u32; 2],
@@ -296,6 +298,7 @@ pub(super) struct CompositeKit {
     raw_pipeline: Owned<wgpu::RenderPipeline>,
     scatter_pipeline: Owned<wgpu::RenderPipeline>,
     filter_layout: Owned<wgpu::BindGroupLayout>,
+    atrous1_pipeline: Owned<wgpu::RenderPipeline>,
     filter_pipeline: Owned<wgpu::RenderPipeline>,
 }
 
@@ -347,7 +350,8 @@ impl Renderer {
             ),
             samples: self.rl_room_samples(room),
             glossy_raw: denoise().then(|| self.rl_scratch_target(size, wgpu::TextureFormat::Rgba16Float, 8, "reflection glossy raw")),
-            glossy_meta: denoise().then(|| self.rl_scratch_target(size, wgpu::TextureFormat::R32Uint, 4, "reflection glossy meta")),
+            glossy_ping: denoise().then(|| self.rl_scratch_target(size, wgpu::TextureFormat::Rgba16Float, 8, "reflection glossy ping")),
+            glossy_meta: denoise().then(|| self.rl_scratch_target(size, wgpu::TextureFormat::Rgba32Uint, 16, "reflection glossy meta")),
             size: [size.width, size.height],
             stats: Buffer::new(
                 self,
@@ -1011,19 +1015,29 @@ impl Renderer {
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
                 Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::R32Uint,
+                    format: wgpu::TextureFormat::Rgba32Uint,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 }),
             ],
         );
+        let atrous1_pipeline = make_pipeline(
+            "reflection composite atrous1",
+            &filter_pl,
+            "rl_atrous1_fs",
+            &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        );
         let filter_pipeline = make_pipeline("reflection composite filter", &filter_pl, "rl_filter_fs", &[additive_hdr]);
-        CompositeKit { scatter_layout, raw_pipeline, scatter_pipeline, filter_layout, filter_pipeline }
+        CompositeKit { scatter_layout, raw_pipeline, scatter_pipeline, filter_layout, atrous1_pipeline, filter_pipeline }
     }
 
     /// The composite after reflection_hits: each listed glossy pixel's strata mean, optionally
-    /// edge-aware filtered across same-surface glossy neighbours, times its reflectance and w,
-    /// added into the HDR target before TR1.
+    /// two-stage à-trous edge-aware filtered across coplanar same-surface glossy neighbours,
+    /// times its reflectance and w, added into the HDR target before TR1.
     pub(crate) fn encode_reflection_composite(&self, encoder: &mut wgpu::CommandEncoder, shading: Shading) {
         let Some(state) = self.view.primary.as_ref() else {
             return;
@@ -1045,7 +1059,11 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: pass.composite.value.as_entire_binding() },
             ],
         });
-        if let (Some(glossy_raw), Some(glossy_meta)) = (pass.glossy_raw.as_ref(), pass.glossy_meta.as_ref()) {
+        if let (Some(glossy_raw), Some(glossy_ping), Some(glossy_meta)) = (
+            pass.glossy_raw.as_ref(),
+            pass.glossy_ping.as_ref(),
+            pass.glossy_meta.as_ref(),
+        ) {
             {
                 let mut scatter = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("reflection composite scatter"),
@@ -1072,13 +1090,42 @@ impl Renderer {
                 scatter.set_bind_group(0, &scatter_group, &[]);
                 scatter.draw_indirect(&pass.list_args.value, 16);
             }
+            let atrous1_group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
+                label: Some("reflection composite atrous1"),
+                layout: &kit.filter_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: pass.list.value.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&deferred.0.view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&glossy_raw.view) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&glossy_meta.view) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&t.hit.view) },
+                ],
+            });
+            {
+                let mut atrous1 = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("reflection composite atrous1"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &glossy_ping.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                atrous1.set_pipeline(&kit.atrous1_pipeline);
+                atrous1.set_bind_group(0, &atrous1_group, &[]);
+                atrous1.draw_indirect(&pass.list_args.value, 16);
+            }
             let filter_group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("reflection composite filter"),
                 layout: &kit.filter_layout,
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: pass.list.value.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&deferred.0.view) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&glossy_raw.view) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&glossy_ping.view) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&glossy_meta.view) },
                     wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&t.hit.view) },
                 ],
