@@ -29,11 +29,11 @@ pub(crate) struct ReflectionReload {
 }
 /// The identity of the reflection pipeline built from a prelude and a program, from their
 /// SHA-256 digests (kept with the sources: this runs every frame).
-pub(super) fn key(head: &[u8; 32], program: &[u8; 32], parameters: bool) -> [u8; 32] {
+pub(super) fn key(head: &[u8; 32], program: &[u8; 32], parameters: bool, rt: bool) -> [u8; 32] {
     let mut hash = Sha256::new();
     hash.update(head);
     hash.update(program);
-    hash.update([u8::from(parameters)]);
+    hash.update([u8::from(parameters), u8::from(rt)]);
     hash.finalize().into()
 }
 /// The `tp_reflect` kernel's module: `program`'s traced hit shading composed on `head`
@@ -68,6 +68,21 @@ pub(crate) fn source(head: &str, program: &str, parameters: bool) -> String {
             "let samples=select(1u,max(rl_local_rays,4u),radius>0.0);",
             "let samples=1u;",
         );
+    // Non-RT glass reflections run inline in software BVH: cap glossy strata to 2 per pixel
+    // and allow settled world radiance-cache hits for distant cones (even on smooth glass) so
+    // distant reflected buildings/rooms read the cache instead of tracing software sun shadow
+    // rays per pixel, while close-up mirror reflections (cone < cell edge) keep exact shading.
+    if head.contains(crate::program::SOFTWARE_REFLECTION_GEOMETRY) {
+        s = s
+            .replace(
+                "var count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);",
+                "var count=select(min(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),2u),1u,mirror);",
+            )
+            .replace(
+                "if rough<RL_CACHE_ROUGH { return vec4<f32>(0.0); }",
+                "if rough<0.0 { return vec4<f32>(0.0); }",
+            );
+    }
     s.push_str(r#"
 @group(0) @binding(31) var tp_reflection_position:texture_2d<f32>;
 @group(0) @binding(32) var tp_reflection_normal:texture_2d<f32>;
@@ -120,7 +135,12 @@ impl Renderer {
         };
         let groups: [_; 4] = std::array::from_fn(|i| pipeline.get_bind_group_layout(i as u32));
         let parameters = crate::program::declares_parameters(text);
-        let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
+        let rt = self.hardware_shadows.is_some();
+        let head = if rt {
+            primary_ray_gpu::transparent_reflection_head(&self.source)?
+        } else {
+            primary_ray_gpu::transparent_reflection_head_non_rt(&self.source)?
+        };
         Ok(Some(ReflectionReload {
             source: source(&head, text, parameters),
             layout: self.tp_pipeline_layout("background glass reflection ABI", &groups.each_ref()),
@@ -128,6 +148,7 @@ impl Renderer {
                 &self.source_digest,
                 &Sha256::digest(text.as_bytes()).into(),
                 parameters,
+                rt,
             ),
         }))
     }
@@ -149,7 +170,11 @@ impl Renderer {
         }
     }
 
-    pub(super) fn tp_reflections(&mut self, size: wgpu::Extent3d) -> Result<GlassReflections, Error> {
+    pub(super) fn tp_reflections(
+        &mut self,
+        size: wgpu::Extent3d,
+        rt: bool,
+    ) -> Result<GlassReflections, Error> {
         let limits = self.device.limits();
         if limits.max_color_attachments < 3 || limits.max_color_attachment_bytes_per_sample < 32 {
             return Err(Error::InvalidInput(
@@ -158,14 +183,14 @@ impl Renderer {
         }
         let primary_program = self.view.primary.as_ref().unwrap().program;
         let program = self.program_slot(primary_program);
-        let key = key(&self.source_digest, &program.digest, program.layout.is_some());
+        let key = key(&self.source_digest, &program.digest, program.layout.is_some(), rt);
         // The pipeline for this primary program, built once and kept: a frame whose first
         // opaque draw changes program switches pipelines without compiling (Glint rebuilt it
         // 16 times in 30 s of play when only the frame's targets kept it).
         let prepared = match self.transparency.reflection_pipelines.iter().find(|p| p.key == key) {
             Some(prepared) => prepared.clone(),
             None => {
-                let built = self.tp_reflection_pipeline(primary_program)?;
+                let built = self.tp_reflection_pipeline(primary_program, rt)?;
                 self.transparency.reflection_pipelines.retain(|p| p.program != primary_program);
                 self.transparency.reflection_pipelines.push(built.clone());
                 built
@@ -219,23 +244,44 @@ impl Renderer {
             key,
         })
     }
-    pub(super) fn tp_reflection_pipeline(&self, program_id: u64) -> Result<ReflectionPipeline, Error> {
+    pub(super) fn tp_reflection_pipeline(
+        &self,
+        program_id: u64,
+        rt: bool,
+    ) -> Result<ReflectionPipeline, Error> {
         let primary = self.view.primary.as_ref().unwrap();
         let program = self.program_slot(program_id);
-        let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
+        let head = if rt {
+            primary_ray_gpu::transparent_reflection_head(&self.source)?
+        } else {
+            primary_ray_gpu::transparent_reflection_head_non_rt(&self.source)?
+        };
         let source = source(&head, &program.source, program.layout.is_some());
-        let key = key(&self.source_digest, &program.digest, program.layout.is_some());
+        let key = key(&self.source_digest, &program.digest, program.layout.is_some(), rt);
+        let scene_entry = if rt {
+            entry(
+                2,
+                COMPUTE,
+                wgpu::BindingType::AccelerationStructure {
+                    vertex_return: false,
+                },
+            )
+        } else {
+            entry(
+                primary_ray_gpu::SOFTWARE_REFLECTIONS,
+                COMPUTE,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(16),
+                },
+            )
+        };
         let layout = self.tp_layout(
             "TP2 glass reflection",
             &[
                 entry(0, COMPUTE, uniform(false, 80)),
-                entry(
-                    2,
-                    COMPUTE,
-                    wgpu::BindingType::AccelerationStructure {
-                        vertex_return: false,
-                    },
-                ),
+                scene_entry,
                 entry(10, COMPUTE, uniform(false, primary_ray_gpu::FRAME_BYTES as u64)),
                 entry(
                     18,

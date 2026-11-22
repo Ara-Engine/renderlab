@@ -92,6 +92,15 @@ fn tp1_modules_validate() {
         "TP2 glass reflecting a toon program",
         &reflection::source(&head, toon, true),
     );
+    let head_non_rt = primary_ray_gpu::transparent_reflection_head_non_rt(SOURCE).unwrap();
+    validate(
+        "TP2 R1n non-RT glass reflection",
+        &reflection::source(&head_non_rt, crate::STANDARD_PROGRAM, false),
+    );
+    validate(
+        "TP2 non-RT glass reflecting a toon program",
+        &reflection::source(&head_non_rt, toon, true),
+    );
     // The standard program declares the hook; toon blends by coverage.
     assert!(crate::program::declares_transmittance(
         crate::STANDARD_PROGRAM

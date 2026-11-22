@@ -263,10 +263,12 @@ pub(super) fn compile_structure_sources(
         ("lobe-clear", section("TP_LOBE_CLEAR").to_owned()),
         ("transmission", transmission_shadow::draw_source(prelude)),
     ];
-    if rt {
-        let head = primary_ray_gpu::transparent_reflection_head(prelude)?;
-        sources.push(("reflection", reflection::source(&head, program, parameters)));
-    }
+    let head = if rt {
+        primary_ray_gpu::transparent_reflection_head(prelude)?
+    } else {
+        primary_ray_gpu::transparent_reflection_head_non_rt(prelude)?
+    };
+    sources.push(("reflection", reflection::source(&head, program, parameters)));
     Ok(sources)
 }
 
@@ -1766,14 +1768,17 @@ impl Renderer {
             let pipelines = self.tp_particle_pipelines();
             self.transparency.gpu.as_mut().unwrap().particles = Some(pipelines);
         }
-        if rt && traced && programs.iter().any(|&p| self.program_slot(p).traits.declares_reflection) {
+        if traced
+            && self.view.primary.is_some()
+            && programs.iter().any(|&p| self.program_slot(p).traits.declares_reflection)
+        {
             opaque.sort_unstable();
             opaque.dedup();
             for program in opaque {
                 let slot = self.program_slot(program);
-                let key = reflection::key(&self.source_digest, &slot.digest, slot.layout.is_some());
+                let key = reflection::key(&self.source_digest, &slot.digest, slot.layout.is_some(), rt);
                 if self.transparency.reflection_pipelines.iter().any(|p| p.key == key) { continue; }
-                let built = self.tp_reflection_pipeline(program)?;
+                let built = self.tp_reflection_pipeline(program, rt)?;
                 self.transparency.reflection_pipelines.retain(|p| p.program != program);
                 self.transparency.reflection_pipelines.push(built);
             }
@@ -2104,7 +2109,13 @@ impl Renderer {
             .hardware_shadows
             .as_ref()
             .is_some_and(|h| h.active_scene().is_some());
-        let reflect = rt
+        let has_sw_reflections = !rt
+            && self
+                .view
+                .primary
+                .as_ref()
+                .is_some_and(|p| p.software_reflections().is_some());
+        let reflect = (rt || has_sw_reflections)
             && traced
             && scene_transparent.iter().any(|draw| {
                 let program = draw.material.map_or(self.standard.id(), |m| m.program.id());
@@ -2120,6 +2131,7 @@ impl Renderer {
                 &self.source_digest,
                 &program.digest,
                 program.layout.is_some(),
+                rt,
             );
             if self
                 .view
@@ -2127,7 +2139,7 @@ impl Renderer {
                 .as_ref()
                 .is_none_or(|r| r.position.texture.size() != size || r.key != key)
             {
-                self.view.transparency_reflections = Some(self.tp_reflections(size)?);
+                self.view.transparency_reflections = Some(self.tp_reflections(size, rt)?);
             }
             // MP1 integration: R1 shades foreign-program hits with the first opaque
             // program's response and parameters, as MP1's existing fallback does.
@@ -2871,9 +2883,22 @@ impl Renderer {
             self.queue.write_buffer(&buffer, 0, &full.map(u32::to_ne_bytes).concat());
             buffer
         });
-        // TP2: reflection hits use the existing opaque geometry, materials and R1 shader.
+        // TP2: reflection hits use the existing opaque geometry, materials and R1 shader
+        // (TLAS on RT renderers; packed software reflection BVH on non-RT renderers).
         let reflection_group = reflect.then(|| {
             let reflection = self.view.transparency_reflections.as_ref().unwrap();
+            let primary = self.view.primary.as_ref().unwrap();
+            let scene_binding = if rt {
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: rt_scene.unwrap().as_binding(),
+                }
+            } else {
+                wgpu::BindGroupEntry {
+                    binding: primary_ray_gpu::SOFTWARE_REFLECTIONS,
+                    resource: primary.software_reflections().unwrap().as_entire_binding(),
+                }
+            };
             self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("TP2 glass reflections"),
                 layout: &reflection.layout,
@@ -2886,19 +2911,10 @@ impl Renderer {
                             size: wgpu::BufferSize::new(80),
                         }),
                     },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: rt_scene.unwrap().as_binding(),
-                    },
+                    scene_binding,
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: self
-                            .view
-                            .primary
-                            .as_ref()
-                            .unwrap()
-                            .frame_buffer()
-                            .as_entire_binding(),
+                        resource: primary.frame_buffer().as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 18,

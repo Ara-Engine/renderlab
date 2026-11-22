@@ -1998,10 +1998,18 @@ impl Renderer {
                 self.upload_clusters(b.clusters, &b.words, vec![[0., 0., 0., 0., f32::MAX]])
             });
         // M7-R1n: non-RT visibility-buffer renderers trace reflections in software over
-        // each mesh's drawn triangles (reflection_software.rs), up to its triangle cap.
+        // each mesh's drawn triangles (reflection_software.rs), up to its triangle cap and
+        // the device's storage-buffer binding limit.
+        let max_reflection_bytes = self
+            .device
+            .limits()
+            .max_storage_buffer_binding_size
+            .min(self.device.limits().max_buffer_size);
+        let tri_count = data.indices.len() / 3;
         let reflection = (clusters.is_some()
             && self.hardware_shadows.is_none()
-            && data.indices.len() / 3 <= crate::reflection_software::MAX_TRIANGLES)
+            && tri_count <= crate::reflection_software::MAX_TRIANGLES
+            && (tri_count as u64).saturating_mul(64) <= max_reflection_bytes / 2)
             .then(|| {
                 let started = Instant::now();
                 let positions: Vec<[f32; 3]> = data.vertices.iter().map(|v| v.position).collect();

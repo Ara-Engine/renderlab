@@ -18,9 +18,11 @@ pub(crate) fn bvh4_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_REFLECTION_BVH4").map_or(true, |v| v != "0"))
 }
 
-/// Largest mesh that gets software reflection geometry (about 64 bytes a triangle): larger meshes
-/// are not hit by non-RT reflection rays (docs/m7-r1n.md, gaps).
-pub(crate) const MAX_TRIANGLES: usize = 1 << 19;
+/// Largest mesh that gets software reflection geometry (about 52–64 bytes a triangle): larger
+/// meshes are not hit by non-RT reflection rays (docs/m7-r1n.md, gaps). Sized for multi-million-
+/// triangle scenes and static material batches (e.g. Lone Monk, Zero-Day); `renderer.rs` also
+/// caps by the device's storage-buffer binding limit.
+pub(crate) const MAX_TRIANGLES: usize = 1 << 23;
 /// Legacy BVH2 leaf size; its tag holds the count in three bits.
 const LEAF_TRIANGLES: usize = 4;
 /// Words per node: quantized BVH4, or two float child boxes and IDs for the rollback BVH2.

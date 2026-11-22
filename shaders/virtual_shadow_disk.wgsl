@@ -716,6 +716,7 @@ fn vd_edge_triangles(margin:f32)->vec2<u32> {
     for(var k=0u;k<8u;k+=1u) {
         let cell=vd_edge_cell+vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
         let i=vsm_index(cell,level);
+        if i==VSM_NONE {continue;}
         let top=vsm_top_words[i];
         if top.x==0u {continue;}
         var word=top;
@@ -793,13 +794,16 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     var bottom=t-VD_THICK*size;
     let side=i32(vsm.counts.y*VSM_PAGE);
     let bits=vsm.misc.x;
-    // The underside. A closed mesh gives it: the peel layer, when that is the top's own
-    // placement. Otherwise the top is a sheet (a card, a terrain): it is as thick as its step to
-    // its lowest neighbour of the same placement, which closes a sloped surface between texels
-    // and leaves a floating sheet thin. Either way a column is at least VD_THICK texels thick,
-    // so the columns of a thin or oblique surface overlap in height where thinner ones would
-    // leave slits of light. Defer loading the peel word when the minimum thickness already
-    // reaches min_lo: umbra columns that fill the disk then skip the peel read altogether.
+    // The underside. A closed volume gives it: the peel layer, when it belongs to the top's own
+    // placement OR is a back-facing interior surface (e.g. an interior ceiling/wall placement
+    // behind an exterior roof/wall placement, encoded in bit 0 of the peel height word). Floating
+    // sheets over front-facing ground keep `(peel.y & 1u) == 0u`, so they stay thin. Otherwise
+    // the top is a sheet (a card, a terrain): it is as thick as its step to its lowest neighbour
+    // of the same placement, which closes a sloped surface between texels and leaves a floating
+    // sheet thin. Either way a column is at least VD_THICK texels thick, so the columns of a thin
+    // or oblique surface overlap in height where thinner ones would leave slits of light. Defer
+    // loading the peel word when the minimum thickness already reaches min_lo: umbra columns that
+    // fill the disk then skip the peel read.
     var peel=vec2<u32>(0u);
     var peel_loaded=false;
     var own=false;
@@ -807,11 +811,15 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
         if VD_PEEL {
             peel=vsm_peel_words[i];
             peel_loaded=true;
-            own=peel.x!=0u && peel.x>>bits==top.x>>bits;
+            own=peel.x!=0u && (peel.x>>bits==top.x>>bits || (peel.y&1u)!=0u);
         }
         if own {
-            bottom=min(bottom,vsm_height(peel)-p.z);
-        } else {
+            // For a cross-placement back-facing underside, keep the VD_THICK skirt that the
+            // separate peel column would otherwise draw below `peel` so sloped undersides stay
+            // watertight as well as sealing the solid volume between `top` and `peel`.
+            bottom=min(bottom,vsm_height(peel)-p.z-select(0.0,VD_THICK*size,peel.x>>bits!=top.x>>bits));
+        }
+        if bottom>min_lo || VD_EDGES {
             let fast_nb=(!vsm_sparse() || (vd_single_page && level==vd_pl)) && stride==1 && all(cell>vec2<i32>(0)) && all(cell<vec2<i32>(side-1));
             if fast_nb {
                 let row_step=select(vsm_pitch(),VSM_PAGE,vsm_sparse());
@@ -892,7 +900,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     if VD_PEEL2 && !vd_full() {
         if !peel_loaded && VD_PEEL {
             peel=vsm_peel_words[i];
-            own=peel.x!=0u && peel.x>>bits==top.x>>bits;
+            own=peel.x!=0u && (peel.x>>bits==top.x>>bits || (peel.y&1u)!=0u);
         }
         if peel.x!=0u && !own {
             let under=vsm_height(peel);

@@ -968,7 +968,10 @@ fn vsm_sil_triangle(tid:u32,level:u32,centre:vec2<f32>)->u32 {
     }
 }
 // The map word of one caster fragment at texel t of `level` (normalized height in [0,1]).
-fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
+// `back` records whether the triangle faces away from the sun (light-space winding) in bit 0 of
+// the peel height, so the Disk lookup recognizes an enclosed solid whose underside belongs to a
+// different placement/material than its top surface.
+fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32,back:bool) {
     let pages=vsm.counts.y;
     let page=t/VSM_PAGE;
     let v=vsm_vpage(level,page);
@@ -979,9 +982,7 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     if vsm_sparse() {
         i=vsm_pages[vsm_section(2u)+v]*VSM_PAGE*VSM_PAGE+(t.y%VSM_PAGE)*VSM_PAGE+t.x%VSM_PAGE;
     }
-    // Under VSM_FRACTION the low three height bits are the covered count's (vsm_fold), zero here.
     let hb=bitcast<u32>(clamp(height,0.0,1.0));
-    let value=(u64(select(hb,hb&~7u,VSM_FRACTION))<<32u)|u64(id);
     if VSM_PEEL_PASS {
         // Only one triangle of a watertight surface covers a texel centre, so this is the
         // next surface down.
@@ -992,8 +993,11 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
         // adds nothing there, and the peel keeps the next one down: a tarp under a thin closed
         // pole, which the pole's own underside hid.
         if (vsm.misc.w&0x400u)!=0u && height>bitcast<f32>(u32(top>>32u))-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z {return;}
-        atomicMax(&vsm_peel_map[i],value);
+        let ph=(hb&~1u)|u32(back);
+        atomicMax(&vsm_peel_map[i],(u64(ph)<<32u)|u64(id));
     } else {
+        // Under VSM_FRACTION the low three height bits are the covered count's (vsm_fold), zero here.
+        let value=(u64(select(hb,hb&~7u,VSM_FRACTION))<<32u)|u64(id);
         atomicMax(&vsm_top_map[i],value);
     }
 }
@@ -1069,7 +1073,7 @@ fn vsm_cross(a:vec2<f32>,b:vec2<f32>,p:vec2<f32>)->f32 {return (b.x-a.x)*(p.y-a.
 // pass writes its centre into the peel layer as vsm_write does and marks its near-layer samples:
 // those within the peel gap of the top, widened by this triangle's own height change across the
 // samples, so a steep surface's lower samples stay in its near layer.
-fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,z:vec3<f32>,id:u32) {
+fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,z:vec3<f32>,id:u32,back:bool) {
     let area=vsm_cross(a,b,c);
     if area<=0.0 {return;}
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
@@ -1081,13 +1085,13 @@ fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,
             let p=centre+vsm_sample(k);
             if min(min(vsm_cross(b,c,p),vsm_cross(c,a,p)),vsm_cross(a,b,p))<0.0 {continue;}
             let zc=clamp(z.x+dot(g,centre-a),min(min(z.x,z.y),z.z),max(max(z.x,z.y),z.z));
-            vsm_write(level,t,zc,id);
+            vsm_write(level,t,zc,id,back);
             return;
         }
         return;
     }
     let wc=vec3<f32>(vsm_cross(b,c,centre),vsm_cross(c,a,centre),vsm_cross(a,b,centre));
-    if all(wc>=vec3<f32>(0.0)) {vsm_write(level,t,dot(wc,z)/area,id);}
+    if all(wc>=vec3<f32>(0.0)) {vsm_write(level,t,dot(wc,z)/area,id,back);}
     let i=vsm_texel_index(level,t);
     if i==VSM_NONE {return;}
     let top=bitcast<f32>(u32(atomicLoad(&vsm_top_map[i])>>32u));
@@ -1109,13 +1113,13 @@ fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,
 // height (the centre's where the texel is inside); the peel pass writes the centre into the peel
 // layer as vsm_write does and marks the covered samples within the peel gap of the top, widened by
 // the triangle's slope.
-fn vsm_fraction_hw(level:u32,t:vec2<u32>,centre:f32,inside:f32,covered:bool,g:vec2<f32>,id:u32,mask:u32) {
+fn vsm_fraction_hw(level:u32,t:vec2<u32>,centre:f32,inside:f32,covered:bool,g:vec2<f32>,id:u32,mask:u32,back:bool) {
     if mask==0u {return;}
     if !VSM_PEEL_PASS {
-        vsm_write(level,t,inside,id);
+        vsm_write(level,t,inside,id,back);
         return;
     }
-    if covered {vsm_write(level,t,centre,id);}
+    if covered {vsm_write(level,t,centre,id,back);}
     let i=vsm_texel_index(level,t);
     if i==VSM_NONE {return;}
     let top=bitcast<f32>(u32(atomicLoad(&vsm_top_map[i])>>32u));
@@ -1172,6 +1176,9 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     let a=vec2<i32>(round(s0.xy*256.0));var b=vec2<i32>(round(s1.xy*256.0));var d=vec2<i32>(round(s2.xy*256.0));
     let area=vsm_edge(a,b,d);
     if area==0 {return;}
+    let m=models[c.placement];
+    let flip=dot(cross(m[0].xyz,m[1].xyz),m[2].xyz)<0.0;
+    let back=(area<0)!=flip;
     if area<0 {let p=b;b=d;d=p;let z=s1;s1=s2;s2=z;}
     let inverse=1.0/f32(abs(area));
     let side=i32(vsm.counts.y*VSM_PAGE);
@@ -1186,7 +1193,7 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     if VSM_MSAA && !VSM_FR_SW1X {
         for(var y=first.y;y<=last.y;y+=1) {
             for(var x=first.x;x<=last.x;x+=1) {
-                vsm_fraction_texel(level,vec2<u32>(u32(x),u32(y)),s0.xy,s1.xy,s2.xy,vec3<f32>(s0.z,s1.z,s2.z),id);
+                vsm_fraction_texel(level,vec2<u32>(u32(x),u32(y)),s0.xy,s1.xy,s2.xy,vec3<f32>(s0.z,s1.z,s2.z),id,back);
             }
         }
         return;
@@ -1197,7 +1204,7 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
             let w0=vsm_edge(b,d,p);let w1=vsm_edge(d,a,p);let w2=vsm_edge(a,b,p);
             if (w0|w1|w2)<0 {continue;}
             let z=(f32(w0)*s0.z+f32(w1)*s1.z+f32(w2)*s2.z)*inverse;
-            vsm_write(level,vec2<u32>(u32(x),u32(y)),z,id);
+            vsm_write(level,vec2<u32>(u32(x),u32(y)),z,id,back);
         }
     }
 }
@@ -1208,6 +1215,7 @@ struct VsmHw {
     // VSM_FRACTION: the height at a covered point of the texel (centroid sampling: the centre
     // where all samples are covered), and the vertex weights at the centre (all >= 0 inside).
     @location(2) @interpolate(perspective,centroid) inside:f32,@location(3) weights:vec3<f32>,
+    @location(4) @interpolate(flat) flip:u32,
 };
 @vertex fn vs_vsm_cluster(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->VsmHw {
     let level=vsm_pass.level;
@@ -1223,6 +1231,7 @@ struct VsmHw {
         let batch=primary_placements[c.placement]&0x1fffffffu;
         let t=vsm_cluster_data[batch].data[c.triangles+local];
         let s=vsm_cluster_vertex(c,batch,(t>>(8u*(vertex%3u)))&255u,level);
+        let m=models[c.placement];
         let area=f32(vsm_area());
         let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*area;
         out.position=vec4<f32>((s.x-o.x)/area*2.0-1.0,1.0-(s.y-o.y)/area*2.0,0.5,1.0);
@@ -1230,22 +1239,26 @@ struct VsmHw {
         out.inside=s.z;
         out.weights=vec3<f32>(f32(vertex%3u==0u),f32(vertex%3u==1u),f32(vertex%3u==2u));
         out.id=vsm_cluster_id(c,batch,local);
+        out.flip=u32(dot(cross(m[0].xyz,m[1].xyz),m[2].xyz)<0.0);
     }
     return out;
 }
-@fragment fn fs_vsm_cluster(input:VsmHw,@builtin(sample_mask) mask:u32) {
+@fragment fn fs_vsm_cluster(input:VsmHw,@builtin(sample_mask) mask:u32,@builtin(front_facing) front:bool) {
     // The plane's gradient, normalized height per texel (a pixel is a texel, the projection is
     // orthographic): taken before any branch, as derivatives must be.
     let g=vec2<f32>(dpdx(input.height),dpdy(input.height));
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
     let t=vec2<u32>(input.position.xy)+o;
+    // With wgpu's FrontFace::Ccw and vs_vsm_cluster's Y-flip, `front` is true for triangles
+    // facing toward the sun when det(model) > 0, so `!front` is back-facing toward the sun.
+    let back=(!front)!=(input.flip!=0u);
     if VSM_MSAA && VSM_FR_DISCARD {return;}
     if VSM_MSAA && !VSM_FR_HW1X {
-        vsm_fraction_hw(vsm_pass.level,t,input.height,input.inside,all(input.weights>=vec3<f32>(0.0)),g,input.id,mask);
+        vsm_fraction_hw(vsm_pass.level,t,input.height,input.inside,all(input.weights>=vec3<f32>(0.0)),g,input.id,mask,back);
         return;
     }
-    vsm_write(vsm_pass.level,t,input.height,input.id);
+    vsm_write(vsm_pass.level,t,input.height,input.id,back);
 }
 
 // ---- Lookup: exact 1-ring, then the map march beyond `near` ----

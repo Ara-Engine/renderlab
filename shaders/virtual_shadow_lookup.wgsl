@@ -140,7 +140,7 @@ fn vmap_gradient(word:u32)->vec2<f32> {return unpack2x16float(word);}
                 let step=vec2<i32>(select(select(0,1,n==1u),-1,n==0u),select(select(0,1,n==3u),-1,n==2u));
                 let at=vec2<i32>(inside)+step;
                 if any(at<vec2<i32>(0)) || any(at>=vec2<i32>(i32(VSM_PAGE))) {continue;}
-                let j=i32(i)+step.y*i32(side)+step.x;
+                let j=i32(i)+step.y*i32(vsm_pitch())+step.x;
                 // The neighbour's surface of this layer's placement: its top, or its peel.
                 var other=vsm_top_words[j];
                 if other.x>>bits!=word.x>>bits {other=vsm_peel_words[j];}

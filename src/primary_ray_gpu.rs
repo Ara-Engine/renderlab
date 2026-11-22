@@ -91,6 +91,15 @@ pub(crate) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
     Ok(finish_shading_heads(heads(wgsl)?)?[0].clone())
 }
 
+// TP2 non-RT: glass/water reflection hits trace Renderlab's packed software reflection BVH.
+pub(crate) fn transparent_reflection_head_non_rt(wgsl: &str) -> Result<String, Error> {
+    Ok(format!(
+        "{}\n{}",
+        finish_shading_heads(non_rt_heads(wgsl)?)?[0],
+        crate::program::SOFTWARE_REFLECTION_GEOMETRY
+    ))
+}
+
 /// Same engine seams and material ABI, with no traversal declarations at all.
 pub(crate) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
     // Validate the affine/visibility seams even though this composition has no rays.
@@ -708,7 +717,7 @@ fn image(binding: u32, format: wgpu::TextureFormat) -> wgpu::BindGroupLayoutEntr
 const TRACE_SCENE: u32 = 19;
 /// M7-R1n: non-RT shading's software reflection geometry
 /// (`program::SOFTWARE_REFLECTION_GEOMETRY`).
-const SOFTWARE_REFLECTIONS: u32 = 36;
+pub(super) const SOFTWARE_REFLECTIONS: u32 = 36;
 /// The shared TLAS: binding 2 for shadow rays, `TRACE_SCENE` for camera rays.
 /// What the primary shading layout depends on beyond its visibility input: the reflection pass,
 /// the software reflection geometry (non-RT), the deferred composite and its diagnostic output.
@@ -1162,6 +1171,10 @@ impl PrimaryState {
     }
     pub(super) fn frame_buffer(&self) -> &wgpu::Buffer {
         &self.frame.as_ref().unwrap().0.value
+    }
+    /// Non-RT frames' packed software reflection BVH buffer (`prepare_software_reflections`).
+    pub(super) fn software_reflections(&self) -> Option<&wgpu::Buffer> {
+        self.reflections.as_ref().map(|r| &*r.buffer.value)
     }
     /// The prepared frame's placement-ordered models and geometry tables (N8).
     pub(super) fn virtual_geometry(&self) -> Option<(&wgpu::Buffer, &wgpu::BindGroup)> {
