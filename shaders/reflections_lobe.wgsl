@@ -54,6 +54,9 @@ fn rl_composite_floor(traced:f32,count:u32)->bool {
 // such programs leave their glossy lobes to the pass; every other program keeps its inline
 // estimate.
 const RL_DEFERRED_PROGRAM:bool=false;
+// Non-RT rough-glossy temporal checkerboard: half of rough glossy pixels reserve 0 ray slots
+// and are reconstructed from traced co-planar neighbours in the à-trous denoiser.
+const RL_PASS_CHECKER:bool=false;
 // The receiver's first slot, from its reservation, for its list entry.
 var<private> rl_room_first:u32;
 // Inline overflow: a glossy receiver reserves its strata in the composite's room; one that does
@@ -61,6 +64,11 @@ var<private> rl_room_first:u32;
 // receivers overflow on such a frame follows the GPU's order; both estimators have the same mean.
 fn rl_room_reserve(count:u32,traced:f32,weight:f32)->bool {
     if RL_ROOM_HISTOGRAM && traced*weight<0.005 {atomicAdd(&rl_room_stats[9],count);atomicAdd(&rl_room_stats[10],1u);}
+    if count==0u {
+        if atomicLoad(&rl_glossy.count)>=rl_pass_frame.z {return false;}
+        rl_room_first=0u;
+        return true;
+    }
     let first=atomicAdd(&rl_room_stats[2],count);
     if first+count<=rl_pass_frame.y {rl_room_first=first;return true;}
     atomicAdd(&rl_room_stats[6],1u);

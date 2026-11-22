@@ -71,6 +71,8 @@ fn rl_entry_mean(entry:u32)->vec4<f32> {
 }
 // Pass 1 of the denoised composite: scatter each glossy pixel's raw strata mean + GGX alpha and
 // its octahedral lobe normal + bitcast world origin into screen-space scratch targets (cleared to 0).
+// Checkerboard-skipped rough pixels (count == 0) scatter negative alpha + valid geometry so
+// rl_atrous1_fs reconstructs them from traced co-planar neighbours without polluting traced taps.
 struct RlScatterOut { @location(0) raw:vec4<f32>, @location(1) geom:vec4<u32> };
 @fragment fn rl_scatter_fs(point:RlCompositePoint)->RlScatterOut {
     let a=rl_glossy.entries[point.entry*3u];
@@ -79,13 +81,18 @@ struct RlScatterOut { @location(0) raw:vec4<f32>, @location(1) geom:vec4<u32> };
     let p=vec2<i32>(vec2<u32>(c.x&0xffffu,c.x>>16u));
     let reflectance=textureLoad(rl_reflectance,p,0);
     if !(reflectance.a>0.0) {return RlScatterOut(vec4<f32>(0.0),vec4<u32>(0u));}
+    let alpha=max(unpack2x16float(b.w&0xffffu).x,1e-4);
+    let count=(b.w>>16u)&31u;
+    if count==0u {
+        return RlScatterOut(vec4<f32>(0.0,0.0,0.0,-alpha),vec4<u32>(b.x,a.x,a.y,a.z));
+    }
     let mean=rl_entry_mean(point.entry);
     if mean.a<=0.0 {return RlScatterOut(vec4<f32>(0.0),vec4<u32>(0u));}
-    let alpha=max(unpack2x16float(b.w&0xffffu).x,1e-4);
     return RlScatterOut(vec4<f32>(mean.rgb,alpha),vec4<u32>(b.x,a.x,a.y,a.z));
 }
 // Shared edge-aware à-trous kernel over listed glossy pixels: locked to placement ID, lobe normal,
 // translation-invariant tangent-plane distance and GGX alpha, with optional firefly suppression.
+// Returns (rgb, 1.0) on success or (0, 0, 0, 0) if an untraced pixel had no valid neighbour.
 fn rl_atrous_tap(
     entry:u32,
     p:vec2<i32>,
@@ -95,7 +102,8 @@ fn rl_atrous_tap(
     sigma:f32,
     ndot_min:f32,
     clamp_firefly:bool,
-)->vec3<f32> {
+    has_center:bool,
+)->vec4<f32> {
     let a=rl_glossy.entries[entry*3u];
     let b=rl_glossy.entries[entry*3u+1u];
     let size=vec2<i32>(textureDimensions(rl_glossy_raw));
@@ -103,15 +111,15 @@ fn rl_atrous_tap(
     let n=rl_oct_decode(b.x);
     let o=bitcast<vec3<f32>>(a.xyz);
     let footprint=max(unpack2x16float(a.w).x,1e-4);
-    let alpha=center.a;
+    let alpha=abs(center.a);
     let inv2s2=0.5/(sigma*sigma);
     let inv_alpha=2.0/max(alpha,0.02);
     let base_plane_tol=max(0.05,1.5*f32(step_px)*footprint);
-    var sum=center.rgb;
-    var wsum=1.0;
-    var top_rgb=center.rgb;
-    var top_luma=dot(max(center.rgb,vec3<f32>(0.0)),RL_LUMA);
-    var top_w=1.0;
+    var sum=select(vec3<f32>(0.0),center.rgb,has_center);
+    var wsum=select(0.0,1.0,has_center);
+    var top_rgb=select(vec3<f32>(0.0),center.rgb,has_center);
+    var top_luma=select(0.0,dot(max(center.rgb,vec3<f32>(0.0)),RL_LUMA),has_center);
+    var top_w=select(0.0,1.0,has_center);
     for(var y=-rad;y<=rad;y+=1) {
         for(var x=-rad;x<=rad;x+=1) {
             if x==0 && y==0 {continue;}
@@ -141,6 +149,24 @@ fn rl_atrous_tap(
             wsum+=w;
         }
     }
+    // Relaxed same-placement fallback for thin curved checkerboard-skipped pixels.
+    if !has_center && wsum<=1e-5 {
+        for(var y=-1;y<=1;y+=1) {
+            for(var x=-1;x<=1;x+=1) {
+                if x==0 && y==0 {continue;}
+                let q=p+vec2<i32>(x,y)*step_px;
+                if any(q<vec2<i32>(0)) || any(q>=size) {continue;}
+                let rq=textureLoad(rl_glossy_raw,q,0);
+                if !(rq.a>0.0) || textureLoad(rl_primary_hit,q,0).x!=id {continue;}
+                let w=select(0.5,1.0,x==0 || y==0);
+                sum+=rq.rgb*w;
+                wsum+=w;
+            }
+        }
+        if wsum<=1e-5 {return vec4<f32>(0.0);}
+        return vec4<f32>(sum/wsum,1.0);
+    }
+    if wsum<=1e-5 {return vec4<f32>(0.0);}
     // Suppress a single stray firefly tap from splattering across the filter footprint while
     // leaving genuine multi-pixel bright reflections (bars, rings, area lights) untouched.
     if clamp_firefly {
@@ -153,7 +179,7 @@ fn rl_atrous_tap(
             }
         }
     }
-    return sum/wsum;
+    return vec4<f32>(sum/wsum,1.0);
 }
 // Pass 2 of the denoised composite (à-trous step 1): 3x3..5x5 edge-aware filter + firefly clamp
 // into scratch ping target. Mirrors (rough < 0.08) pass through unmodified.
@@ -161,19 +187,22 @@ fn rl_atrous_tap(
     let c=rl_glossy.entries[point.entry*3u+2u];
     let p=vec2<i32>(vec2<u32>(c.x&0xffffu,c.x>>16u));
     let center=textureLoad(rl_glossy_raw,p,0);
-    if !(center.a>0.0) {return vec4<f32>(0.0);}
-    let rough=sqrt(max(center.a,0.0));
-    if rough<0.08 {
+    if center.a==0.0 {return vec4<f32>(0.0);}
+    let missing=center.a<0.0;
+    let alpha=abs(center.a);
+    let rough=sqrt(max(alpha,0.0));
+    if !missing && rough<0.08 {
         return center;
     }
-    let rad=select(1,2,rough>=0.14);
+    let rad=select(1,2,rough>=0.14 || missing);
     let sigma=select(
         mix(0.65,1.15,clamp((rough-0.08)/0.06,0.0,1.0)),
         mix(1.25,1.95,clamp((rough-0.14)/0.26,0.0,1.0)),
-        rough>=0.14
+        rough>=0.14 || missing
     );
-    let filtered=rl_atrous_tap(point.entry,p,center,1,rad,sigma,0.85,true);
-    return vec4<f32>(filtered,center.a);
+    let filtered=rl_atrous_tap(point.entry,p,center,1,rad,sigma,0.85,true,!missing);
+    if filtered.a<=0.0 {return vec4<f32>(0.0,0.0,0.0,-alpha);}
+    return vec4<f32>(filtered.rgb,alpha);
 }
 // Pass 3 of the denoised composite (à-trous step 3 + additive HDR composite): expands rough-glossy
 // support to 15x15 effective pixels for rough >= 0.16 (suppressing residual motion noise when TR1's
@@ -184,12 +213,16 @@ fn rl_atrous_tap(
     let reflectance=textureLoad(rl_reflectance,p,0);
     if !(reflectance.a>0.0) {return vec4<f32>(0.0);}
     let center=textureLoad(rl_glossy_raw,p,0);
-    if !(center.a>0.0) {return vec4<f32>(0.0);}
-    let rough=sqrt(max(center.a,0.0));
+    if center.a==0.0 {return vec4<f32>(0.0);}
+    let missing=center.a<0.0;
+    let alpha=abs(center.a);
+    let rough=sqrt(max(alpha,0.0));
     var rgb=center.rgb;
-    if rough>=0.16 {
+    if rough>=0.16 || missing {
         let sigma=mix(0.85,2.05,clamp((rough-0.16)/0.24,0.0,1.0));
-        rgb=rl_atrous_tap(point.entry,p,center,3,2,sigma,0.88,false);
+        let filtered=rl_atrous_tap(point.entry,p,center,3,2,sigma,0.88,false,!missing);
+        if filtered.a<=0.0 {return vec4<f32>(0.0);}
+        rgb=filtered.rgb;
     }
     return vec4<f32>(reflectance.a*reflectance.rgb*rgb,0.0);
 }

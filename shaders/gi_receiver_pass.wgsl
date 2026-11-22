@@ -959,10 +959,11 @@ fn fg_corner_ao(id:vec2<u32>,size:vec2<u32>,s:FgSurface)->f32 {
 // their plane vote (in an order the frame turns) for the one the block's adaptive probe goes on.
 // A block without one leaves its probe invalid. Also records per-pixel linear distance for
 // sub-probe corner contact AO (`fg_depth`) at zero extra geometry-decode cost.
+var<workgroup> fg_orphan_count:atomic<u32>;
 @compute @workgroup_size(8,8) fn fg_classify(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
     let frame=fg_frame();
-    if lane==0u {atomicStore(&fg_orphan,FG_NONE);}
+    if lane==0u {atomicStore(&fg_orphan,FG_NONE);atomicStore(&fg_orphan_count,0u);}
     workgroupBarrier();
     let q=group.xy*FG_BLOCK+local.xy;
     let mine=fg_surface_at(q,size,false);
@@ -977,12 +978,13 @@ fn fg_corner_ao(id:vec2<u32>,size:vec2<u32>,s:FgSurface)->f32 {
     if mine.placement!=0u && fg_tiles(q,size,mine,false)<=1e-4 {
         // Pick the covered orphan pixel closest to block center so adaptive probes on curved
         // surfaces and edges keep stable normals across frames instead of resetting history.
+        atomicAdd(&fg_orphan_count,1u);
         let dx=i32(local.x)-4;let dy=i32(local.y)-4;
         atomicMin(&fg_orphan,(u32(dx*dx+dy*dy)<<6u)|lane);
     }
     workgroupBarrier();
     if lane!=0u {return;}
-    let pick=atomicLoad(&fg_orphan);
+    let pick=select(atomicLoad(&fg_orphan),FG_NONE,FG_HALF_RATE && atomicLoad(&fg_orphan_count)<4u);
     let index=fg_adaptive_in(group.xy,size,fg_write_bank());
     let at=fg_at(index,size)+2u;
     let c=gi_prepared[at];

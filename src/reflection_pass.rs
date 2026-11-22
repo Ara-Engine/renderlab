@@ -324,8 +324,9 @@ impl Renderer {
         let room = room_fixed()
             .unwrap_or(ROOM_START)
             .min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
+        let list_cap = self.rl_list_capacity(room, [size.width, size.height]);
         PassTargets {
-            list: self.rl_list(room),
+            list: self.rl_list(list_cap),
             list_args: Buffer::new(
                 self,
                 "reflection list arguments",
@@ -389,12 +390,23 @@ impl Renderer {
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         )
     }
-    /// The glossy-pixel list for a room of `room` slots.
-    fn rl_list(&self, room: u64) -> Buffer {
+    /// Entry capacity of the glossy-pixel list: non-RT checkerboard lists untraced parity pixels
+    /// with count == 0 alongside traced slots, so the list may hold up to 2x room (capped at pixels).
+    fn rl_list_capacity(&self, room: u64, size: [u32; 2]) -> u64 {
+        let pixels = u64::from(size[0]) * u64::from(size[1]);
+        let entries = if self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            room
+        } else {
+            room.saturating_mul(2)
+        };
+        entries.min(pixels.max(1))
+    }
+    /// The glossy-pixel list for `entries` entries.
+    fn rl_list(&self, entries: u64) -> Buffer {
         Buffer::new(
             self,
             "reflection glossy-pixel list",
-            LIST_HEADER + room * LIST_ENTRY_BYTES,
+            LIST_HEADER + entries * LIST_ENTRY_BYTES,
             wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
                 // The glossy-list dump's copy (usage only, while it is set).
@@ -621,15 +633,16 @@ impl Renderer {
         else {
             return;
         };
-        let words = [self.frames as u32, pass.room as u32, pass.room as u32, 1];
+        let list_cap = self.rl_list_capacity(pass.room, pass.size);
+        let words = [self.frames as u32, pass.room as u32, list_cap as u32, 1];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.frame.value, 0, &bytes);
         // The counters and the list's length start each frame at zero before shading.
         self.queue.write_buffer(&pass.stats.value, 0, &[0; STATS_BYTES as usize]);
         self.queue.write_buffer(&pass.list.value, 0, &[0; LIST_HEADER as usize]);
-        // The lone-stratum bound and the strata it needs (reflections.wgsl RL_GLOSSY_RAYS).
+        // The lone-stratum bound and the strata it needs (reflections.wgsl RL_GLOSSY_MAX).
         let lone = self.view.reflections.frame_words()[2];
-        let words = [lone, 4.0, 0.0, 0.0];
+        let words = [lone, 2.0, 0.0, 0.0];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.composite.value, 0, &bytes);
     }
@@ -1273,7 +1286,7 @@ impl Renderer {
             HITS_HEADER + room * RECORD_BYTES,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         );
-        let list = self.rl_list(room);
+        let list = self.rl_list(self.rl_list_capacity(room, pass.size));
         let owners = self.rl_owners(room);
         let state = self.view.primary.as_mut().unwrap();
         let pass = state.targets.as_mut().unwrap().rl_pass.as_mut().unwrap();

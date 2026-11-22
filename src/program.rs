@@ -412,6 +412,13 @@ pub(crate) fn pass_block(composed: Composed) -> Composed {
     } else {
         REFLECTION_LOBE.to_owned()
     };
+    if composed.source.contains(SOFTWARE_REFLECTION_GEOMETRY) && rl_checker_on() {
+        lobe = lobe.replacen(
+            "const RL_PASS_CHECKER:bool=false;",
+            "const RL_PASS_CHECKER:bool=true;",
+            1,
+        );
+    }
     // Measurement runs count the room's low-weight receivers (reflections_lobe.wgsl).
     if ["RENDERLAB_RL_PROBE", "RENDERLAB_RL_ROOM_LOG"]
         .iter()
@@ -441,13 +448,25 @@ pub(crate) fn pass_block(composed: Composed) -> Composed {
 /// (w = 0). The inline trace and its hit shading after the gate are then dead code, which the
 /// compiler drops: their registers were most of the shading kernel's reflection cost.
 const PASS_GATE_LISTED: &str = "    if RL_PASS && RL_DEFERRED_PROGRAM {
-        if rl_any_stratum(count,radial,rotation,basis,local_v,v,alpha,side) && rl_room_reserve(count,traced,lobe.weight) {
+        let skip=RL_PASS_CHECKER && rough>=0.16 && (((pixel.x^pixel.y^(rl_pass_frame.x&1u))&1u)!=0u);
+        let ok=skip || rl_any_stratum(count,radial,rotation,basis,local_v,v,alpha,side);
+        if skip {count=0u;}
+        if ok && rl_room_reserve(count,traced,lobe.weight) {
             rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count,receiver.epsilon);
             rl_specular=vec4<f32>(0.0,0.0,0.0,traced);
         }
         return;
     }
 ";
+/// Non-RT rough-glossy temporal checkerboard (reconstructed by the à-trous denoiser).
+/// Disabled automatically when `RENDERLAB_RL_DENOISE=0` or `RENDERLAB_RL_CHECKER=0`.
+fn rl_checker_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RENDERLAB_RL_DENOISE").as_deref() != Ok("0")
+            && std::env::var("RENDERLAB_RL_CHECKER").as_deref() != Ok("0")
+    })
+}
 /// `RENDERLAB_RL_INLINE=1`: the earlier gate, which kept mirrors, receivers under the
 /// composite floor and those without room tracing inside the shading kernel.
 pub(crate) fn rl_inline() -> bool {
@@ -764,6 +783,9 @@ fn software_reflection_api() -> String {
         assert_eq!(api.matches(from).count(), 1, "R1 reflection seam moved");
         api = api.replacen(from, to, 1);
     }
+    let glossy_max = "const RL_GLOSSY_MAX:u32=2u;";
+    assert_eq!(api.matches(glossy_max).count(), 1, "R1 software glossy max seam moved");
+    api = api.replacen(glossy_max, "const RL_GLOSSY_MAX:u32=1u;", 1);
     assert!(!api.contains("RL_SCENE") && !api.contains("ray_query"));
     api
 }

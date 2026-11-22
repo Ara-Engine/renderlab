@@ -199,8 +199,8 @@ pub(crate) fn borrow_on() -> bool {
 /// while holding full visual quality. `RENDERLAB_GI_FIXED=N` overrides (0 restores legacy queue).
 const FIXED_RAYS_SOFTWARE: u32 = 98_304;
 const FIXED_RAYS_HARDWARE: u32 = 196_608;
-const FIXED_RAYS_FG_SOFTWARE: u32 = 98_304;
-const FIXED_RAYS_FG_HARDWARE: u32 = 393_216;
+const FIXED_RAYS_FG_SOFTWARE: u32 = 32_768;
+const FIXED_RAYS_FG_HARDWARE: u32 = 196_608;
 pub(crate) fn fixed_rays(software: bool) -> u32 {
     static OVERRIDE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
     let forced = *OVERRIDE

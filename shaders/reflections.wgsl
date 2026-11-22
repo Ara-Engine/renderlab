@@ -36,9 +36,9 @@ const RL_UNTRACED:f32=0.5;
 // frame-to-frame change stayed within 1.3% of cap 16's. Showcase is about 2 ms a frame faster on
 // both paths. `RENDERLAB_RL_HIT=strata=16` restores the old cap for A/Bs. The count depends only
 // on the declared lobe, so the estimate stays an unbiased stratified mean.
-const RL_GLOSSY_RAYS:u32=4u;
-const RL_GLOSSY_MAX:u32=4u;
-const RL_RAYS_PER_ROUGHNESS:f32=48.0;
+const RL_GLOSSY_RAYS:u32=1u;
+const RL_GLOSSY_MAX:u32=2u;
+const RL_RAYS_PER_ROUGHNESS:f32=12.0;
 // U-RTVIS reflection history: without it (these stubs) every glossy receiver traces its full
 // set each frame. The wgpu renderer's primary shading modules replace the block with
 // shaders/reflections_history.wgsl when RENDERLAB_RL_HISTORY=1 (src/program.rs

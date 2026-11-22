@@ -2761,7 +2761,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             } else {
                 retry=0u;
             }
-            if gi_fixed_on() && (missing!=0u || atomicLoad(&gi_wg_changing)!=0u) { left=1u; }
+            if gi_fixed_on() && ((missing!=0u && (state&GI_RETRY)==0u) || atomicLoad(&gi_wg_changing)!=0u) { left=1u; }
             gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
             gi_queue_shade(slot);
             gi_gather_done(slot,left);
