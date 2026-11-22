@@ -711,15 +711,16 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     if has_old && old.point.w>0.0 {
         count=min(old.point.w+1.0,max_hist);
     }
-    // While >25% of probe rays still hit ungathered or actively bouncing cache cells during the
-    // full-rate + half-rate warmup window (count <= FG_HALF_MIN + FG_STABLE), use a fast 2-frame
-    // EMA blend so cold zero-bounce startup/cut/relight frames flush immediately — while still
-    // advancing stored `count` so non-RT FG_HALF_RATE -> FG_STABLE_RATE engage on schedule on
-    // large scenes and mature probes (count > FG_HALF_MIN + FG_STABLE) never suffer EMA jitter.
+    // While >25% of probe rays still hit ungathered or actively bouncing cache cells, flush the
+    // first 8 cold zero-bounce frames quickly (`eff_count <= 2`), then ramp `eff_count = count - 6`
+    // continuously so every subsequent update contributes equal variance weight (preventing noisy
+    // early snapshots from freezing at high `count` while still letting non-RT FG_HALF_RATE ->
+    // FG_STABLE_RATE engage on schedule on large scenes).
     var fresh:array<vec4<f32>,10>;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {fresh[v]=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);}
     if fg_note_change(state_index,fresh,old,count,s.normal,missing_frac) {count=min(count,FG_RESTART);}
-    let eff_count=select(count,min(count,2.0),cold_frac>0.25 && count<=FG_HALF_MIN+f32(FG_STABLE));
+    let warm_eff=select(max(count-6.0,2.0),min(count,2.0),count<=8.0);
+    let eff_count=select(count,warm_eff,cold_frac>0.25);
     let blend=1.0/eff_count;
     var out:FgProbe;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=select(fresh[v],mix(old.sh[v],fresh[v],blend),count>1.0);}
@@ -843,8 +844,10 @@ fn fg_probe_dc_luma(index:u32,size:vec2<u32>)->f32 {
 }
 // One thread per tile: both slots' filtered copies. A neighbour weighs its agreement with the
 // probe's plane (fg_on_plane at the probe's point and normal), a Gaussian in tile distance,
-// irradiance similarity once mature (preserving creases and color gradients), and its history.
-const FG_FILTER_SHORT:f32=6.0;
+// gentle irradiance similarity once truly mature (preserving shadow gradients without isolating
+// Monte Carlo probe noise on flat walls), and its history. Non-RT (FG_HALF_RATE) keeps a 5x5
+// co-planar reach to match RT's full-rate 30-ray sample density at ~0.05 ms cost.
+const FG_FILTER_SHORT:f32=24.0;
 @compute @workgroup_size(8,4) fn fg_filter(@builtin(global_invocation_id) grid:vec3<u32>) {
     let size=textureDimensions(primary_hit);
     let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
@@ -857,8 +860,9 @@ const FG_FILTER_SHORT:f32=6.0;
         let c=fg_plane(index,size);
         if c.point.w<=0.0 {fg_invalidate(fg_filtered(tile_slot,size),size);continue;}
         let mature=c.point.w>FG_FILTER_SHORT;
-        let reach=select(2,1,mature);
-        let sigma=select(1.4,0.85,mature);
+        let reach=select(2,select(1,2,FG_HALF_RATE),mature);
+        let sigma=select(1.4,select(1.0,1.3,FG_HALF_RATE),mature);
+        let lum_k=select(1.0,0.75,FG_HALF_RATE);
         let e_c=select(0.0,fg_probe_dc_luma(index,size),mature);
         fg_clear();
         fg_add(index,size,c.point.w);
@@ -878,7 +882,7 @@ const FG_FILTER_SHORT:f32=6.0;
                     if mature && p.point.w>FG_FILTER_SHORT {
                         let e_p=fg_probe_dc_luma(at,size);
                         let rel=abs(e_p-e_c)/max(max(e_p,e_c),1e-4);
-                        lum_w=exp(-rel*rel*3.0);
+                        lum_w=exp(-rel*rel*lum_k);
                         hist_w=min(p.point.w,c.point.w);
                     }
                     let w=geo*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*hist_w*lum_w;
