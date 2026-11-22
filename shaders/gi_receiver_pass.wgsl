@@ -636,7 +636,7 @@ fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:ve
     if at+1u>=arrayLength(&fg_state) {return false;}
     let word=fg_state[at];
     var usual=bitcast<f32>(fg_state[at+1u]);
-    if count<=1.0 || missing_frac>0.20 {fg_state[at]=word&0xffffff00u;fg_state[at+1u]=bitcast<u32>(0.25);return false;}
+    if count<=1.0 || missing_frac>0.35 {fg_state[at]=word&0xffffff00u;fg_state[at+1u]=bitcast<u32>(0.25);return false;}
     let e_new=fg_irradiance(fresh,n);
     let e_old=fg_irradiance(old.sh,n);
     let r=abs(e_new-e_old)/max(max(e_new,e_old),1e-30);
@@ -652,7 +652,7 @@ fn fg_note_change(index:u32,fresh:array<vec4<f32>,10>,old:FgProbe,count:f32,n:ve
         return false;
     }
     usual=mix(usual,r,0.125);
-    let quiet=min((word&0x3fu)+1u,63u);
+    let quiet=select(word&0x3fu,min((word&0x3fu)+1u,63u),old.point.w>=FG_HALF_MIN);
     fg_state[at]=(word&0xffffff00u)|quiet;
     fg_state[at+1u]=bitcast<u32>(usual);
     return false;
@@ -711,15 +711,16 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     if has_old && old.point.w>0.0 {
         count=min(old.point.w+1.0,max_hist);
     }
-    // While >25% of probe rays still hit ungathered or actively bouncing cache cells (startup/cuts/
-    // relights), cap temporal history to a 3-frame EMA so cold zero-bounce frames flush immediately
-    // once the cache settles — while tolerating 1-2 stray distant-cell rays on large scenes so
-    // non-RT FG_HALF_RATE / FG_STABLE_RATE still engage cleanly.
-    if cold_frac>0.25 {count=min(count,3.0);}
+    // While >25% of probe rays still hit ungathered or actively bouncing cache cells during the
+    // full-rate + half-rate warmup window (count <= FG_HALF_MIN + FG_STABLE), use a fast 2-frame
+    // EMA blend so cold zero-bounce startup/cut/relight frames flush immediately — while still
+    // advancing stored `count` so non-RT FG_HALF_RATE -> FG_STABLE_RATE engage on schedule on
+    // large scenes and mature probes (count > FG_HALF_MIN + FG_STABLE) never suffer EMA jitter.
     var fresh:array<vec4<f32>,10>;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {fresh[v]=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);}
-    if fg_note_change(state_index,fresh,old,count,s.normal,select(missing_frac,cold_frac,cold_frac>0.25)) {count=min(count,FG_RESTART);}
-    let blend=1.0/count;
+    if fg_note_change(state_index,fresh,old,count,s.normal,missing_frac) {count=min(count,FG_RESTART);}
+    let eff_count=select(count,min(count,2.0),cold_frac>0.25 && count<=FG_HALF_MIN+f32(FG_STABLE));
+    let blend=1.0/eff_count;
     var out:FgProbe;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=select(fresh[v],mix(old.sh[v],fresh[v],blend),count>1.0);}
     out.point=vec4<f32>(s.world,count);
