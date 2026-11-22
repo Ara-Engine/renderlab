@@ -121,7 +121,7 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
         for (old, new) in [
             ("const FG_RAYS:u32=32u;", "const FG_RAYS:u32=16u;"),
             ("const FG_HALF_RATE:bool=false;", "const FG_HALF_RATE:bool=true;"),
-            ("const FG_HALF_MIN:f32=8.0;", "const FG_HALF_MIN:f32=12.0;"),
+            ("const FG_HALF_MIN:f32=8.0;", "const FG_HALF_MIN:f32=8.0;"),
             ("const FG_STABLE_RATE:u32=4u;", "const FG_STABLE_RATE:u32=4u;"),
             (
                 "var<workgroup> fg_lane_sh:array<array<f32,40>,64>;",

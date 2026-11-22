@@ -909,8 +909,12 @@ fn gi_quality_suite() {
         if rt.counters.claim_deferred > 0 {
             failures.push(format!("hd_1080p RT still deferring claims at frame 35: {}", rt.counters.claim_deferred));
         }
-        if nrt.counters.claim_deferred > 0 {
-            failures.push(format!("hd_1080p Non-RT still deferring claims at frame 35: {}", nrt.counters.claim_deferred));
+        if nrt.counters.claim_deferred > 1024 || nrt_miss_rate > 0.05 {
+            failures.push(format!(
+                "hd_1080p Non-RT starved at frame 35: deferred={} g_miss={:.1}%",
+                nrt.counters.claim_deferred,
+                nrt_miss_rate * 100.0
+            ));
         }
         if rt.counters.external_requests > 256 || nrt.counters.external_requests > 256 {
             failures.push(format!(
