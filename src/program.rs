@@ -2203,7 +2203,9 @@ pub(crate) fn standard_returning(value: &str) -> String {
 #[cfg(test)]
 #[test]
 fn reads_normal_variance_finds_calls_only() {
-    assert!(!reads_normal_variance(include_str!(
+    // The built-in standard program enables analytical specular AA via filtered_roughness and
+    // material_normal_variance; toon keeps raw roughness.
+    assert!(reads_normal_variance(include_str!(
         "../shaders/programs/standard.wgsl"
     )));
     assert!(!reads_normal_variance(include_str!(

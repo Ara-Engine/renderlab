@@ -906,7 +906,25 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
             let under=vsm_height(peel);
             let t2=under-p.z;
             if t2>lo && vd_above(vec3<f32>(c,under),margin) {
-                let m2=vd_column_mask(c-p.xy,0.5*size,max(max(t2-VD_THICK*size,lo),1e-6*size),min(t2,hi));
+                var bot2=t2-VD_THICK*size;
+                if bot2>min_lo {
+                    let p_own=peel.x>>bits;
+                    for(var k=0u;k<4u;k+=1u) {
+                        let n=cell+stride*vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
+                        if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
+                        let j=vsm_index(n,level);
+                        if j==VSM_NONE {continue;}
+                        let nt=vsm_top_words[j];
+                        if nt.x!=0u && nt.x>>bits==p_own {
+                            bot2=min(bot2,vsm_height(nt)-p.z);
+                        } else {
+                            let np=vsm_peel_words[j];
+                            if np.x!=0u && np.x>>bits==p_own {bot2=min(bot2,vsm_height(np)-p.z);}
+                        }
+                        if bot2<=min_lo {break;}
+                    }
+                }
+                let m2=vd_column_mask(c-p.xy,0.5*size,max(max(bot2,lo),1e-6*size),min(t2,hi));
                 vd_mask|=m2;
                 if vd_edge && !vd_replaced(cell,level,stride,min(t2,hi)) {vd_far|=m2;}
             }
@@ -1080,9 +1098,44 @@ fn vd_map(ceiling:f32) {
                 let t=height-p.z;
                 if t<=lo {continue;}
                 if VD_MIP_POINT {
-                    let at=vec2<i32>(cx,y)*step+vec2<i32>(step/2);
-                    let c=origin_last+(vec2<f32>(at)+vec2<f32>(0.5))*texel_last;
+                    // Use the true mip-cell centre `(cx + 0.5) * cell` (not `(at + 0.5) * texel_last`,
+                    // which sits +0.5 fine texels off centre and leaves a half-texel slit along every
+                    // mip-cell edge where `a = floor(x - r)` begins).
+                    let c=origin_last+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*cell;
                     if t*slope<=length(max(abs(c-ps)-vec2<f32>(0.5*cell),vec2<f32>(0.0))) {continue;}
+                    var at=vec2<i32>(cx,y)*step+vec2<i32>(step/2);
+                    // Because `t > lo` came from the cell's max-mip, at a band boundary or wall
+                    // edge the default centre sample `at` can sit on the lower side (`<= lo`) while
+                    // another sub-texel of this mip cell holds the occluder above `lo`. Probe the
+                    // cell's 4 quadrant centres only in that rare miss case so no band seam opens.
+                    let i0=vsm_index(at,last);
+                    let w0=select(vec2<u32>(0u),vsm_top_words[i0],i0!=VSM_NONE);
+                    if w0.x==0u || vsm_height(w0)-p.z<=lo {
+                        let qstep=max(step/2,1);
+                        let qoff=step/4;
+                        var best_t=lo;
+                        var found=false;
+                        for(var qk=0u;qk<4u;qk+=1u) {
+                            let cand=vec2<i32>(cx,y)*step+vec2<i32>(qoff+i32(qk&1u)*qstep,qoff+i32(qk>>1u)*qstep);
+                            let ci=vsm_index(cand,last);
+                            if ci==VSM_NONE {continue;}
+                            let cw=vsm_top_words[ci];
+                            if cw.x==0u {continue;}
+                            let ct=vsm_height(cw)-p.z;
+                            if ct>best_t {best_t=ct;at=cand;found=true;}
+                        }
+                        if !found {
+                            // A fine texel inside this mip cell cleared `lo` (proven by max-mip `t > lo`)
+                            // but fell between quadrant probes at step >= 4: fall back to the cell's
+                            // max-mip column so thin roof/wall corners never open vertical light bars.
+                            if vd_above(vec3<f32>(c,height),margin) {
+                                let m=vd_column_mask(c-ps,0.5*cell,max(max(lo,t-VD_THICK*cell),1e-6*texel_last),min(t,hi));
+                                vd_mask|=m;
+                                if vd_edge {vd_far|=m;}
+                            }
+                            continue;
+                        }
+                    }
                     vd_texel(at,last,step,c,cell,lo,hi,margin);
                     continue;
                 }

@@ -3,8 +3,9 @@ struct Settings {
     bloom_motion:vec4<f32>, // energy, half shutter fraction, max velocity, frame
     lens:vec4<f32>, // focus m, thin-lens CoC scale in pixels, max CoC, DOF enabled
     grade:vec4<f32>, // contrast, saturation, vignette, grain
-    white:vec4<f32>, // RGB white-balance gains, filmic
+    white:vec4<f32>, // RGB white-balance gains, tonemapper (0 Reinhard, 1 Filmic, 2 AgX)
     display:vec4<f32>, // aberration px, LUT strength, LUT size, unused
+    extra:vec4<f32>, // bloom_threshold, anti_aliasing, sharpening, unused
 };
 @group(0) @binding(0) var input_colour:texture_2d<f32>;
 @group(0) @binding(1) var second_colour:texture_2d<f32>;
@@ -29,10 +30,56 @@ fn tent(t:texture_2d<f32>,uv:vec2<f32>)->vec4<f32> {
     }}
     return c;
 }
+fn bloom_prefilter(rgb:vec3<f32>,thresh:f32)->vec3<f32> {
+    let c=max(rgb,vec3<f32>(0.0));
+    if thresh<=0.0 {return c;}
+    let br=max(c.r,max(c.g,c.b));
+    let knee=thresh*0.5;
+    let soft=clamp(br-thresh+knee,0.0,2.0*knee);
+    let contrib=max(br-thresh,(soft*soft)/max(4.0*knee,1e-5))/max(br,1e-5);
+    return c*contrib;
+}
+fn karis_weight(c:vec3<f32>)->f32 {
+    return 1.0/(1.0+dot(max(c,vec3<f32>(0.0)),vec3<f32>(0.2126,0.7152,0.0722)));
+}
 @compute @workgroup_size(8,8) fn downsample(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(output_colour);if any(id.xy>=size) {return;}
+    let in_size=textureDimensions(input_colour);
+    let d=1.0/vec2<f32>(in_size);
     let uv=(vec2<f32>(id.xy)+0.5)/vec2<f32>(size);
-    textureStore(output_colour,id.xy,tent(input_colour,uv));
+    let mip0=all(in_size==textureDimensions(second_colour));
+    // 13-tap Jimenez downsample with Karis firefly weighting + soft-knee highlight threshold on mip 0.
+    let a=bilinear(input_colour,uv+vec2<f32>(-2.0,-2.0)*d).rgb;
+    let b=bilinear(input_colour,uv+vec2<f32>( 0.0,-2.0)*d).rgb;
+    let c=bilinear(input_colour,uv+vec2<f32>( 2.0,-2.0)*d).rgb;
+    let e=bilinear(input_colour,uv+vec2<f32>(-1.0,-1.0)*d).rgb;
+    let f=bilinear(input_colour,uv+vec2<f32>( 1.0,-1.0)*d).rgb;
+    let g=bilinear(input_colour,uv+vec2<f32>(-2.0, 0.0)*d).rgb;
+    let h=bilinear(input_colour,uv).rgb;
+    let i=bilinear(input_colour,uv+vec2<f32>( 2.0, 0.0)*d).rgb;
+    let j=bilinear(input_colour,uv+vec2<f32>(-1.0, 1.0)*d).rgb;
+    let k=bilinear(input_colour,uv+vec2<f32>( 1.0, 1.0)*d).rgb;
+    let l=bilinear(input_colour,uv+vec2<f32>(-2.0, 2.0)*d).rgb;
+    let m=bilinear(input_colour,uv+vec2<f32>( 0.0, 2.0)*d).rgb;
+    let n=bilinear(input_colour,uv+vec2<f32>( 2.0, 2.0)*d).rgb;
+    if mip0 {
+        let th=settings.extra.x;
+        let q0=(bloom_prefilter(e,th)+bloom_prefilter(f,th)+bloom_prefilter(j,th)+bloom_prefilter(k,th))*0.25;
+        let q1=(bloom_prefilter(a,th)+bloom_prefilter(b,th)+bloom_prefilter(g,th)+bloom_prefilter(h,th))*0.25;
+        let q2=(bloom_prefilter(b,th)+bloom_prefilter(c,th)+bloom_prefilter(h,th)+bloom_prefilter(i,th))*0.25;
+        let q3=(bloom_prefilter(g,th)+bloom_prefilter(h,th)+bloom_prefilter(l,th)+bloom_prefilter(m,th))*0.25;
+        let q4=(bloom_prefilter(h,th)+bloom_prefilter(i,th)+bloom_prefilter(m,th)+bloom_prefilter(n,th))*0.25;
+        let w0=0.5*karis_weight(q0);
+        let w1=0.125*karis_weight(q1);
+        let w2=0.125*karis_weight(q2);
+        let w3=0.125*karis_weight(q3);
+        let w4=0.125*karis_weight(q4);
+        let rgb=(q0*w0+q1*w1+q2*w2+q3*w3+q4*w4)/max(w0+w1+w2+w3+w4,1e-5);
+        textureStore(output_colour,id.xy,vec4<f32>(min(rgb,vec3<f32>(65504.0)),1.0));
+        return;
+    }
+    let rgb=(e+f+j+k)*0.125+(a+c+l+n)*0.03125+(b+g+i+m)*0.0625+h*0.125;
+    textureStore(output_colour,id.xy,vec4<f32>(min(max(rgb,vec3<f32>(0.0)),vec3<f32>(65504.0)),1.0));
 }
 @compute @workgroup_size(8,8) fn upsample(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(output_colour);if any(id.xy>=size) {return;}

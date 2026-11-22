@@ -72,8 +72,11 @@ fn integrated_reflection_spirv_has_no_ray_query_null() {
 fn neutral() -> PostSettings {
     PostSettings {
         bloom: 0.0,
+        bloom_threshold: 0.0,
         motion_blur: false,
         vignette: 0.0,
+        anti_aliasing: false,
+        sharpening: 0.0,
         ..Default::default()
     }
 }
@@ -126,6 +129,27 @@ fn variants() -> Vec<(&'static str, PostSettings)> {
             "filmic",
             PostSettings {
                 tonemapper: Tonemapper::Filmic,
+                ..n
+            },
+        ),
+        (
+            "agx",
+            PostSettings {
+                tonemapper: Tonemapper::AgX,
+                ..n
+            },
+        ),
+        (
+            "aa",
+            PostSettings {
+                anti_aliasing: true,
+                ..n
+            },
+        ),
+        (
+            "sharpen",
+            PostSettings {
+                sharpening: 0.35,
                 ..n
             },
         ),

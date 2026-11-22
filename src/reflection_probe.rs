@@ -94,6 +94,8 @@ fn shader() -> String {
         "reflection_needs_environment",
         "rl_finite",
         "material_normal",
+        "filtered_roughness",
+        "geometric_normal_variance",
         // TP1: the standard program's transparency inputs.
         "transparent_material",
         "transparent_opacity",
@@ -119,8 +121,9 @@ fn shader() -> String {
         source.push_str(line);
         source.push('\n');
     }
-    // TP2: this isolated reference adapter has no transparent casters.
+    // TP2: this isolated reference adapter has no transparent casters or normal-variance layers.
     source.push_str("fn transparent_sun_transmission(world:vec3<f32>, direction:vec3<f32>)->vec3<f32> { return vec3<f32>(1.0); }\n");
+    source.push_str("fn material_normal_variance(input:SurfaceInput) -> f32 { return 0.0; }\n");
     let standard = crate::STANDARD_PROGRAM
         .replace("Surface", "StdSurface")
         .replace("StdSurfaceInput", "SurfaceInput")

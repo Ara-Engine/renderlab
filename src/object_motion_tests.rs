@@ -213,8 +213,11 @@ fn gpu_object_motion() {
     };
     let neutral = PostSettings {
         bloom: 0.,
+        bloom_threshold: 0.,
         motion_blur: false,
         vignette: 0.,
+        anti_aliasing: false,
+        sharpening: 0.,
         ..Default::default()
     };
     let mut rows = vec![];

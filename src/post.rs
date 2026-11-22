@@ -8,6 +8,9 @@ pub enum Tonemapper {
     Reinhard,
     /// A compact ACES-like filmic shoulder, not the ACES colour-management pipeline.
     Filmic,
+    /// AgX inset-matrix filmic curve: smooth highlight desaturation with zero hue skew on
+    /// saturated emissives, neon signs, and bright skies.
+    AgX,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,6 +57,13 @@ pub struct PostSettings {
     pub grain: f32,
     pub chromatic_aberration_px: f32,
     pub lut_strength: f32,
+    /// Soft-knee luminance threshold (display-referred linear) for highlight bloom. Zero disables
+    /// thresholding and uses the legacy energy-conserving full-range mix.
+    pub bloom_threshold: f32,
+    /// Post-transparency edge-directed anti-aliasing (FXAA 3.11 Quality) in perceptual sRGB space.
+    pub anti_aliasing: bool,
+    /// Local contrast-adaptive sharpening (AMD FidelityFX CAS) in [0, 1]; zero disables it.
+    pub sharpening: f32,
 }
 impl Default for PostSettings {
     fn default() -> Self {
@@ -73,6 +83,9 @@ impl Default for PostSettings {
             grain: 0.0,
             chromatic_aberration_px: 0.0,
             lut_strength: 1.0,
+            bloom_threshold: 0.85,
+            anti_aliasing: true,
+            sharpening: 0.25,
         }
     }
 }
@@ -84,7 +97,7 @@ impl PostSettings {
             ..Self::default()
         }
     }
-    /// The `Settings` record the post kernels and the tone stage read: five vec4.
+    /// The `Settings` record the post kernels and the tone stage read: six vec4 (96 bytes).
     /// `serial` counts post frames from one, `height` is the output height in pixels,
     /// and the LUT strength is zero until a custom LUT is installed.
     pub(crate) fn record(
@@ -93,7 +106,7 @@ impl PostSettings {
         height: u32,
         lut_width: u32,
         lut_custom: bool,
-    ) -> [f32; 20] {
+    ) -> [f32; 24] {
         let d = self.depth_of_field.unwrap_or_default();
         let focal = d.focal_length_mm * 0.001;
         let scale = focal * focal / (d.f_number * (d.focus_distance_m - focal)) * height as f32
@@ -106,6 +119,11 @@ impl PostSettings {
             (-self.tint * 0.15).exp(),
             (-warmth * 0.35).exp(),
         ];
+        let tonemapper_id = match self.tonemapper {
+            Tonemapper::Reinhard => 0.0,
+            Tonemapper::Filmic => 1.0,
+            Tonemapper::AgX => 2.0,
+        };
         [
             self.bloom,
             self.shutter_angle_degrees / 720.0,
@@ -122,10 +140,14 @@ impl PostSettings {
             white[0],
             white[1],
             white[2],
-            u32::from(self.tonemapper == Tonemapper::Filmic) as f32,
+            tonemapper_id,
             self.chromatic_aberration_px,
             if lut_custom { self.lut_strength } else { 0.0 },
             lut_width as f32,
+            0.0,
+            self.bloom_threshold,
+            u32::from(self.anti_aliasing) as f32,
+            self.sharpening,
             0.0,
         ]
     }
@@ -142,6 +164,8 @@ impl PostSettings {
             || !range(self.grain, 0.0, 0.1)
             || !range(self.chromatic_aberration_px, 0.0, 4.0)
             || !range(self.lut_strength, 0.0, 1.0)
+            || !range(self.bloom_threshold, 0.0, 100.0)
+            || !range(self.sharpening, 0.0, 1.0)
         {
             return Err(Error::InvalidInput("invalid post settings"));
         }
@@ -225,5 +249,27 @@ mod tests {
         assert_eq!(lut.rgb[63], [1.0; 3]);
         lut.rgb.pop();
         assert!(lut.validate().is_err());
+
+        // Validate Wave 1 additions: AgX tonemapper, bloom_threshold, anti_aliasing, sharpening.
+        let mut agx = PostSettings {
+            tonemapper: Tonemapper::AgX,
+            bloom_threshold: 1.25,
+            anti_aliasing: true,
+            sharpening: 0.5,
+            ..Default::default()
+        };
+        agx.validate().unwrap();
+        let rec = agx.record(1, 1080, 16, false);
+        assert_eq!(rec[15], 2.0);
+        assert_eq!(rec[20], 1.25);
+        assert_eq!(rec[21], 1.0);
+        assert_eq!(rec[22], 0.5);
+        agx.bloom_threshold = -0.1;
+        assert!(agx.validate().is_err());
+        agx.bloom_threshold = 0.0;
+        agx.sharpening = 1.1;
+        assert!(agx.validate().is_err());
+        agx.sharpening = f32::NAN;
+        assert!(agx.validate().is_err());
     }
 }

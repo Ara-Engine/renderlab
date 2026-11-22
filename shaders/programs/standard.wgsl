@@ -19,7 +19,12 @@ fn surface(input:SurfaceInput) -> Surface {
     let n=material_normal(input);
     let base=clamp(material.base_color.rgb*input.color.rgb*sampled.rgb*TINT,vec3<f32>(0.0),vec3<f32>(1.0));
     let metal=clamp(material.metallic*mr.b,0.0,1.0);
-    let rough=clamp(material.roughness*mr.g,0.0,1.0);
+    // Analytical geometric + normal-map specular AA (Kaplanyan/Tokuyoshi): bit-identical on flat
+    // untextured geometry (zero variance) while eliminating 1-pixel specular fireflies on thin wires,
+    // window mullions, chains, and grazed normal-mapped masonry.
+    var rough_var=geometric_normal_variance(input);
+    if material.normal_mapped!=0u { rough_var+=material_normal_variance(input); }
+    let rough=filtered_roughness(clamp(material.roughness*mr.g,0.0,1.0),min(rough_var,0.18));
     // DC1: apply overlays to resolved inputs, before any BRDF or user shading.
     let decal_base=decal_base_color(input,vec4<f32>(base,1.0));
     let decal_mr=decal_metallic_roughness(input,vec2<f32>(rough,metal));

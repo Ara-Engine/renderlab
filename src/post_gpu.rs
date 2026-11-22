@@ -10,6 +10,7 @@ pub(super) struct PostGpu {
     aux: Depth,
     tile: Depth,
     ping: [Depth; 2],
+    graded: Depth,
     down: Vec<Depth>,
     up: Vec<Depth>,
     pipelines: std::sync::Arc<PostPipelines>,
@@ -36,17 +37,20 @@ pub(super) struct PostPipelines {
     primary_pipeline: Option<Owned<wgpu::ComputePipeline>>,
     raster_layout: Owned<wgpu::BindGroupLayout>,
     raster_pipeline: Owned<wgpu::ComputePipeline>,
+    grade_layout: Owned<wgpu::BindGroupLayout>,
+    grade: Owned<wgpu::ComputePipeline>,
     tone_layout: Owned<wgpu::BindGroupLayout>,
     tone: Owned<wgpu::RenderPipeline>,
 }
 struct Groups {
-    key: (wgpu::Texture, Option<wgpu::Texture>, bool, bool, bool),
+    key: (wgpu::Texture, Option<wgpu::Texture>, bool, bool, bool, bool),
     surface: Owned<wgpu::BindGroup>,
     tile: Owned<wgpu::BindGroup>,
     motion: Owned<wgpu::BindGroup>,
     dof: Owned<wgpu::BindGroup>,
     down: Vec<Owned<wgpu::BindGroup>>,
     up: Vec<Owned<wgpu::BindGroup>>,
+    grade: Owned<wgpu::BindGroup>,
     tone: Owned<wgpu::BindGroup>,
 }
 fn entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
@@ -151,7 +155,7 @@ fn pipeline(
                 module: &module,
                 entry_point: Some(entry),
                 compilation_options: Default::default(),
-                cache: None,
+                cache: r.device.pipeline_cache(),
             }),
         ResourceKind::ComputePipeline,
     )
@@ -217,6 +221,7 @@ fn raster_surface_source(samples: SampleCount) -> String {
 pub(super) fn compile_structure_sources() -> Result<Vec<(&'static str, String)>, Error> {
     Ok(vec![
         ("filters", include_str!("../shaders/post.wgsl").to_owned()),
+        ("grade", include_str!("../shaders/post_grade.wgsl").to_owned()),
         ("tone", include_str!("../shaders/post_tone.wgsl").to_owned()),
         ("primary-surface", primary_surface_source()?),
         ("raster-surface-1x", raster_surface_source(SampleCount::One)),
@@ -250,7 +255,7 @@ impl PostPipelines {
                 sampled(2, float),
                 sampled(3, float),
                 storage(4, F::Rgba16Float),
-                uniform(5, 80),
+                uniform(5, 96),
                 entry(
                     6,
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
@@ -317,6 +322,35 @@ impl PostPipelines {
             &raster_source,
             "surface_raster",
         );
+        let grade_layout = layout(
+            r,
+            "post grade",
+            &[
+                sampled(0, T::Float { filterable: true }),
+                sampled(1, T::Float { filterable: true }),
+                entry(
+                    2,
+                    wgpu::BindingType::Texture {
+                        sample_type: T::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                ),
+                entry(
+                    3,
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+                uniform(4, 96),
+                storage(5, F::Rgba16Float),
+            ],
+        );
+        let grade = pipeline(
+            r,
+            "post grade",
+            &[&grade_layout],
+            include_str!("../shaders/post_grade.wgsl"),
+            "grade",
+        );
         let tone_layout = layout(
             r,
             "post tone",
@@ -335,7 +369,8 @@ impl PostPipelines {
                     3,
                     wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 ),
-                uniform(4, 80),
+                uniform(4, 96),
+                sampled(5, T::Float { filterable: true }),
             ],
         );
         let pl = r
@@ -372,7 +407,7 @@ impl PostPipelines {
                     depth_stencil: None,
                     multisample: Default::default(),
                     multiview_mask: None,
-                    cache: None,
+                    cache: r.device.pipeline_cache(),
                 }),
             ResourceKind::RenderPipeline,
         );
@@ -384,6 +419,8 @@ impl PostPipelines {
             primary_pipeline,
             raster_layout,
             raster_pipeline,
+            grade_layout,
+            grade,
             tone_layout,
             tone,
         })
@@ -428,7 +465,7 @@ impl PostGpu {
         }
         let mut result = Self {
             size,
-            settings: Buffer::new(r, "post settings", 80, wgpu::BufferUsages::UNIFORM),
+            settings: Buffer::new(r, "post settings", 96, wgpu::BufferUsages::UNIFORM),
             frame: Buffer::new(r, "post camera", 272, wgpu::BufferUsages::UNIFORM),
             aux: texture(
                 r,
@@ -455,6 +492,10 @@ impl PostGpu {
                 image("post motion", needed(settings.motion_blur, size)),
                 image("post DOF", needed(settings.depth_of_field.is_some(), size)),
             ],
+            graded: image(
+                "post graded",
+                needed(settings.anti_aliasing || settings.sharpening > 0.0, size),
+            ),
             down,
             up,
             pipelines,
@@ -581,6 +622,7 @@ impl PostGpu {
             s.motion_blur,
             s.depth_of_field.is_some(),
             s.bloom > 0.0,
+            s.anti_aliasing || s.sharpening > 0.0,
         );
         if self.groups.as_ref().is_some_and(|g| g.key == key) {
             return;
@@ -674,6 +716,19 @@ impl PostGpu {
             })
             .collect();
         let bloom = if s.bloom > 0.0 { &self.up[0] } else { colour };
+        let grade = group(
+            r,
+            "post grade",
+            &self.pipelines.grade_layout,
+            &[
+                (0, R::TextureView(&colour.view)),
+                (1, R::TextureView(&bloom.view)),
+                (2, R::TextureView(&self.lut.view)),
+                (3, R::Sampler(&self.sampler)),
+                (4, self.settings.value.as_entire_binding()),
+                (5, R::TextureView(&self.graded.view)),
+            ],
+        );
         let tone = group(
             r,
             "post tone",
@@ -684,6 +739,7 @@ impl PostGpu {
                 (2, R::TextureView(&self.lut.view)),
                 (3, R::Sampler(&self.sampler)),
                 (4, self.settings.value.as_entire_binding()),
+                (5, R::TextureView(&self.graded.view)),
             ],
         );
         self.groups = Some(Groups {
@@ -694,6 +750,7 @@ impl PostGpu {
             dof,
             down,
             up,
+            grade,
             tone,
         });
     }
@@ -744,6 +801,12 @@ impl PostGpu {
             &mut self.ping[1],
             "post DOF",
             needed(s.depth_of_field.is_some(), self.size),
+            F::Rgba16Float,
+        );
+        resize(
+            &mut self.graded,
+            "post graded",
+            needed(s.anti_aliasing || s.sharpening > 0.0, self.size),
             F::Rgba16Float,
         );
         let mut level = self.size;
@@ -816,6 +879,15 @@ impl PostGpu {
                 dispatch(encoder, 1, group, self.up[i].texture.size());
             }
         }
+        if s.anti_aliasing || s.sharpening > 0.0 {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("post grade"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.grade);
+            pass.set_bind_group(0, &*g.grade, &[]);
+            pass.dispatch_workgroups(self.size.width.div_ceil(8), self.size.height.div_ceil(8), 1);
+        }
     }
     pub(super) fn tone<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_pipeline(&self.pipelines.tone);
@@ -884,7 +956,7 @@ impl Renderer {
         }
         let p = std::sync::Arc::new(PostPipelines::new(self)?);
         self.pipelines.created += p.kernels.len() as u64
-            + 2 // raster auxiliary and tone
+            + 3 // raster auxiliary, grade and tone
             + u64::from(p.primary_pipeline.is_some());
         self.post_pipelines.push(p.clone());
         Ok(p)
@@ -928,6 +1000,7 @@ mod tests {
             + include_str!("../shaders/post_surface.wgsl");
         for source in [
             include_str!("../shaders/post.wgsl"),
+            include_str!("../shaders/post_grade.wgsl"),
             include_str!("../shaders/post_tone.wgsl"),
             include_str!("../shaders/post_raster_surface.wgsl"),
             &primary,
