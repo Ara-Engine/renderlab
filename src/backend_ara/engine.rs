@@ -733,6 +733,26 @@ impl Engine {
         }
         Ok(())
     }
+    /// Sets a material's base colour, metallic and roughness, checked as the wgpu engine
+    /// checks them. This layer's reconstruction key still names every object's factors, so
+    /// an edit here restarts its history.
+    pub fn set_material_factors(
+        &mut self,
+        material: MaterialId,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), Error> {
+        if !crate::material::valid_factors(&base_color, metallic, roughness) {
+            return Err(Error::InvalidInput(
+                "material factors must be finite in [0,1]",
+            ));
+        }
+        let material = &mut self.state.materials.get_mut(material)?.material;
+        (material.base_color, material.metallic, material.roughness) =
+            (base_color, metallic, roughness);
+        Ok(())
+    }
     /// Keeps the map for `Sky::Map`; the first frame that names it uploads it. Maps above
     /// the wgpu renderer's default policy are refused as it refuses them.
     pub fn create_environment(
@@ -1293,6 +1313,16 @@ impl Scene for Bound<'_> {
         values: &[(&str, Value)],
     ) -> Result<(), Error> {
         self.engine.set_material_parameters(material, values)
+    }
+    fn set_material_factors(
+        &mut self,
+        material: MaterialId,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), Error> {
+        self.engine
+            .set_material_factors(material, base_color, metallic, roughness)
     }
     fn create_environment(&mut self, data: &PreparedEnvironment) -> Result<EnvironmentId, Error> {
         self.engine.create_environment(data)

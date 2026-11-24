@@ -2660,6 +2660,8 @@ fn frame(
                 moving_bounds: None,
                 moving_boxes: vec![],
                 listing: false,
+                // The port's key still names every object's factors: edits restart it.
+                edited_bounds: vec![],
             });
             // The rotation word (zero with `rotate_directions` off), then the sampling
             // words the planner budgets.

@@ -687,6 +687,28 @@ impl Engine {
         let entry = self.state.materials.get(material)?;
         self.renderer.try_update_parameters(&entry.material, values)
     }
+    /// Sets a material's base colour, metallic and roughness factors, keeping its textures,
+    /// program and objects: a buffer write, checked as `create_material` checks them. Only
+    /// the surfaces drawn with it restart their temporal history.
+    pub fn set_material_factors(
+        &mut self,
+        material: MaterialId,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), Error> {
+        let entry = self.state.materials.get_mut(material)?;
+        self.renderer.try_update_material_factors(
+            &mut entry.material,
+            base_color,
+            metallic,
+            roughness,
+        )?;
+        if let Some(dump) = &mut self.dump {
+            dump.material_factors(material, base_color, metallic, roughness);
+        }
+        Ok(())
+    }
     pub fn material_program(&self, material: MaterialId) -> Result<ProgramId, Error> {
         Ok(self.state.materials.get(material)?.program)
     }

@@ -1100,3 +1100,35 @@ fn gpu_aa_asset_cost_observations() {
         "aa_cost_observations rounds=5 warmup=20 samples_per_round=120 extent=641x359 development_build=true timestamps=render_pass_boundaries production_comparison=inconclusive_no_profiler_or_release_build"
     );
 }
+
+/// In-place factor edits (`try_update_material_factors`): one 24-byte write, checked as
+/// creation checks factors, and left out of the uploads that restart every reconstructed pixel.
+#[test]
+#[ignore = "Vulkan GPU; in-place material factor edits"]
+fn gpu_material_factor_edits_in_place() {
+    let _validation = validation::begin(true);
+    let mut r = material_renderer(SampleCount::One);
+    let mut m = material(&mut r, &MaterialDescriptor::default());
+    let uploads = r.stats().uploads.materials;
+    let restarting = r.restarting_material_uploads();
+    r.try_update_material_factors(&mut m, [0.2, 0.4, 0.6, 1.0], 0.5, 0.25)
+        .unwrap();
+    assert_eq!(m.base_color, [0.2, 0.4, 0.6, 1.0]);
+    assert_eq!(r.stats().uploads.materials - uploads, 24);
+    assert_eq!(r.restarting_material_uploads(), restarting);
+    for (base, metallic, roughness) in [
+        ([f32::NAN, 0.0, 0.0, 1.0], 0.0, 0.5),
+        ([0.5; 4], 1.5, 0.5),
+        ([0.5; 4], 0.0, -0.1),
+    ] {
+        assert!(
+            r.try_update_material_factors(&mut m, base, metallic, roughness)
+                .is_err()
+        );
+    }
+    assert_eq!(m.base_color, [0.2, 0.4, 0.6, 1.0]);
+    assert_eq!(r.stats().uploads.materials - uploads, 24);
+    // A new material still restarts every pixel.
+    let _other = material(&mut r, &MaterialDescriptor::default());
+    assert!(r.restarting_material_uploads() > restarting);
+}

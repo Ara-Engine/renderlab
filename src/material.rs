@@ -199,14 +199,66 @@ impl Material {
         Some((t.opacity * self.base_color[3] * mean).clamp(0.0, 1.0))
     }
 }
+/// Whether material factors are what every material needs: finite, in [0, 1].
+pub(crate) fn valid_factors(base_color: &[f32; 4], metallic: f32, roughness: f32) -> bool {
+    base_color
+        .iter()
+        .chain([&metallic, &roughness])
+        .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+}
+
+/// Renderer frames an in-place edit stays listed once more than `EDIT_LIMIT` materials carry
+/// one; a view that has not rendered since an edit it dropped restarts instead.
+const EDIT_FRAMES: u64 = 240;
+const EDIT_LIMIT: usize = 256;
+
+/// In-place edits of live materials (`Renderer::try_update_material_factors` and
+/// `try_update_parameters`): buffer writes that change no geometry, binding or id. TR1 leaves
+/// their bytes out of its restart key (`reconstruction_key`) and restarts only the surfaces
+/// drawn with an edited material (`prepare_reconstruction`), so dragging one object's colour no
+/// longer restarts every pixel. Global illumination relights on them (`light_key`).
+#[derive(Default)]
+pub(crate) struct MaterialEdits {
+    /// Bytes the edits uploaded, also counted in `UploadBytes::materials`.
+    pub bytes: u64,
+    /// Each edited material's last edit, as the renderer's submitted frame count when it was
+    /// made, keyed by its parameter block's address (unique while the material lives).
+    stamps: std::collections::HashMap<usize, u64>,
+    /// The latest stamp dropped from `stamps`.
+    dropped: Option<u64>,
+}
+impl MaterialEdits {
+    /// Records an edit of `material` made after `frame` frames were submitted.
+    pub(crate) fn record(&mut self, material: &Material, frame: u64, bytes: u64) {
+        self.bytes += bytes;
+        self.stamps
+            .insert(Arc::as_ptr(&material.parameters) as usize, frame);
+        if self.stamps.len() > EDIT_LIMIT {
+            let keep = frame.saturating_sub(EDIT_FRAMES);
+            let dropped = &mut self.dropped;
+            self.stamps.retain(|_, &mut stamp| {
+                if stamp < keep {
+                    *dropped = Some(dropped.map_or(stamp, |d| d.max(stamp)));
+                }
+                stamp >= keep
+            });
+        }
+    }
+    /// Whether a view that last submitted frame `last_frame` may have missed a dropped edit.
+    pub(crate) fn lost_since(&self, last_frame: u64) -> bool {
+        self.dropped.is_some_and(|d| d >= last_frame)
+    }
+    /// Whether `material` was edited after a view's last submitted frame `last_frame`.
+    pub(crate) fn edited_since(&self, material: &Material, last_frame: u64) -> bool {
+        self.stamps
+            .get(&(Arc::as_ptr(&material.parameters) as usize))
+            .is_some_and(|&stamp| stamp >= last_frame)
+    }
+}
+
 impl MaterialDescriptor<'_> {
     pub(crate) fn validate(&self, renderer: &Arc<()>) -> Result<(), Error> {
-        if !self
-            .base_color
-            .iter()
-            .chain([&self.metallic, &self.roughness])
-            .all(|v| v.is_finite() && (0.0..=1.0).contains(v))
-        {
+        if !valid_factors(&self.base_color, self.metallic, self.roughness) {
             return Err(Error::InvalidInput(
                 "material factors must be finite in [0,1]",
             ));

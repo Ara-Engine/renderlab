@@ -124,6 +124,18 @@ impl Recorder {
             transparency: desc.transparency,
         });
     }
+    /// An in-place factor edit (`Engine::set_material_factors`).
+    pub(super) fn material_factors(
+        &mut self,
+        id: MaterialId,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+    ) {
+        if let Some(m) = self.materials.get_mut(&id) {
+            (m.desc, m.metallic, m.roughness) = (base_color, metallic, roughness);
+        }
+    }
 
     /// The label renderer frame `frame` dumps under: `frame-<id>` when listed, else the label
     /// in `<dir>/arm` if it exists (consumed); and whether it starts a motion recording (the arm

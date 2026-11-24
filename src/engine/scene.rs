@@ -35,6 +35,15 @@ pub trait Scene {
         material: MaterialId,
         values: &[(&str, Value)],
     ) -> Result<(), Error>;
+    /// Sets a material's base colour, metallic and roughness in place, keeping its textures,
+    /// program and objects; checked as `create_material` checks them.
+    fn set_material_factors(
+        &mut self,
+        material: MaterialId,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), Error>;
     fn create_environment(&mut self, data: &PreparedEnvironment) -> Result<EnvironmentId, Error>;
     /// Takes the asset by value: its vertex data moves into the upload. Each layer
     /// prepares meshes in its own way, so each implements this.
@@ -165,6 +174,15 @@ impl Scene for Engine {
         values: &[(&str, Value)],
     ) -> Result<(), Error> {
         Engine::set_material_parameters(self, material, values)
+    }
+    fn set_material_factors(
+        &mut self,
+        material: MaterialId,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), Error> {
+        Engine::set_material_factors(self, material, base_color, metallic, roughness)
     }
     fn create_environment(&mut self, data: &PreparedEnvironment) -> Result<EnvironmentId, Error> {
         Engine::create_environment(self, data)

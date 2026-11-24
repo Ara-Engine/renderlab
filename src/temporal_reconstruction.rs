@@ -275,11 +275,8 @@ fn restart_radius(range: Option<f32>, level: f32) -> f32 {
     hi
 }
 /// The restart spheres (centre, squared radius) of the local lights whose candela changed
-/// from `previous` (bits, in order): each holds every point where the light's swing, the
-/// largest channel distance from its current candela to either end of its `swings` range,
-/// could change the exposed illuminance by `budget` or more. The key equals the previous
-/// frame's, so the local lights are the same lights in the same order. At most `RELIT_SLOTS`
-/// spheres: the smallest ones beyond that are replaced by one sphere bounding them.
+/// from `previous` (bits, in order), packed as the frame carries them (`packed_spheres`).
+#[cfg(test)]
 fn relit_zones(
     previous: &[[u32; 3]],
     swings: &[Swing],
@@ -287,7 +284,21 @@ fn relit_zones(
     exposure: f32,
     budget: f32,
 ) -> Vec<[f32; 4]> {
-    let mut spheres: Vec<(Vec3, f32)> = lights
+    packed_spheres(light_spheres(previous, swings, lights, exposure, budget))
+}
+/// The restart spheres (centre, radius) of the local lights whose candela changed from
+/// `previous` (bits, in order): each holds every point where the light's swing, the largest
+/// channel distance from its current candela to either end of its `swings` range, could change
+/// the exposed illuminance by `budget` or more. The key equals the previous frame's, so the
+/// local lights are the same lights in the same order.
+fn light_spheres(
+    previous: &[[u32; 3]],
+    swings: &[Swing],
+    lights: &[Light],
+    exposure: f32,
+    budget: f32,
+) -> Vec<(Vec3, f32)> {
+    lights
         .iter()
         .filter_map(|l| match *l {
             Light::Point {
@@ -313,7 +324,11 @@ fn relit_zones(
             (position, restart_radius(range, swing * exposure / budget))
         })
         .filter(|&(_, radius)| radius > 0.0)
-        .collect();
+        .collect()
+}
+/// Restart spheres (centre, radius) as `Tr1Zones.relit` rows (centre, squared radius). At most
+/// `RELIT_SLOTS`: the smallest ones beyond that are replaced by one sphere bounding them.
+fn packed_spheres(mut spheres: Vec<(Vec3, f32)>) -> Vec<[f32; 4]> {
     if spheres.len() > RELIT_SLOTS {
         spheres.sort_by(|a, b| b.1.total_cmp(&a.1));
         let rest = spheres.split_off(RELIT_SLOTS - 1);
@@ -1347,6 +1362,9 @@ pub(crate) struct PlanInputs<'a> {
     pub(crate) moving_boxes: Vec<crate::shadow_plan::Bounds>,
     /// P-RTS: the penumbra pass is compiled and edges are deferred.
     pub(crate) listing: bool,
+    /// The world box of each placement drawn with a material edited in place since this
+    /// view's last frame (`MaterialEdits`): its surfaces restart, its neighbours are boxed.
+    pub(crate) edited_bounds: Vec<crate::shadow_plan::Bounds>,
 }
 
 /// A frame's plan: the `Tr1Frame` record, and the primary frame record's sampling words
@@ -1570,8 +1588,8 @@ impl Planner {
             &intensities,
         );
         let relit = !self.reset && previous.is_some_and(|p| p.intensities != intensities);
-        let relit_spheres = match previous {
-            Some(p) if relit => relit_zones(
+        let mut spheres = match previous {
+            Some(p) if relit => light_spheres(
                 &p.intensities,
                 &swings,
                 i.lights,
@@ -1580,6 +1598,19 @@ impl Planner {
             ),
             _ => vec![],
         };
+        // In-place material edits (`MaterialEdits`) never restart the frame either: the surfaces
+        // drawn with an edited material restart inside a sphere around each placement, padded so
+        // the contact ring around it follows too, and the light the edit changes on nearby
+        // surfaces (bounce, reflections) is held to this frame's 3x3 box, as near a mover
+        // (`mover_boxes`). The rest of the frame keeps its whole history.
+        let edited = !self.reset && !i.edited_bounds.is_empty();
+        if edited {
+            spheres.extend(i.edited_bounds.iter().map(|b| {
+                let radius = 0.5 * (b.max - b.min).length();
+                (0.5 * (b.min + b.max), radius * 1.25 + 0.35)
+            }));
+        }
+        let relit_spheres = packed_spheres(spheres);
         // MQ1's clamp event comes from the same submitted transforms that feed
         // TR1/PP1 on the GPU; no second transform history or frame-buffer payload.
         let moved = !self.reset && rigid_motion;
@@ -1592,7 +1623,9 @@ impl Planner {
         // MV1 keeps the shared motion source; MQ1/MQ2 clamp rigid or skinned motion.
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
-            | u32::from((moved || relit || (posed && !self.reset)) && settings.motion_box) << 3
+            | u32::from(
+                (moved || relit || edited || (posed && !self.reset)) && settings.motion_box,
+            ) << 3
             | u32::from(settings.upscale_interpolation) << 4;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
@@ -1770,12 +1803,17 @@ impl Planner {
         // Scoped TR1_BOX mover table: rigid motion clamps only pixels near a mover, in its swept
         // sun shadow, or on a moving surface/silhouette, so distant static surfaces keep full
         // 256-frame temporal convergence instead of boiling whenever an object moves elsewhere.
-        let mover_boxes = if moved && !i.moving_boxes.is_empty() {
-            merge_boxes(&i.moving_boxes, TR1_MOVERS)
-        } else {
-            vec![]
-        };
-        let global_box = relit || (posed && !self.reset) || (moved && mover_boxes.is_empty());
+        // Edited materials' placements join the table: the bounce and reflections their edit
+        // changes on nearby surfaces clamp the same way.
+        let mut boxes = Vec::new();
+        if moved {
+            boxes.extend_from_slice(&i.moving_boxes);
+        }
+        if edited {
+            boxes.extend_from_slice(&i.edited_bounds);
+        }
+        let mover_boxes = merge_boxes(&boxes, TR1_MOVERS);
+        let global_box = relit || (posed && !self.reset) || (moved && i.moving_boxes.is_empty());
         for w in [mover_boxes.len() as u32, u32::from(global_box), 0u32, 0u32] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
@@ -2210,18 +2248,21 @@ impl Renderer {
     /// Identity of every input a reconstructed frame depends on besides the camera, the
     /// eye, exposure, directional-light directions, local-light intensities (P-RELIT), skinned
     /// poses (SK1) and placement transforms (MQ1), which TR1 follows: a change restarts every
-    /// pixel. Programs, prelude, geometry, bindings, materials, textures, new placements, the
+    /// pixel. Programs, prelude, geometry, bindings, new materials, textures, new placements, the
     /// sun's colour, light kinds and local lights' position, direction, range, cone and source
     /// radius, the environment and every shadow and visibility setting. Before MQ1 transform
     /// edits of existing placements restarted every pixel, so a scene with any animated rigid
     /// object never accumulated; they now reproject through their previous transforms. Before
     /// P-RELIT a flickering local light restarted every pixel every frame in the same way;
-    /// it now restarts only its restart sphere (`relit_zones`).
+    /// it now restarts only its restart sphere (`relit_zones`). In-place material edits
+    /// (`MaterialEdits`) restart only the surfaces drawn with the edited material.
     fn reconstruction_key(&self) -> [u8; 32] {
         // The scene's uploads and this view's own, not other views' primary tables.
         let u = &self.uploads;
         let (others, mine) = (&self.primary_uploads, &self.view.primary_uploads);
         let own = |all: u64, others: u64, mine: u64| all - others + mine;
+        // In-place material edits restart only their own surfaces (`MaterialEdits`).
+        let materials = self.restarting_material_uploads();
         let state = self.view.primary.as_ref().unwrap();
         let lights: Vec<_> = self
             .lighting
@@ -2271,7 +2312,7 @@ impl Renderer {
             own(u.geometry, others.geometry, mine.geometry),
             own(u.lut, others.lut, mine.lut),
             own(u.textures, others.textures, mine.textures),
-            own(u.materials, others.materials, mine.materials),
+            own(materials, others.materials, mine.materials),
             // MV1: transform/derived-normal uploads move surfaces; they no longer
             // reset all history. Placement identity/topology stays in the key above.
             own(u.instances, others.instances, mine.instances),
@@ -2529,6 +2570,21 @@ impl Renderer {
                 }
             }
         }
+        // In-place material edits since this view's last frame: the world box of every placement
+        // drawn with an edited material. A view that may have missed an edit restarts.
+        let last_frame = self.view.last_frame;
+        let mut edited_bounds = vec![];
+        for d in draws {
+            if d.material
+                .is_some_and(|m| self.material_edits.edited_since(m, last_frame))
+                && let Ok(boxes) = d.instances.state.world_bounds(d.mesh.bounds)
+            {
+                edited_bounds.extend(boxes.iter().copied());
+            }
+        }
+        if self.material_edits.lost_since(last_frame) {
+            self.view.reconstruction_state.as_mut().unwrap().plan.cut = true;
+        }
         // P-RTS: with the penumbra pass compiled and edges deferred, every receiver first
         // traces the held count; only listed pixels trace the rest of the budget.
         let primary = self.view.primary.as_ref().unwrap();
@@ -2597,6 +2653,7 @@ impl Renderer {
                 moving_bounds,
                 moving_boxes,
                 listing,
+                edited_bounds,
             });
         // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
         let primary_frame = &primary.frame.as_ref().unwrap().0.value;
@@ -2785,6 +2842,7 @@ mod tests {
             moving_bounds: None,
             moving_boxes: vec![],
             listing: false,
+            edited_bounds: vec![],
         }
     }
     /// The courtyard's fire at `scale` of its peak.
@@ -2974,6 +3032,40 @@ mod tests {
         }
         // The lighting cache's own stillness (held_frames) still sees the motion.
         assert_eq!(plan.held_frames(), 0);
+    }
+
+    /// In-place material edits restart only the edited placement's sphere and box its
+    /// neighbourhood: the frame continues, and a frame without an edit restarts nothing.
+    #[test]
+    fn material_edits_restart_only_their_placements() {
+        let crate_box = crate::shadow_plan::Bounds {
+            min: Vec3::new(2.0, 0.0, -1.0),
+            max: Vec3::new(4.0, 2.0, 1.0),
+        };
+        let options = |p: &Planned| u32::from_ne_bytes(p.frame[292..296].try_into().unwrap());
+        // Tr1Frame.mover_meta: the scoped box count and the global clamp word.
+        let movers = |p: &Planned| {
+            let at = ZONES_OFFSET + ZONES_BYTES + 16;
+            [0, 4].map(|k| u32::from_ne_bytes(p.frame[at + k..at + k + 4].try_into().unwrap()))
+        };
+        let mut plan = Planner::new();
+        plan.prepare(inputs(&[], 0));
+        let edited = plan.prepare(PlanInputs {
+            edited_bounds: vec![crate_box],
+            ..inputs(&[], 1)
+        });
+        assert!(!plan.reset, "an edit continues every other pixel");
+        let zones = spheres(&edited);
+        assert_eq!(zones.len(), 1);
+        let (centre, radius) = zones[0];
+        assert!((centre - Vec3::new(3.0, 1.0, 0.0)).length() < 1e-6);
+        assert!(radius > 0.5 * (crate_box.max - crate_box.min).length());
+        assert_ne!(options(&edited) & 8, 0, "the 3x3 box is on");
+        assert_eq!(movers(&edited), [1, 0], "scoped to the edited placement");
+        let quiet = plan.prepare(inputs(&[], 2));
+        assert!(!plan.reset);
+        assert!(spheres(&quiet).is_empty());
+        assert_eq!(options(&quiet) & 8, 0);
     }
 
     /// Movers past the held record's slots merge with their neighbours along the course.

@@ -4682,6 +4682,8 @@ impl Renderer {
                 h.update(self.program_slot(program).digest);
             }
             h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
+            // In-place material edits keep every id: relight on them as on a new material.
+            h.update(self.material_edits.bytes.to_le_bytes());
             h.finalize().into()
         });
         let region = self.view.primary.as_ref().unwrap().scene;

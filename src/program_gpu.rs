@@ -902,6 +902,9 @@ impl Renderer {
         self.queue.write_buffer(&m.parameters.buffer, 0, &block);
         self.uploads.materials += block.len() as u64;
         self.uploads.write_calls += 1;
+        // An in-place edit: TR1 restarts only this material's surfaces (`MaterialEdits`).
+        self.material_edits
+            .record(m, self.frames, block.len() as u64);
         Ok(())
     }
 

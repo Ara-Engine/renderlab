@@ -623,6 +623,44 @@ fn tr1_spatial(p:vec2<i32>,id:u32,size:vec2<u32>)->vec4<f32> {
     if v1<=0.0 {return vec4<f32>(0.0);}
     return vec4<f32>(wide/v1,v1*v1/v2);
 }
+// Revealed surfaces on live frames (walking backward, turning onto new ground, an edited
+// material's restart sphere) start from a wider 5x5 tent of this frame's samples: the 3x3 start
+// holds about 7 effective samples and the 1-sample grain of GI, reflections and soft shadows still
+// showed for the frames until history built up. Edge-stopped by geometry alone, never colour: a
+// sample counts only when it shows the same placement and its point lies within four pixel
+// footprints of this pixel's tangent plane (tr1_tap's test), so folds, ridges and silhouettes of
+// one mesh stay sharp. Native frames only (upscaled frames start from tr1_spatial).
+const TR1_WIDE_START:bool=true;
+// The world point of sample q's surface `id` (its hit record's triangle and barycentrics).
+fn tr1_sample_point(q:vec2<i32>,id:u32)->vec3<f32> {
+    let record=textureLoad(primary_hit,q,0);
+    let slot=id-1u;
+    let batch=primary_placements[slot]&0x1fffffffu;
+    let i=record.y*3u;
+    let uv=bitcast<vec2<f32>>(record.zw);
+    let x=receiver_point(tr1_position(batch,i),tr1_position(batch,i+1u),tr1_position(batch,i+2u),vec3<f32>(1.0-uv.x-uv.y,uv));
+    return world_position(x,slot).xyz;
+}
+// The 5x5 start (tent radius 3 pixels, about 18 effective samples on an open surface): the
+// weighted mean and its effective sample count; zero weight when no sample passes.
+fn tr1_wide_start(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->vec4<f32> {
+    let reach=4.0*tr1.previous_eye.w*s.distance;
+    var sum=vec3<f32>(0.0);
+    var w1=0.0;
+    var w2=0.0;
+    for(var i=0;i<25;i+=1) {
+        let o=vec2<i32>(i%5,i/5)-vec2<i32>(2);
+        let t=p+o;
+        if !tr1_inside(t,size) || tr1_sample_id(t)!=s.id {continue;}
+        if any(o!=vec2<i32>(0)) && abs(tr1_dot(s.normal,tr1_sample_point(t,s.id)-s.point.xyz))>reach {continue;}
+        let d=abs(vec2<f32>(o)+tr1.jitter.xy)/3.0;
+        let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
+        sum=fma(textureLoad(tr1_sample,t,0).xyz,vec3<f32>(w),sum);
+        w1+=w;w2=fma(w,w,w2);
+    }
+    if w1<=0.0 {return vec4<f32>(0.0);}
+    return vec4<f32>(sum/w1,w1*w1/w2);
+}
 // The tent-weighted share of this frame's 3x3 samples showing `id` at the pixel centre: a
 // one-frame coverage estimate.
 fn tr1_share(id:u32)->f32 {
@@ -660,7 +698,9 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
         return vec4<f32>(fma(x-h.colour,vec3<f32>(w/n),h.colour),n);
     }
     if (tr1.flags.y&TR1_SPATIAL_START)!=0u {
-        let start=tr1_spatial(p,s.id,size);
+        var start=vec4<f32>(0.0);
+        if TR1_WIDE_START && tr1.flags.x==0u && s.id!=0u && tr1_native() {start=tr1_wide_start(p,s,size);}
+        if start.w<=0.0 {start=tr1_spatial(p,s.id,size);}
         return vec4<f32>(start.xyz,clamp(start.w,1.0,max(tr1.starts.y,1.0)));
     }
     return vec4<f32>(sample,1.0);

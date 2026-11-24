@@ -740,6 +740,9 @@ pub struct Renderer {
     revision: Revision,
     pipelines: PipelineStats,
     uploads: UploadBytes,
+    /// In-place material edits: their bytes, which TR1's key leaves out, and which materials
+    /// they touched (`MaterialEdits`).
+    material_edits: crate::material::MaterialEdits,
     submissions: u64,
     completed_submission: u64,
     frames: u64,
@@ -1293,6 +1296,7 @@ impl Renderer {
                 write_calls: 2,
                 ..Default::default()
             },
+            material_edits: Default::default(),
             submissions: 0,
             completed_submission: 0,
             frames: 0,
@@ -2533,6 +2537,47 @@ impl Renderer {
         };
         self.check_fault()?;
         Ok(Some(material))
+    }
+    /// Sets a live material's base colour, metallic and roughness in place: one write of its
+    /// factor words, no new material, binding or id, checked as `try_create_material` checks
+    /// them. TR1 then restarts only the surfaces drawn with it, not every pixel
+    /// (`MaterialEdits`).
+    pub fn try_update_material_factors(
+        &mut self,
+        m: &mut Material,
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), Error> {
+        self.check_fault()?;
+        if !Arc::ptr_eq(&m.renderer, &self.identity) {
+            return Err(Error::InvalidInput("material belongs to another renderer"));
+        }
+        if !crate::material::valid_factors(&base_color, metallic, roughness) {
+            return Err(Error::InvalidInput(
+                "material factors must be finite in [0,1]",
+            ));
+        }
+        // The uniform's first six words (`MaterialDescriptor::bytes`).
+        let mut bytes = [0u8; 24];
+        for (dst, value) in bytes
+            .chunks_exact_mut(4)
+            .zip(base_color.into_iter().chain([metallic, roughness]))
+        {
+            dst.copy_from_slice(&value.to_ne_bytes());
+        }
+        self.queue.write_buffer(&m._uniform, 0, &bytes);
+        m.base_color = base_color;
+        self.uploads.materials += bytes.len() as u64;
+        self.uploads.write_calls += 1;
+        self.material_edits
+            .record(m, self.frames, bytes.len() as u64);
+        Ok(())
+    }
+    /// Material bytes uploaded so far that restart every reconstructed pixel
+    /// (`reconstruction_key`): all but in-place edits, which restart only their surfaces.
+    pub(crate) fn restarting_material_uploads(&self) -> u64 {
+        self.uploads.materials - self.material_edits.bytes
     }
     fn create_material(
         &mut self,
