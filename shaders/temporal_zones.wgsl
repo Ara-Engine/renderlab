@@ -4,21 +4,31 @@
 // the same question of the same record. ZONES is the frame record's Tr1Zones member; each
 // module that includes this text names its own (temporal_reconstruction.rs `zones_source`).
 
-// Whether the moving caster's swept bounds can change point x's light this frame (SK1). With
-// a shadowed sun (shadow_hi.w 1): x lies inside the bounds, or some ray toward the sun within
-// its disk meets them. Conservative: a disk ray of length t stays within t*tan(half-angle) of
-// the central ray, and no point of the bounds is farther than `reach`, so the central ray meets
-// the bounds grown by reach*tan(half-angle) whenever a disk ray meets the bounds.
+// Whether any moving caster's swept bounds can change point x's light this frame (SK1). With
+// a shadowed sun (counts.w != 0): x lies inside one of the bounds, or some ray toward the sun
+// within its disk meets it. Conservative: a disk ray of length t stays within t*tan(half-angle)
+// of the central ray, and no point of the bounds is farther than `reach`, so the central ray
+// meets the bounds grown by reach*tan(half-angle) whenever a disk ray meets the bounds.
 fn tr1_caster_shadow(x:vec3<f32>)->bool {
-    if ZONES.shadow_lo.w==0.0 {return false;}
-    let lo=ZONES.shadow_lo.xyz;let hi=ZONES.shadow_hi.xyz;
-    if ZONES.shadow_hi.w==0.0 {return all(x>=lo) && all(x<=hi);}
-    let reach=length(max(abs(x-lo),abs(x-hi)));
-    let grow=vec3<f32>(reach*ZONES.shadow_light.w);
+    let n=ZONES.counts.z;
+    if n==0u {return false;}
+    if ZONES.counts.w==0u {
+        for(var k=0u;k<n;k+=1u) {
+            let lo=ZONES.shadow[2u*k].xyz;let hi=ZONES.shadow[2u*k+1u].xyz;
+            if all(x>=lo) && all(x<=hi) {return true;}
+        }
+        return false;
+    }
     let rcp=vec3<f32>(1.0)/ZONES.shadow_light.xyz;
-    let a=(lo-grow-x)*rcp;let b=(hi+grow-x)*rcp;
-    let t0=min(a,b);let t1=max(a,b);
-    return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
+    for(var k=0u;k<n;k+=1u) {
+        let lo=ZONES.shadow[2u*k].xyz;let hi=ZONES.shadow[2u*k+1u].xyz;
+        let reach=length(max(abs(x-lo),abs(x-hi)));
+        let grow=vec3<f32>(reach*ZONES.shadow_light.w);
+        let a=(lo-grow-x)*rcp;let b=(hi+grow-x)*rcp;
+        let t0=min(a,b);let t1=max(a,b);
+        if min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0) {return true;}
+    }
+    return false;
 }
 
 // Whether point x lies in the restart sphere of a local light whose intensity or colour

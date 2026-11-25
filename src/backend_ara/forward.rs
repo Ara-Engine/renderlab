@@ -1764,8 +1764,8 @@ fn frame(
             Format::Rgba16Float,
         )?)
     };
-    // Per placement, its world bounds and whether it blocks light (the shadow plan's casters).
-    let (mut bounds, mut skin_bounds, mut casters) = (Vec::new(), Vec::new(), Vec::new());
+    // Per placement, its world bounds, per-skin (revision, bounds), and whether it blocks light.
+    let (mut bounds, mut skin_boxes, mut casters) = (Vec::new(), Vec::new(), Vec::new());
     for (index, object) in scene.objects.iter().enumerate() {
         let local =
             crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
@@ -1774,8 +1774,8 @@ fn frame(
             let world = shadow_gpu::world_bounds(local, *transform)?;
             bounds.push(world);
             casters.push(casts(index, k));
-            if skin(index).is_some() {
-                skin_bounds.push(world);
+            if let Some(sk) = skin(index) {
+                skin_boxes.push((sk.revision, world));
             }
         }
     }
@@ -2646,13 +2646,7 @@ fn frame(
                         .is_some_and(|v| v != 0.),
                 pixel_angle: 2.0 * (0.5 * scene.camera.fov_y()).tan() / target[1] as f32,
                 scene_bounds,
-                skin_bounds: skin_bounds.iter().copied().reduce(|a, b| {
-                    crate::shadow_plan::Bounds {
-                        min: a.min.min(b.min),
-                        max: a.max.max(b.max),
-                    }
-                }),
-                skin_revisions: skin_revisions.clone(),
+                skin_boxes: skin_boxes.clone(),
                 rigid_motion,
                 // The port reads no still reuse (rtvis_held is the wgpu module's).
                 scene_static: false,

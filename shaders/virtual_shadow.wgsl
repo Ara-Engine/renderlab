@@ -44,7 +44,7 @@ struct VsmLevel {origin:vec4<f32>,info:vec4<u32>};
 // TR1's restart zones, as shaders/primary_rays.wgsl declares them (the two texts are compared
 // by a test): a moving caster's swept shadow and changed local lights' restart spheres, and in
 // counts.y the directions a receiver inside one evaluates.
-struct Tr1Zones { shadow_lo:vec4<f32>, shadow_hi:vec4<f32>, shadow_light:vec4<f32>, relit:array<vec4<f32>,8>, counts:vec4<u32> };
+struct Tr1Zones { shadow:array<vec4<f32>,16>, shadow_light:vec4<f32>, relit:array<vec4<f32>,8>, counts:vec4<u32> };
 struct VsmFrame {
     u:vec4<f32>,v:vec4<f32>,l:vec4<f32>,
     // xyz: world eye; w: pixel footprint per metre of distance (2 tan(fov_y/2)/height).

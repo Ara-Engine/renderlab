@@ -201,8 +201,11 @@ const TR1_MOVERS: usize = 16;
 const FRAME_BYTES: usize = ZONES_OFFSET + ZONES_BYTES + 16 + 32 + TR1_MOVERS * 32;
 /// WGSL Tr1Zones (shaders/primary_rays.wgsl) and its place in Tr1Frame: where this frame's
 /// resolve restarts static receivers' histories.
-pub(crate) const ZONES_BYTES: usize = 48 + RELIT_SLOTS * 16 + 16;
+pub(crate) const ZONES_BYTES: usize = SHADOW_SLOTS * 32 + 16 + RELIT_SLOTS * 16 + 16;
 const ZONES_OFFSET: usize = 304;
+/// Per-skin swept shadow boxes a frame carries (`Tr1Zones.shadow`); skins beyond that merge
+/// with their nearest neighbours (`merge_boxes`).
+const SHADOW_SLOTS: usize = 8;
 /// Restart spheres a frame carries around changed local lights; the smallest ones beyond
 /// that share one bounding sphere (`relit_zones`).
 const RELIT_SLOTS: usize = 8;
@@ -1301,8 +1304,8 @@ struct Previous {
     intensities: Vec<[u32; 3]>,
     /// Local lights' candela ranges since the last restart of every pixel (P-RELIT).
     swings: Vec<Swing>,
-    skin_bounds: Option<crate::shadow_plan::Bounds>,
-    skin_revisions: Vec<u64>,
+    /// Per skinned placement (in draw/instance order): `(skin_revision, world_bounds)`.
+    skin_boxes: Vec<(u64, crate::shadow_plan::Bounds)>,
 }
 
 /// The world-space union of an optional box and a box.
@@ -1343,11 +1346,10 @@ pub(crate) struct PlanInputs<'a> {
     pub(crate) visible_sky: bool,
     /// One output pixel's angle.
     pub(crate) pixel_angle: f32,
-    /// The draws' world bounds, the skinned ones', every skinned draw's revision in draw
+    /// The draws' world bounds, per-skin `(revision, world_bounds)` pairs in draw/instance
     /// order, and whether any placement moved since the previous frame.
     pub(crate) scene_bounds: Option<crate::shadow_plan::Bounds>,
-    pub(crate) skin_bounds: Option<crate::shadow_plan::Bounds>,
-    pub(crate) skin_revisions: Vec<u64>,
+    pub(crate) skin_boxes: Vec<(u64, crate::shadow_plan::Bounds)>,
     pub(crate) rigid_motion: bool,
     /// sunrt-7: no draw is skinned and none was edited (placements added, removed or moved)
     /// since this view's last frame.
@@ -1455,9 +1457,9 @@ impl Planner {
         let settings = i.settings;
         let (key, matrix, eye, exposure) = (i.key, i.matrix, i.eye, i.exposure);
         let (background, visible_sky, pixel_angle) = (i.background, i.visible_sky, i.pixel_angle);
-        let (scene_bounds, skin_bounds, rigid_motion) =
-            (i.scene_bounds, i.skin_bounds, i.rigid_motion);
-        let (skin_revisions, listing) = (i.skin_revisions, i.listing);
+        let (scene_bounds, skin_boxes, rigid_motion) =
+            (i.scene_bounds, i.skin_boxes, i.rigid_motion);
+        let listing = i.listing;
         let intensities = local_intensities(i.lights);
         let suns: Vec<Vec3> = i
             .lights
@@ -1467,62 +1469,83 @@ impl Planner {
                 _ => None,
             })
             .collect();
-        // SK1: vertex motion reprojects the character, but its changing shadow also
-        // changes otherwise-static receivers. Reject those receivers' lighting history
-        // in a conservative world-space swept shadow volume, never a screen-space
-        // lighting approximation. This leaves unrelated static pixels accumulating.
-        let mut shadow_bounds = None;
-        // The shadowed sun's direction toward it and disk half-angle, when `shadow_bounds` is
-        // tested as its swept shadow rather than as a box (P-FLAT).
+        // SK1: vertex motion reprojects each character, but its changing shadow also changes
+        // otherwise-static receivers. Reject those receivers' lighting history inside each
+        // changed character's own conservative world-space swept shadow volume (never a
+        // cross-character union box), leaving unrelated static pixels accumulating.
+        let mut changed_skin_boxes: Vec<crate::shadow_plan::Bounds> = Vec::new();
+        let mut shadow_boxes: Vec<crate::shadow_plan::Bounds> = Vec::new();
+        // The shadowed sun's direction toward it and disk half-angle, when `shadow_boxes` are
+        // tested as swept shadows rather than as plain boxes (P-FLAT).
         let mut caster_light: Option<(Vec3, f32)> = None;
         // MQ2: some skinned pose changed since the previous frame.
         let mut posed = false;
-        if let (Some(current), Some(previous)) = (skin_bounds, self.previous.as_ref())
-            && previous.skin_revisions != skin_revisions
+        if let Some(previous) = self.previous.as_ref()
+            && !skin_boxes.is_empty()
         {
-            posed = true;
-            let swept = union(previous.skin_bounds, current);
-            let mut affected = swept;
-            let distance = scene_bounds.map_or(1., |b: crate::shadow_plan::Bounds| {
-                (b.max - b.min).length().max(1.)
-            }) * 2.;
-            let requested: Vec<&Light> = i
-                .lights
-                .iter()
-                .zip(i.requests)
-                .filter(|(_, r)| !matches!(r, ShadowRequest::None))
-                .map(|(l, _)| l)
-                .collect();
-            // P-FLAT: with one shadowed sun and no other shadow request, receivers are tested
-            // against the swept bounds' own shadow (`tr1_caster_shadow`): inside the bounds, or
-            // a ray toward the sun within its disk meets them. The box below stretches the
-            // bounds twice the scene's size along the sun; under a low sun it held most of the
-            // scene's static receivers to one frame of history while a character walked.
-            if let [Light::Directional { travel, .. }] = requested[..] {
-                caster_light = Some((-travel.normalize(), i.directional_disk_angle));
-            } else {
-                for light in requested {
-                    if let Light::Directional { travel, .. } = light {
-                        affected = union(
-                            Some(affected),
-                            crate::shadow_plan::Bounds {
-                                min: swept.min + travel.normalize() * distance,
-                                max: swept.max + travel.normalize() * distance,
-                            },
-                        );
-                    } else if let Some(scene) = scene_bounds {
-                        affected = union(Some(affected), scene);
+            if previous.skin_boxes.len() == skin_boxes.len() {
+                for (&(prev_rev, prev_box), &(cur_rev, cur_box)) in
+                    previous.skin_boxes.iter().zip(&skin_boxes)
+                {
+                    if prev_rev != cur_rev {
+                        posed = true;
+                        changed_skin_boxes.push(union(Some(prev_box), cur_box));
                     }
                 }
+            } else {
+                posed = true;
+                changed_skin_boxes.extend(skin_boxes.iter().map(|&(_, b)| b));
             }
-            // Sky occlusion and bounce the character changes outside its direct shadow are
-            // held to this frame's 3x3 box (MQ2: skinned frames set TR1_BOX), as MQ1 holds
-            // rigid motion's; SK1 rejected every receiver's history scene-wide while GI was
-            // on, so an animated character restarted the whole image on every frame.
-            let margin = Vec3::splat(1e-4) + affected.min.abs().max(affected.max.abs()) * 1e-5;
-            affected.min -= margin;
-            affected.max += margin;
-            shadow_bounds = Some(affected);
+            if !changed_skin_boxes.is_empty() {
+                let distance = scene_bounds.map_or(1., |b: crate::shadow_plan::Bounds| {
+                    (b.max - b.min).length().max(1.)
+                }) * 2.;
+                let requested: Vec<&Light> = i
+                    .lights
+                    .iter()
+                    .zip(i.requests)
+                    .filter(|(_, r)| !matches!(r, ShadowRequest::None))
+                    .map(|(l, _)| l)
+                    .collect();
+                // P-FLAT: with one shadowed sun and no other shadow request, receivers are tested
+                // against each changed character's own swept bounds' shadow (`tr1_caster_shadow`):
+                // inside a box, or a ray toward the sun within its disk meets it.
+                let mut raw_shadow = Vec::with_capacity(changed_skin_boxes.len());
+                if let [Light::Directional { travel, .. }] = requested[..] {
+                    caster_light = Some((-travel.normalize(), i.directional_disk_angle));
+                    for &swept in &changed_skin_boxes {
+                        let margin = Vec3::splat(1e-4)
+                            + swept.min.abs().max(swept.max.abs()) * 1e-5;
+                        raw_shadow.push(crate::shadow_plan::Bounds {
+                            min: swept.min - margin,
+                            max: swept.max + margin,
+                        });
+                    }
+                } else {
+                    for &swept in &changed_skin_boxes {
+                        let mut affected = swept;
+                        for &light in &requested {
+                            if let Light::Directional { travel, .. } = light {
+                                affected = union(
+                                    Some(affected),
+                                    crate::shadow_plan::Bounds {
+                                        min: swept.min + travel.normalize() * distance,
+                                        max: swept.max + travel.normalize() * distance,
+                                    },
+                                );
+                            } else if let Some(scene) = scene_bounds {
+                                affected = union(Some(affected), scene);
+                            }
+                        }
+                        let margin = Vec3::splat(1e-4)
+                            + affected.min.abs().max(affected.max.abs()) * 1e-5;
+                        affected.min -= margin;
+                        affected.max += margin;
+                        raw_shadow.push(affected);
+                    }
+                }
+                shadow_boxes = merge_boxes(&raw_shadow, SHADOW_SLOTS);
+            }
         }
         let cold = self.previous.is_none() || self.cut;
         let continued = self
@@ -1719,7 +1742,7 @@ impl Planner {
         self.shadow_rays = i
             .budget
             .rays(cold, self.reset, sun_still, self.sun_held_frames);
-        let zoned = shadow_bounds.is_some() || !relit_spheres.is_empty();
+        let zoned = !shadow_boxes.is_empty() || !relit_spheres.is_empty();
         self.restart_rays = if zoned && i.budget.reset_rays > self.shadow_rays {
             i.budget.reset_rays
         } else {
@@ -1755,9 +1778,9 @@ impl Planner {
         ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
-        // shadow_lo.w enables rejection; shadow_hi.w selects the swept-shadow test, whose
-        // shadow_light is the unit direction toward the sun (no zero component, so the slab
-        // test's reciprocals stay finite) and the tangent of its disk half-angle, widened.
+        // Tr1Zones.shadow: per-caster swept bounds pairs (lo, hi), then shadow_light (unit
+        // direction toward the sun with no zero component, plus widened disk half-angle tangent).
+        // counts.z is the active shadow box count; counts.w selects the swept-shadow slab test.
         let toward = caster_light.map_or(Vec3::ZERO, |(l, _)| {
             l.map(|c| {
                 if c.abs() < 1e-6 {
@@ -1768,31 +1791,34 @@ impl Planner {
             })
         });
         let spread = caster_light.map_or(0., |(_, angle)| angle.tan() * 1.01 + 1e-4);
-        for value in shadow_bounds.map_or([0.; 12], |b| {
-            [
-                b.min.x,
-                b.min.y,
-                b.min.z,
-                1.,
-                b.max.x,
-                b.max.y,
-                b.max.z,
-                if caster_light.is_some() { 1. } else { 0. },
-                toward.x,
-                toward.y,
-                toward.z,
-                spread,
-            ]
-        }) {
+        for row in 0..SHADOW_SLOTS {
+            let values = shadow_boxes.get(row).map_or([0.; 8], |b| {
+                [b.min.x, b.min.y, b.min.z, 0., b.max.x, b.max.y, b.max.z, 0.]
+            });
+            for value in values {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+        }
+        let light_row = if !shadow_boxes.is_empty() && caster_light.is_some() {
+            [toward.x, toward.y, toward.z, spread]
+        } else {
+            [0.; 4]
+        };
+        for value in light_row {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
-        // Tr1Zones.relit: each restart sphere (zero rows unused), then their count.
+        // Tr1Zones.relit: each restart sphere (zero rows unused), then counts.
         for row in 0..RELIT_SLOTS {
             for value in relit_spheres.get(row).copied().unwrap_or_default() {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
-        for count in [relit_spheres.len() as u32, self.restart_rays, 0, 0] {
+        for count in [
+            relit_spheres.len() as u32,
+            self.restart_rays,
+            shadow_boxes.len() as u32,
+            u32::from(!shadow_boxes.is_empty() && caster_light.is_some()),
+        ] {
             bytes.extend_from_slice(&count.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), ZONES_OFFSET + ZONES_BYTES);
@@ -1800,20 +1826,28 @@ impl Planner {
         for value in [settings.sharp_blur_budget, 0.0, 0.0, 0.0] {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
-        // Scoped TR1_BOX mover table: rigid motion clamps only pixels near a mover, in its swept
-        // sun shadow, or on a moving surface/silhouette, so distant static surfaces keep full
-        // 256-frame temporal convergence instead of boiling whenever an object moves elsewhere.
-        // Edited materials' placements join the table: the bounce and reflections their edit
-        // changes on nearby surfaces clamp the same way.
+        // Scoped TR1_BOX mover table: rigid motion, skinned pose changes, and edited materials
+        // clamp only pixels near a changed object, in its swept sun shadow, or on a moving
+        // surface/silhouette, so distant static surfaces keep full 256-frame temporal convergence
+        // instead of boiling whenever an object or character moves elsewhere.
         let mut boxes = Vec::new();
         if moved {
             boxes.extend_from_slice(&i.moving_boxes);
+        }
+        if posed && !self.reset {
+            for &b in &changed_skin_boxes {
+                if !boxes.iter().any(|e| e.min == b.min && e.max == b.max) {
+                    boxes.push(b);
+                }
+            }
         }
         if edited {
             boxes.extend_from_slice(&i.edited_bounds);
         }
         let mover_boxes = merge_boxes(&boxes, TR1_MOVERS);
-        let global_box = relit || (posed && !self.reset) || (moved && i.moving_boxes.is_empty());
+        let global_box = relit
+            || (moved && i.moving_boxes.is_empty())
+            || (posed && !self.reset && changed_skin_boxes.is_empty());
         for w in [mover_boxes.len() as u32, u32::from(global_box), 0u32, 0u32] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
@@ -1828,7 +1862,9 @@ impl Planner {
         for k in 0..TR1_MOVERS {
             let row = mover_boxes.get(k).map_or([0.0f32; 8], |b| {
                 let diag = (b.max - b.min).length();
-                let reach = (2.5 * diag).clamp(4.0, 24.0);
+                // Local bounce/reflection reach around the mover (swept sun shadows use the
+                // directional slab test in `tr1_mover_hit` at any distance).
+                let reach = (0.75 * diag).clamp(0.5, 6.0);
                 let margin = Vec3::splat(1e-4) + b.min.abs().max(b.max.abs()) * 1e-5;
                 let (lo, hi) = (b.min - margin, b.max + margin);
                 [lo.x, lo.y, lo.z, reach, hi.x, hi.y, hi.z, 0.0]
@@ -1879,8 +1915,7 @@ impl Planner {
             key,
             intensities,
             swings,
-            skin_bounds,
-            skin_revisions,
+            skin_boxes,
         });
         Planned {
             frame: bytes,
@@ -2479,17 +2514,13 @@ impl Renderer {
             || self.atmosphere_sky_visible();
         let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / output.height as f32;
         let mut scene_bounds = None;
-        let mut skin_bounds = None;
-        let mut skin_revisions = vec![];
+        let mut skin_boxes = vec![];
         let mut rigid_motion = false;
         let mut scene_static = true;
         let mut rigid_only = true;
         let mut moving_bounds = None;
         let mut moving_boxes = vec![];
         for d in draws {
-            if let Some(s) = &d.mesh.skin {
-                skin_revisions.push(s.revision);
-            }
             // Nothing edited since this view's last frame and no skin: no placement moved, and
             // the scene box is the union of the collection's cached world boxes.
             let state = &d.instances.state;
@@ -2528,8 +2559,8 @@ impl Renderer {
                 }
                 if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, model) {
                     scene_bounds = Some(union(scene_bounds, b));
-                    if d.mesh.skin.is_some() {
-                        skin_bounds = Some(union(skin_bounds, b));
+                    if let Some(s) = &d.mesh.skin {
+                        skin_boxes.push((s.revision, b));
                     }
                 }
             }
@@ -2601,7 +2632,10 @@ impl Renderer {
                 .filter(|d| d.instances.state.edited_since_submit(self.view_key.0, self.view.last_frame))
                 .count();
             let skinned = draws.iter().filter(|d| d.mesh.skin.is_some()).count();
-            let poses: Vec<u8> = skin_revisions.iter().flat_map(|r| r.to_le_bytes()).collect();
+            let poses: Vec<u8> = skin_boxes
+                .iter()
+                .flat_map(|(r, _)| r.to_le_bytes())
+                .collect();
             let lights = format!("{:?}", self.lighting.source_lights);
             super::super::change_log::report(
                 self.frames + 1,
@@ -2645,8 +2679,7 @@ impl Renderer {
                 visible_sky,
                 pixel_angle,
                 scene_bounds,
-                skin_bounds,
-                skin_revisions,
+                skin_boxes,
                 rigid_motion,
                 scene_static,
                 rigid_only,
@@ -2834,8 +2867,7 @@ mod tests {
             visible_sky: false,
             pixel_angle: 1e-3,
             scene_bounds: None,
-            skin_bounds: None,
-            skin_revisions: vec![],
+            skin_boxes: vec![],
             rigid_motion: false,
             scene_static: true,
             rigid_only: true,
@@ -2861,8 +2893,9 @@ mod tests {
         let zones = &planned.frame[ZONES_OFFSET..ZONES_OFFSET + ZONES_BYTES];
         let word = |at: usize| u32::from_ne_bytes(zones[at..at + 4].try_into().unwrap());
         let float = |at: usize| f32::from_bits(word(at));
-        (0..word(48 + RELIT_SLOTS * 16) as usize)
-            .map(|k| 48 + k * 16)
+        let relit_offset = SHADOW_SLOTS * 32 + 16;
+        (0..word(relit_offset + RELIT_SLOTS * 16) as usize)
+            .map(|k| relit_offset + k * 16)
             .map(|at| {
                 (
                     Vec3::new(float(at), float(at + 4), float(at + 8)),
@@ -2892,7 +2925,7 @@ mod tests {
             assert_eq!(plan.shadow_rays, budget.active_rays, "frame {frame}");
             assert_eq!(plan.restart_rays, budget.reset_rays, "frame {frame}");
             assert_eq!(
-                planned.zones()[52 + RELIT_SLOTS * 16..][..4],
+                planned.zones()[SHADOW_SLOTS * 32 + 16 + RELIT_SLOTS * 16 + 4..][..4],
                 budget.reset_rays.to_ne_bytes()
             );
             let [(centre, radius)] = spheres(&planned)[..] else {
@@ -3066,6 +3099,76 @@ mod tests {
         assert!(!plan.reset);
         assert!(spheres(&quiet).is_empty());
         assert_eq!(options(&quiet) & 8, 0);
+    }
+
+    /// Distant animated skinned characters carry separate per-character swept shadow boxes
+    /// and scoped TR1_BOX regions instead of one giant union box and global clamp; idle
+    /// skinned characters emit no shadow or box zones at all.
+    #[test]
+    fn skinned_characters_keep_separate_shadow_and_mover_zones() {
+        let sun = [Light::Directional {
+            travel: Vec3::new(0.2, -1.0, 0.3),
+            lux: [1.0; 3],
+        }];
+        let requests = [ShadowRequest::Directional {
+            split_ends: vec![8.0],
+        }];
+        let char_a = crate::shadow_plan::Bounds {
+            min: Vec3::new(-0.3, 0.0, -0.3),
+            max: Vec3::new(0.3, 1.8, 0.3),
+        };
+        let char_b = crate::shadow_plan::Bounds {
+            min: Vec3::new(-4.3, 0.0, 2.2),
+            max: Vec3::new(-3.7, 1.8, 2.8),
+        };
+        let counts_offset = SHADOW_SLOTS * 32 + 16 + RELIT_SLOTS * 16;
+        let zone_word = |p: &Planned, k: usize| {
+            u32::from_ne_bytes(p.zones()[counts_offset + 4 * k..][..4].try_into().unwrap())
+        };
+        let movers = |p: &Planned| {
+            let at = ZONES_OFFSET + ZONES_BYTES + 16;
+            [0, 4].map(|k| u32::from_ne_bytes(p.frame[at + k..at + k + 4].try_into().unwrap()))
+        };
+        let options = |p: &Planned| u32::from_ne_bytes(p.frame[292..296].try_into().unwrap());
+        let mut plan = Planner::new();
+        plan.prepare(PlanInputs {
+            requests: &requests,
+            skin_boxes: vec![(1, char_a), (1, char_b)],
+            scene_static: false,
+            ..inputs(&sun, 0)
+        });
+        // Both characters pose on frame 1: 2 separate shadow boxes (swept sun mode = 1),
+        // scoped mover boxes (count = 2), and global_box = 0.
+        let both = plan.prepare(PlanInputs {
+            requests: &requests,
+            skin_boxes: vec![(2, char_a), (2, char_b)],
+            scene_static: false,
+            ..inputs(&sun, 1)
+        });
+        assert!(!plan.reset);
+        assert_eq!((zone_word(&both, 2), zone_word(&both, 3)), (2, 1));
+        assert_eq!(movers(&both), [2, 0], "scoped to the two skins, never global");
+        assert_ne!(options(&both) & 8, 0);
+        // Only char_b changes on frame 2: 1 shadow box (around char_b, not char_a).
+        let one = plan.prepare(PlanInputs {
+            requests: &requests,
+            skin_boxes: vec![(2, char_a), (3, char_b)],
+            scene_static: false,
+            ..inputs(&sun, 2)
+        });
+        assert_eq!((zone_word(&one, 2), zone_word(&one, 3)), (1, 1));
+        assert_eq!(movers(&one), [1, 0]);
+        let lo_x = f32::from_ne_bytes(one.zones()[0..4].try_into().unwrap());
+        assert!(lo_x < -4.0, "only char_b should be in shadow[0], got lo_x={lo_x}");
+        // Neither character changes on frame 3: 0 shadow boxes and TR1_BOX off.
+        let idle = plan.prepare(PlanInputs {
+            requests: &requests,
+            skin_boxes: vec![(2, char_a), (3, char_b)],
+            scene_static: false,
+            ..inputs(&sun, 3)
+        });
+        assert_eq!((zone_word(&idle, 2), zone_word(&idle, 3)), (0, 0));
+        assert_eq!(options(&idle) & 8, 0);
     }
 
     /// Movers past the held record's slots merge with their neighbours along the course.

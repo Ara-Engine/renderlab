@@ -27,7 +27,7 @@ pub(in crate::renderer) fn compose(source: String) -> Option<String> {
     if source.matches(SEAM).count() != 1 {
         return None;
     }
-    let zones = "struct Tr1Zones { shadow_lo:vec4<f32>, shadow_hi:vec4<f32>, shadow_light:vec4<f32>, relit:array<vec4<f32>,8>, counts:vec4<u32> };\n";
+    let zones = "struct Tr1Zones { shadow:array<vec4<f32>,16>, shadow_light:vec4<f32>, relit:array<vec4<f32>,8>, counts:vec4<u32> };\n";
     let definitions = crate::renderer::virtual_shadow_gpu::with_pitch(
         include_str!("../shaders/virtual_shadow.wgsl")
             .split("// ---- Page requests")
