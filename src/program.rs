@@ -600,7 +600,7 @@ pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 5] = [
     ),
     (
         "lone",
-        "if lone>0.0 && valid>1u && f32(count)>=rl_composite_frame.y {",
+        "if lone>0.0 && valid>1u && f32(valid)>=rl_composite_frame.y {",
         "if lone>0.0 && valid>1u {",
     ),
     // The trace without its per-receiver counters, and without its casts (every ray a miss),

@@ -1862,8 +1862,8 @@ impl Planner {
         for k in 0..TR1_MOVERS {
             let row = mover_boxes.get(k).map_or([0.0f32; 8], |b| {
                 let diag = (b.max - b.min).length();
-                // Local bounce/reflection reach around the mover (swept sun shadows use the
-                // directional slab test in `tr1_mover_hit` at any distance).
+                // Smooth local bounce/reflection window ramp radius around the mover (swept sun
+                // shadows use the directional slab test in `tr1_mover_sun_hit` at any distance).
                 let reach = (0.75 * diag).clamp(0.5, 6.0);
                 let margin = Vec3::splat(1e-4) + b.min.abs().max(b.max.abs()) * 1e-5;
                 let (lo, hi) = (b.min - margin, b.max + margin);

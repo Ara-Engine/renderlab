@@ -124,6 +124,10 @@ mod tests {
             );
         }
         assert!(wgsl.contains("let lone=primary_frame.reflection.z;"));
+        assert!(
+            wgsl.contains("if lone>0.0 && valid>=4u {"),
+            "lone-stratum bound must require >=4 valid strata so 2-stratum lobes do not clamp to min"
+        );
         assert!(wgsl.contains("let restart_strata=primary_frame.reflection.w;"));
         for bad in [-0.1, 1.5, f32::NAN] {
             let settings = ReflectionSettings {

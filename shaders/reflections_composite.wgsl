@@ -9,7 +9,7 @@ struct RlGlossyEntries { count:u32, header:array<u32,3>, entries:array<vec4<u32>
 @group(0) @binding(0) var<storage,read> rl_glossy:RlGlossyEntries;
 @group(0) @binding(1) var rl_samples:texture_2d<f32>;
 @group(0) @binding(2) var rl_reflectance:texture_2d<f32>;
-// x the lone-stratum bound (primary_frame.reflection.z), y RL_GLOSSY_RAYS.
+// x the lone-stratum bound (primary_frame.reflection.z), y minimum valid strata (4).
 @group(0) @binding(3) var<uniform> rl_composite_frame:vec4<f32>;
 // Edge-aware glossy denoise inputs (bindings 4-6, bound only by rl_atrous1_fs / rl_filter_fs).
 @group(0) @binding(4) var rl_glossy_raw:texture_2d<f32>;
@@ -54,7 +54,7 @@ fn rl_entry_mean(entry:u32)->vec4<f32> {
     }
     if valid==0u {return vec4<f32>(0.0);}
     let lone=rl_composite_frame.x;
-    if lone>0.0 && valid>1u && f32(count)>=rl_composite_frame.y {
+    if lone>0.0 && valid>1u && f32(valid)>=rl_composite_frame.y {
         let rest=max(dot(sum,RL_LUMA)-top.w,0.0)*lone;
         if top.w>rest {sum-=top.rgb*(1.0-rest/top.w);}
     }

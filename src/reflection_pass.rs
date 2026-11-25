@@ -640,9 +640,11 @@ impl Renderer {
         // The counters and the list's length start each frame at zero before shading.
         self.queue.write_buffer(&pass.stats.value, 0, &[0; STATS_BYTES as usize]);
         self.queue.write_buffer(&pass.list.value, 0, &[0; LIST_HEADER as usize]);
-        // The lone-stratum bound and the strata it needs (reflections.wgsl RL_GLOSSY_MAX).
+        // The lone-stratum bound needs at least 4 valid strata (reflections.wgsl): with 2 strata,
+        // `top.w > rest` holds the brighter stratum down to the dimmer and darkens the estimate,
+        // leaving a brightness step where `rl_restarts` doubles 2 strata to 4.
         let lone = self.view.reflections.frame_words()[2];
-        let words = [lone, 2.0, 0.0, 0.0];
+        let words = [lone, 4.0, 0.0, 0.0];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.composite.value, 0, &bytes);
     }

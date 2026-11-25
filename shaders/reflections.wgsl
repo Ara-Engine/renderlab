@@ -433,11 +433,11 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         if RL_HISTORY && !mirror {rl_history_store(pixel,slot,input.world,vec3<f32>(0.0),0.0,0.0);}
         return;
     }
-    // The bound needs a full lobe's strata (RL_GLOSSY_RAYS or more traced): over the one to
-    // three a weak reflector traces (RL_FULL_STRATA) it clamped ordinary variation, not rare
-    // targets (with two, the brighter held to the dimmer), and darkened the estimate.
+    // The bound needs at least four valid strata: over two or three strata it clamped ordinary
+    // variation, not rare fireflies (with two, the brighter held to the dimmer), and darkened
+    // the estimate — leaving a brightness step where `rl_restarts` doubles 2 strata to 4.
     let lone=primary_frame.reflection.z;
-    if lone>0.0 && valid>1u && count>=RL_GLOSSY_RAYS {
+    if lone>0.0 && valid>=4u {
         let rest=max(dot(sum,RL_LUMA)-top.w,0.0)*lone;
         if top.w>rest {sum-=top.rgb*(1.0-rest/top.w);}
     }

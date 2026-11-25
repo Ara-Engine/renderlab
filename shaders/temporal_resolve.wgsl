@@ -213,30 +213,43 @@ fn tr1_view_turn(s:Tr1Surface)->f32 {
 // The surface neither the camera nor its vertices or placement moved: its history is its
 // own pixel's.
 fn tr1_still(s:Tr1Surface)->bool {return tr1.flags.z!=0u && !s.moved;}
-// MQ1's box over this frame's 3x3 samples (scoped to pixels near a mover, in its swept shadow,
-// moving themselves, or on relit/posed frames).
+// MQ1's box over this frame's 3x3 samples (on moving surfaces, their silhouettes, rigid swept
+// sun shadows, or relit frames), plus a smooth distance-based window cap around moving objects
+// so nearby glossy reflections and bounce follow movers cleanly without hard box seams or
+// freezing 1-frame denoised reflection noise at full history weight.
 var<private> tr1_box_active:bool;
 var<private> tr1_box_lo:vec3<f32>;
 var<private> tr1_box_hi:vec3<f32>;
-fn tr1_mover_hit(x:vec3<f32>,lo:vec4<f32>,hi:vec4<f32>)->bool {
-    let pad=vec3<f32>(lo.w);
-    if all(x>=lo.xyz-pad) && all(x<=hi.xyz+pad) {return true;}
+var<private> tr1_mover_window:f32;
+fn tr1_mover_sun_hit(x:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>)->bool {
     if tr1.mover_light.w<=0.0 {return false;}
-    let reach=length(max(abs(x-lo.xyz),abs(x-hi.xyz)));
+    let reach=length(max(abs(x-lo),abs(x-hi)));
     let grow=vec3<f32>(reach*tr1.mover_light.w);
     let rcp=vec3<f32>(1.0)/tr1.mover_light.xyz;
-    let a=(lo.xyz-grow-x)*rcp;let b=(hi.xyz+grow-x)*rcp;
+    let a=(lo-grow-x)*rcp;let b=(hi+grow-x)*rcp;
     let t0=min(a,b);let t1=max(a,b);
     return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
 }
 fn tr1_box_applies(s:Tr1Surface)->bool {
+    tr1_mover_window=tr1.windows.x;
     if (tr1.flags.y&TR1_BOX)==0u {return false;}
     if tr1.mover_meta.y!=0u || s.moved || tr1_near_skin {return true;}
     if s.id==0u {return false;}
+    var sun_hit=false;
+    var min_t=1.0;
     for(var k=0u;k<tr1.mover_meta.x;k+=1u) {
-        if tr1_mover_hit(s.point.xyz,tr1.movers[2u*k],tr1.movers[2u*k+1u]) {return true;}
+        let lo=tr1.movers[2u*k];let hi=tr1.movers[2u*k+1u];
+        let pad=max(lo.w,1e-4);
+        let q=max(max(lo.xyz-s.point.xyz,s.point.xyz-hi.xyz),vec3<f32>(0.0));
+        min_t=min(min_t,length(q)/pad);
+        if tr1_mover_sun_hit(s.point.xyz,lo.xyz,hi.xyz) {sun_hit=true;}
     }
-    return false;
+    if min_t<1.0 {
+        let u=min_t*min_t*(3.0-2.0*min_t);
+        let near_w=min(max(tr1.starts.y,1.0),tr1.windows.x);
+        tr1_mover_window=near_w*exp2(log2(max(tr1.windows.x/max(near_w,1.0),1.0))*u);
+    }
+    return sun_hit;
 }
 // Placement + 1 of this frame's samples over the workgroup's 8x8 pixels and a one-pixel
 // border (TR1_NONE outside the image), loaded once per workgroup by tr1_resolve.
@@ -491,8 +504,18 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
             h.window=min(h.window,cap);
         }
     }
-    // MQ1: clamp continued history to this frame's 3x3 range where a mover/light can affect it.
-    if tr1_box_active {h.colour=clamp(h.colour,tr1_box_lo,tr1_box_hi);}
+    // Smooth proximity window cap around movers so nearby reflections and bounce stay responsive
+    // without hard box seams or 1-frame denoised blotches.
+    h.window=min(h.window,tr1_mover_window);
+    // MQ1: clamp continued history to this frame's 3x3 range where required, and cap weight
+    // when clamped so a single clamped frame never freezes at full history weight.
+    if tr1_box_active {
+        let clamped=clamp(h.colour,tr1_box_lo,tr1_box_hi);
+        if any(clamped!=h.colour) {
+            h.colour=clamped;
+            h.weight=min(h.weight,max(tr1.starts.y,1.0));
+        }
+    }
     return h;
 }
 
