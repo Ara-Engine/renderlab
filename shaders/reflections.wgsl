@@ -102,10 +102,10 @@ const RL_HISTORY_MOVING:f32=2.0;
 // standard deviations (the stored strata spread) plus RL_HISTORY_SLACK of the mean away.
 const RL_HISTORY_SIGMA:f32=4.0;
 const RL_HISTORY_SLACK:f32=0.1;
-// A receiver the resolve restarts this frame (rl_restarts: a changed local light's restart
-// sphere, a moving caster's swept shadow) shows this frame's strata alone, so its glossy
-// lobe traces primary_frame.reflection.w times the strata (1 or less: the ordinary count;
-// U-SPECK2, docs/speck2.md).
+// A receiver the resolve restarts this frame (rl_restarts: a changed local light's or edited
+// material's restart sphere) shows this frame's strata alone, so its glossy lobe traces
+// primary_frame.reflection.w times the strata (1 or less: the ordinary count; U-SPECK2,
+// docs/speck2.md).
 const RL_FAR:f32=1.0e6;
 // Lone-stratum bound (U-SPECK2, docs/speck2.md). A glossy pixel's estimate is the mean of at
 // most 16 strata, and temporal reconstruction averages some 16 frames of it: about 256
@@ -311,7 +311,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // frame from a per-pixel offset, and the full set only when that stratum disagrees.
     var hist=vec4<f32>(0.0);
     rl_hist_rough=rough;
-    // A restart sphere or swept shadow (rl_restarts) always traces the full set.
+    // A restart sphere (rl_restarts) always traces the full set.
     if RL_HISTORY && !mirror && !restarted && frame!=0u && !rl_restarts(input.world) {hist=rl_history_lookup(receiver,input.world,pixel,reflect(-v,n));}
     var trusted=hist.w>0.0;
     // Fixed per-pixel offset, so `stride` consecutive frames visit every stratum once.

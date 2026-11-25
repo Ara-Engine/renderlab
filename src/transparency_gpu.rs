@@ -1,8 +1,9 @@
 //! TP1 transparent pass on the GPU (docs/m7-tp1.md, shaders/transparency.wgsl). Lit frames
 //! with transparent draws or live emitters run, after opaque shading and temporal
 //! reconstruction and before presentation, into the resolved HDR target:
-//! 1. opaque view depth: from the hit records on traced and visibility-buffer frames, from
-//!    the raster depth on 1x raster frames;
+//! 1. opaque view depth: unjittered opaque camera depth converted via `tp_depth_raster` on
+//!    traced reconstructed frames (matching the unjittered camera used by glass, panes and
+//!    particles), hit records on unjittered traced frames, or raster depth on 1x raster frames;
 //! 2. the transparent receivers' sun shadow map, rendered only when the sun, the receivers'
 //!    footprint or the opaque casters change;
 //! 3. particle simulation and a one-workgroup bitonic sort per emitter;
@@ -290,6 +291,10 @@ pub(super) fn compile_structure_sources(
             "shadow",
             format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")),
         ),
+        (
+            "camera-depth",
+            format!("{}{}", section("TP_FRAME"), section("TP_CAM_DEPTH")),
+        ),
         ("aa-seed", section("TP_AA_SEED").to_owned()),
         ("aa-resolve", section("TP_AA_RESOLVE").to_owned()),
         (
@@ -402,6 +407,10 @@ struct Gpu {
     pane_layouts: Vec<Owned<wgpu::PipelineLayout>>,
     shadow_group: Owned<wgpu::BindGroup>,
     shadow_pipeline: Owned<wgpu::RenderPipeline>,
+    /// Unjittered opaque camera depth prepass pipelines (double-sided depth-only, single-sided
+    /// with winding discard) for traced reconstructed frames whose `primary_hit` is jittered.
+    cam_depth_double: Owned<wgpu::RenderPipeline>,
+    cam_depth_single: Owned<wgpu::RenderPipeline>,
     raster_depth_bindings: Owned<wgpu::BindGroupLayout>,
     raster_depth: Owned<wgpu::ComputePipeline>,
     /// Created with the first traced or visibility-buffer frame.
@@ -434,6 +443,8 @@ struct ParticlePipelines {
 pub(super) struct Targets {
     color: Depth,
     depth: Depth,
+    /// Unjittered opaque depth attachment, allocated lazily on traced reconstructed frames.
+    cam_depth: Option<Depth>,
     /// 4x MSAA glass target, allocated lazily only when a draw uses MSAA raster rather than panes.
     aa: Option<Depth>,
     /// Per-pixel panes' four-sample triangle ids (`panes`), allocated lazily when panes run.
@@ -1103,6 +1114,82 @@ impl Renderer {
                 }),
             ResourceKind::RenderPipeline,
         );
+        // Unjittered opaque camera depth for traced reconstructed frames: reversed-Z (near 1,
+        // far 0, cleared 0) matching `tp_depth_raster` and the unjittered glass/pane camera.
+        let cam_depth_module = self.tp_module(
+            "TP1 camera depth",
+            &format!("{}{}", section("TP_FRAME"), section("TP_CAM_DEPTH")),
+        );
+        let cam_depth_buffers = [
+            Some(wgpu::VertexBufferLayout {
+                array_stride: 48,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+            }),
+            Some(wgpu::VertexBufferLayout {
+                array_stride: 4,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![4 => Uint32],
+            }),
+        ];
+        let cam_depth_stencil = Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: Default::default(),
+            bias: Default::default(),
+        });
+        let cam_depth_double = self.ledger.own(
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("TP1 camera depth double-sided"),
+                    layout: Some(&shadow_layout),
+                    vertex: wgpu::VertexState {
+                        module: &cam_depth_module,
+                        entry_point: Some("tp_cam_depth_double_vs"),
+                        compilation_options: Default::default(),
+                        buffers: &cam_depth_buffers,
+                    },
+                    fragment: None,
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: cam_depth_stencil.clone(),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+            ResourceKind::RenderPipeline,
+        );
+        let cam_depth_single = self.ledger.own(
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("TP1 camera depth single-sided"),
+                    layout: Some(&shadow_layout),
+                    vertex: wgpu::VertexState {
+                        module: &cam_depth_module,
+                        entry_point: Some("tp_cam_depth_single_vs"),
+                        compilation_options: Default::default(),
+                        buffers: &cam_depth_buffers,
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &cam_depth_module,
+                        entry_point: Some("tp_cam_depth_single_fs"),
+                        compilation_options: Default::default(),
+                        targets: &[],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: cam_depth_stencil,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+            ResourceKind::RenderPipeline,
+        );
         let raster_depth_bindings = self.tp_layout(
             "TP1 raster depth",
             &[
@@ -1348,6 +1435,8 @@ impl Renderer {
             pane_layouts,
             shadow_group,
             shadow_pipeline,
+            cam_depth_double,
+            cam_depth_single,
             raster_depth_bindings,
             raster_depth,
             hit_depth: None,
@@ -2126,6 +2215,7 @@ impl Renderer {
             self.view.transparency_targets = Some(Targets {
                 color,
                 depth,
+                cam_depth: None,
                 aa: None,
                 pane_ids: None,
                 generation,
@@ -2549,16 +2639,49 @@ impl Renderer {
                 }
             }
         }
+        let use_cam_depth = traced && self.view.reconstruction_frame.is_some();
         let need_pane_ids = !pane_bytes.is_empty();
         let need_aa = glass_samples() == 4
             && transparent
                 .iter()
                 .enumerate()
                 .any(|(i, _)| pane_records[i].is_empty());
-        // Lazily allocate the heavy 4x MSAA targets only when this frame's draws actually need them.
-        if (need_pane_ids && self.view.transparency_targets.as_ref().unwrap().pane_ids.is_none())
+        // Lazily allocate optional targets only when this frame's path/draws actually need them.
+        if (use_cam_depth && self.view.transparency_targets.as_ref().unwrap().cam_depth.is_none())
+            || (need_pane_ids
+                && self.view.transparency_targets.as_ref().unwrap().pane_ids.is_none())
             || (need_aa && self.view.transparency_targets.as_ref().unwrap().aa.is_none())
         {
+            let new_cam_depth = (use_cam_depth
+                && self.view.transparency_targets.as_ref().unwrap().cam_depth.is_none())
+            .then(|| {
+                let texture = self.ledger.own(
+                    self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("TP1 unjittered opaque depth"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Depth32Float,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    }),
+                    ResourceKind::Texture,
+                );
+                let view = self.ledger.own(
+                    texture.create_view(&Default::default()),
+                    ResourceKind::TextureView,
+                );
+                Depth {
+                    texture,
+                    view,
+                    _allocation: self.ledger.allocate(
+                        AllocationKind::Target,
+                        u64::from(size.width) * u64::from(size.height) * 4,
+                    ),
+                }
+            });
             let new_pane_ids = (need_pane_ids
                 && self.view.transparency_targets.as_ref().unwrap().pane_ids.is_none())
             .then(|| {
@@ -2620,6 +2743,9 @@ impl Renderer {
                 }
             });
             let t = self.view.transparency_targets.as_mut().unwrap();
+            if let Some(d) = new_cam_depth {
+                t.cam_depth = Some(d);
+            }
             if let Some(p) = new_pane_ids {
                 t.pane_ids = Some(p);
             }
@@ -2631,9 +2757,79 @@ impl Renderer {
         let hdr = self.view.hdr.as_ref().unwrap();
         let targets = self.view.transparency_targets.as_ref().unwrap();
         part!("transparency.depth");
-        // 1. Opaque view depth.
+        // 1. Opaque view depth. On traced reconstructed frames, `primary_hit` is jittered while
+        // transparent glass, panes and particles use the unjittered camera: rasterizing opaque
+        // depth with the unjittered camera prevents recessed glass (such as curved lenses inside
+        // opaque housings) from flickering on/off against jittered rim depths every frame.
         {
-            let group = if traced {
+            if use_cam_depth {
+                let cam_depth = targets.cam_depth.as_ref().unwrap();
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("TP1 unjittered opaque depth"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &cam_depth.view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
+                pass.set_bind_group(0, &*gpu.shadow_group, &[]);
+                let mut pipeline = None;
+                let (mut instances, mut ids, mut mesh) = (None, None, None);
+                for draw in opaque {
+                    if draw.slots.is_empty() {
+                        continue;
+                    }
+                    let single = draw.material.is_some_and(|m| !m.double_sided);
+                    let candidate: &wgpu::RenderPipeline = if single {
+                        &gpu.cam_depth_single
+                    } else {
+                        &gpu.cam_depth_double
+                    };
+                    if changed(&mut pipeline, candidate) {
+                        pass.set_pipeline(candidate);
+                    }
+                    let bind: &wgpu::BindGroup = &draw.instances.bind;
+                    if changed(&mut instances, bind) {
+                        pass.set_bind_group(1, bind, &[]);
+                    }
+                    #[cfg(test)]
+                    let id_buffer: &wgpu::Buffer =
+                        draw.reference_ids.unwrap_or(&draw.instances.id_buffer);
+                    #[cfg(not(test))]
+                    let id_buffer: &wgpu::Buffer = &draw.instances.id_buffer;
+                    if changed(&mut ids, id_buffer) {
+                        pass.set_vertex_buffer(1, id_buffer.slice(..));
+                    }
+                    if changed(&mut mesh, draw.mesh) {
+                        pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+                        pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                    }
+                    pass.draw_indexed(draw.indices.clone(), 0, draw.slots.clone());
+                }
+            }
+            let group = if use_cam_depth {
+                let cam_depth = targets.cam_depth.as_ref().unwrap();
+                Some(self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
+                    label: Some("TP1 unjittered raster depth"),
+                    layout: &gpu.raster_depth_bindings,
+                    entries: &[
+                        frame_entry(&gpu.frame),
+                        wgpu::BindGroupEntry {
+                            binding: 52,
+                            resource: wgpu::BindingResource::TextureView(&targets.depth.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 53,
+                            resource: wgpu::BindingResource::TextureView(&cam_depth.view),
+                        },
+                    ],
+                }))
+            } else if traced {
                 let primary = self.view.primary.as_ref().unwrap();
                 let t = primary.targets.as_ref().unwrap();
                 let (bindings, _) = gpu.hit_depth.as_ref().unwrap();
@@ -2685,7 +2881,7 @@ impl Renderer {
                 label: Some("TP1 opaque depth"),
                 timestamp_writes: None,
             });
-            if traced {
+            if traced && !use_cam_depth {
                 let arrays = self
                     .view
                     .primary

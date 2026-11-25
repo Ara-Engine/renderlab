@@ -162,10 +162,13 @@ const RAY: &str = include_str!("../shaders/local_light_ray.wgsl");
 /// rays instead of four. Every other composition gets the empty stub.
 const RESTART_BUDGET: &str = "fn rl_local_budget(world:vec3<f32>) { let restart=rl_light_frame.info.w; if restart<=4u { return; } if rl_restarts(world) { rl_local_rays=restart; } }\n";
 /// Whether the resolve restarts a static receiver at `world` this frame: the resolve's own
-/// tests (shaders/temporal_zones.wgsl) on the same record, for the estimators that give a
-/// restarted receiver more samples (local-light disk rays here, glossy strata in
-/// shaders/reflections.wgsl). Traced stages only: the others have no frame record.
-const RESTARTS: &str = "fn rl_restarts(world:vec3<f32>)->bool { return rl_zone_caster_shadow(world) || rl_zone_relit(world); }\n";
+/// `tr1_relit` test (shaders/temporal_zones.wgsl) on the same record, for the estimators that
+/// give a restarted receiver more samples (local-light disk rays here, glossy strata in
+/// shaders/reflections.wgsl). Moving casters' swept sun shadows keep a short temporal window
+/// instead of restarting to 1 frame, so they keep the regular reflection/local-light counts
+/// (avoiding strata-count steps along the shadow slab while sun rays still boost via
+/// `tr1_zone_rays`). Traced stages only: the others have no frame record.
+const RESTARTS: &str = "fn rl_restarts(world:vec3<f32>)->bool { return rl_zone_relit(world); }\n";
 const RESTART_BUDGET_STUB: &str = "fn rl_local_budget(world:vec3<f32>) {}\n";
 /// Disk rays a restarted receiver traces per soft local light (`LcFrame.info.w`).
 const RESTART_RAYS: u32 = 16;

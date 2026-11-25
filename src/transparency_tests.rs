@@ -79,6 +79,10 @@ fn tp1_modules_validate() {
         &format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")),
     );
     validate(
+        "camera depth",
+        &format!("{}{}", section("TP_FRAME"), section("TP_CAM_DEPTH")),
+    );
+    validate(
         "TP2 coloured shadow",
         &transmission_shadow::draw_source(SOURCE),
     );

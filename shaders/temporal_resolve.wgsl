@@ -213,10 +213,10 @@ fn tr1_view_turn(s:Tr1Surface)->f32 {
 // The surface neither the camera nor its vertices or placement moved: its history is its
 // own pixel's.
 fn tr1_still(s:Tr1Surface)->bool {return tr1.flags.z!=0u && !s.moved;}
-// MQ1's box over this frame's 3x3 samples (on moving surfaces, their silhouettes, rigid swept
-// sun shadows, or relit frames), plus a smooth distance-based window cap around moving objects
-// so nearby glossy reflections and bounce follow movers cleanly without hard box seams or
-// freezing 1-frame denoised reflection noise at full history weight.
+// MQ1's box over this frame's 3x3 samples (on moving surfaces, their silhouettes, or globally
+// relit frames), plus a smooth distance-based window cap around moving objects and a soft window
+// cap inside their swept sun shadows so glossy reflections and bounce follow movers cleanly
+// without hard box seams, shadow-polygon flashes, or 1-frame restarts on static receivers.
 var<private> tr1_box_active:bool;
 var<private> tr1_box_lo:vec3<f32>;
 var<private> tr1_box_hi:vec3<f32>;
@@ -232,6 +232,10 @@ fn tr1_mover_sun_hit(x:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>)->bool {
 }
 fn tr1_box_applies(s:Tr1Surface)->bool {
     tr1_mover_window=tr1.windows.x;
+    let near_w=min(max(tr1.starts.y,1.0),tr1.windows.x);
+    if s.id!=0u && tr1_caster_shadow(s.point.xyz) && !tr1_moving(s.id-1u) {
+        tr1_mover_window=min(tr1_mover_window,near_w);
+    }
     if (tr1.flags.y&TR1_BOX)==0u {return false;}
     if tr1.mover_meta.y!=0u || s.moved || tr1_near_skin {return true;}
     if s.id==0u {return false;}
@@ -246,10 +250,10 @@ fn tr1_box_applies(s:Tr1Surface)->bool {
     }
     if min_t<1.0 {
         let u=min_t*min_t*(3.0-2.0*min_t);
-        let near_w=min(max(tr1.starts.y,1.0),tr1.windows.x);
-        tr1_mover_window=near_w*exp2(log2(max(tr1.windows.x/max(near_w,1.0),1.0))*u);
+        tr1_mover_window=min(tr1_mover_window,near_w*exp2(log2(max(tr1.windows.x/max(near_w,1.0),1.0))*u));
     }
-    return sun_hit;
+    if sun_hit {tr1_mover_window=min(tr1_mover_window,near_w);}
+    return false;
 }
 // Placement + 1 of this frame's samples over the workgroup's 8x8 pixels and a one-pixel
 // border (TR1_NONE outside the image), loaded once per workgroup by tr1_resolve.
@@ -415,14 +419,14 @@ fn tr1_catmull_rom(t:f32)->vec4<f32> {
 // limited to the inner taps' range (history only: the undershoot fix, not a current-frame
 // box). `window` is the window the fetch allows.
 struct Tr1History { colour:vec3<f32>, weight:f32, window:f32 };
-// Whether surface s restarts this frame (shaders/temporal_zones.wgsl): a static receiver
-// whose light a moving caster's swept shadow can change (SK1), or any surface point in a
-// changed local light's restart sphere (P-RELIT). It starts again from this frame's samples
-// (tr1_continue), as on a frame that restarts every pixel.
+// Whether surface s restarts this frame (shaders/temporal_zones.wgsl): any surface point in a
+// changed local light's or edited material's restart sphere (P-RELIT). Moving casters' swept sun
+// shadows cap `tr1_mover_window` in `tr1_box_applies` instead of discarding history to 1 frame,
+// so glossy receivers beneath animated characters stay free of shadow-polygon flicker while
+// shadows still clear within `start_window` frames.
 fn tr1_restarts(s:Tr1Surface)->bool {
     if s.id==0u {return false;}
-    // The zone tests first: both are off on most frames, and tr1_moving reads the placement.
-    return (tr1_caster_shadow(s.point.xyz) && !tr1_moving(s.id-1u)) || tr1_relit(s.point.xyz);
+    return tr1_relit(s.point.xyz);
 }
 
 fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {

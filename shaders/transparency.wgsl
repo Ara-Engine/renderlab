@@ -3,6 +3,7 @@
 //   TP_FRAME      the frame uniform and the sun-visibility shadow map, in every module;
 //   TP_DEPTH      opaque view depth from traced/visibility-buffer hit records or raster depth;
 //   TP_SHADOW     the transparent receivers' sun shadow map (depth only, cached);
+//   TP_CAM_DEPTH  unjittered opaque camera depth for traced reconstructed frames;
 //   TP_GLASS      the transparent-material fragment entry, appended to the material's own
 //                 composed raster program;
 //   TP_PARTICLES  GPU particle simulation, sort and billboard drawing.
@@ -117,6 +118,27 @@ const TP_TRACE_TILE=vec2<u32>(8u,4u);
     return tp.shadow*(tp_models[slot]*vec4<f32>(position,1.0));
 }
 // ---- end TP_SHADOW ----
+
+// ---- TP_CAM_DEPTH ----
+// Unjittered opaque camera depth for traced reconstructed frames whose `primary_hit` is
+// jittered: matches the unjittered camera used by transparent glass, panes and particles.
+@group(1) @binding(0) var<storage,read> tp_models:array<mat4x4<f32>>;
+struct TpNormal { x:vec4<f32>, y:vec4<f32>, z:vec4<f32>, info:vec4<f32> };
+@group(1) @binding(1) var<storage,read> tp_normals:array<TpNormal>;
+struct TpCamDepthOut {
+    @builtin(position) position:vec4<f32>,
+    @location(0) @interpolate(flat) winding:f32,
+};
+@vertex fn tp_cam_depth_double_vs(@location(0) position:vec3<f32>, @location(4) slot:u32) -> @builtin(position) vec4<f32> {
+    return tp.view_projection*(tp_models[slot]*vec4<f32>(position,1.0));
+}
+@vertex fn tp_cam_depth_single_vs(@location(0) position:vec3<f32>, @location(4) slot:u32) -> TpCamDepthOut {
+    return TpCamDepthOut(tp.view_projection*(tp_models[slot]*vec4<f32>(position,1.0)),tp_normals[slot].info.x);
+}
+@fragment fn tp_cam_depth_single_fs(in:TpCamDepthOut, @builtin(front_facing) front:bool) {
+    if front!=(in.winding>0.0) { discard; }
+}
+// ---- end TP_CAM_DEPTH ----
 
 // ---- TP_GLASS ----
 // Appended to a transparent material's composed raster program. Group 0 is this pass's
