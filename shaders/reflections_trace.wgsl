@@ -102,11 +102,14 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     let alpha=unpack2x16float(b.w&0xffffu).x;
     let cone_alpha=alpha*inverseSqrt(f32(count));
     let cone=vec2<f32>(ws.x,ws.y+2.0*cone_alpha);
-    // The inline loop's directions: the frame's radial offset and the pixel's rotation.
+    // The inline loop's directions: IGN + 2D R2 on live frames, fixed hash + 0.5 on frame 0.
     let frame=primary_frame.sided.y;
-    let seed=rl_hash((p.x*0x9e3779b1u)^rl_hash(p.y^(frame*0x85ebca6bu)));
-    let rotation=f32(seed>>8u)*(1.0/16777216.0);
-    let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
+    let seed=rl_hash((p.x*0x9e3779b1u)^rl_hash(p.y));
+    let ign=fract(52.9829189*fract(0.06711056*f32(p.x)+0.00583715*f32(p.y)));
+    let ign2=fract(52.9829189*fract(0.06711056*f32(p.y+13u)+0.00583715*f32(p.x+29u)));
+    let tf=f32(frame&0xfffu);
+    let rotation=select(f32(seed>>8u)*(1.0/16777216.0),fract(ign2+tf*0.5698402909),frame!=0u);
+    let radial=select(0.5,fract(ign+tf*0.7548776662),frame!=0u);
     let basis=rl_basis(n);
     let local_v=vec3<f32>(dot(v,basis[0]),dot(v,basis[1]),dot(v,basis[2]));
     let width=samples.x;

@@ -300,11 +300,17 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let spread=pixel_angle+curvature+2.0*cone_alpha;
     let basis=rl_basis(n);
     let local_v=vec3<f32>(dot(v,basis[0]),dot(v,basis[1]),dot(v,basis[2]));
-    // Fixed per-pixel azimuth; TR1 frames turn it by their rotation word (0 otherwise).
+    // Cold frame 0 keeps the fixed per-pixel hash and midpoint radial stratum; live TR1 frames
+    // spatially stratify both radial and azimuthal offsets with interleaved gradient noise and
+    // advance them along the 2D R2 sequence so neighbouring pixels in the à-trous denoiser cover
+    // the full GGX lobe each frame instead of pulsing together across the screen.
     let frame=primary_frame.sided.y;
-    let seed=rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y^(frame*0x85ebca6bu)));
-    let rotation=f32(seed>>8u)*(1.0/16777216.0);
-    let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
+    let seed=rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y));
+    let ign=fract(52.9829189*fract(0.06711056*f32(pixel.x)+0.00583715*f32(pixel.y)));
+    let ign2=fract(52.9829189*fract(0.06711056*f32(pixel.y+13u)+0.00583715*f32(pixel.x+29u)));
+    let tf=f32(frame&0xfffu);
+    let rotation=select(f32(seed>>8u)*(1.0/16777216.0),fract(ign2+tf*0.5698402909),frame!=0u);
+    let radial=select(0.5,fract(ign+tf*0.7548776662),frame!=0u);
     // The reflection pass's lobe (RL_PASS): glossy receivers only; mirrors stay inline.
     if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}
     // Reflection history: a trusted glossy receiver traces one stratum, rotating with the

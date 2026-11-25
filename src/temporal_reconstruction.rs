@@ -1864,7 +1864,7 @@ impl Planner {
                 let diag = (b.max - b.min).length();
                 // Smooth local bounce/reflection window ramp radius around the mover (swept sun
                 // shadows use the directional slab test in `tr1_mover_sun_hit` at any distance).
-                let reach = (0.75 * diag).clamp(0.5, 6.0);
+                let reach = (1.25 * diag).clamp(0.75, 6.0);
                 let margin = Vec3::splat(1e-4) + b.min.abs().max(b.max.abs()) * 1e-5;
                 let (lo, hi) = (b.min - margin, b.max + margin);
                 [lo.x, lo.y, lo.z, reach, hi.x, hi.y, hi.z, 0.0]

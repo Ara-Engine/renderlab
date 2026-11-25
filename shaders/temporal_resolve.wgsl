@@ -213,11 +213,14 @@ fn tr1_view_turn(s:Tr1Surface)->f32 {
 // The surface neither the camera nor its vertices or placement moved: its history is its
 // own pixel's.
 fn tr1_still(s:Tr1Surface)->bool {return tr1.flags.z!=0u && !s.moved;}
-// MQ1's box over this frame's 3x3 samples (on moving surfaces, their silhouettes, or globally
-// relit frames), plus a smooth distance-based window cap around moving objects and a soft window
-// cap inside their swept sun shadows so glossy reflections and bounce follow movers cleanly
-// without hard box seams, shadow-polygon flashes, or 1-frame restarts on static receivers.
+// MQ1's tight 3x3 box (on moving surfaces, their silhouettes, pixels a character just
+// vacated, or globally relit frames), plus a padded same-surface box (`tr1_soft_box`) and
+// flat-interior window cap around movers and inside their swept sun shadows. Large real
+// lighting shifts (moving shadows, foot contact and leg reflections) clamp immediately,
+// while small reflection fluctuations stay inside the pad and static geometric/texture
+// edges keep full temporal AA instead of strobing.
 var<private> tr1_box_active:bool;
+var<private> tr1_soft_box:bool;
 var<private> tr1_box_lo:vec3<f32>;
 var<private> tr1_box_hi:vec3<f32>;
 var<private> tr1_mover_window:f32;
@@ -231,9 +234,11 @@ fn tr1_mover_sun_hit(x:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>)->bool {
     return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
 }
 fn tr1_box_applies(s:Tr1Surface)->bool {
+    tr1_soft_box=false;
     tr1_mover_window=tr1.windows.x;
     let near_w=min(max(tr1.starts.y,1.0),tr1.windows.x);
     if s.id!=0u && tr1_caster_shadow(s.point.xyz) && !tr1_moving(s.id-1u) {
+        tr1_soft_box=true;
         tr1_mover_window=min(tr1_mover_window,near_w);
     }
     if (tr1.flags.y&TR1_BOX)==0u {return false;}
@@ -249,10 +254,15 @@ fn tr1_box_applies(s:Tr1Surface)->bool {
         if tr1_mover_sun_hit(s.point.xyz,lo.xyz,hi.xyz) {sun_hit=true;}
     }
     if min_t<1.0 {
-        let u=min_t*min_t*(3.0-2.0*min_t);
+        tr1_soft_box=true;
+        let t=clamp((min_t-0.5)*2.0,0.0,1.0);
+        let u=t*t*(3.0-2.0*t);
         tr1_mover_window=min(tr1_mover_window,near_w*exp2(log2(max(tr1.windows.x/max(near_w,1.0),1.0))*u));
     }
-    if sun_hit {tr1_mover_window=min(tr1_mover_window,near_w);}
+    if sun_hit {
+        tr1_soft_box=true;
+        tr1_mover_window=min(tr1_mover_window,near_w);
+    }
     return false;
 }
 // Placement + 1 of this frame's samples over the workgroup's 8x8 pixels and a one-pixel
@@ -508,16 +518,25 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
             h.window=min(h.window,cap);
         }
     }
-    // Smooth proximity window cap around movers so nearby reflections and bounce stay responsive
-    // without hard box seams or 1-frame denoised blotches.
+    // Flat-interior proximity window cap around movers; static geometric/texture edges keep
+    // full history window (`tr1_mover_window == tr1.windows.x`).
     h.window=min(h.window,tr1_mover_window);
     // MQ1: clamp continued history to this frame's 3x3 range where required, and cap weight
-    // when clamped so a single clamped frame never freezes at full history weight.
+    // when clamped so a single clamped frame never freezes at full history weight. Static
+    // receivers near movers or in swept sun shadows use a padded same-surface box so moving
+    // shadows and contact reflections clear immediately without boiling smooth reflections.
     if tr1_box_active {
         let clamped=clamp(h.colour,tr1_box_lo,tr1_box_hi);
         if any(clamped!=h.colour) {
             h.colour=clamped;
             h.weight=min(h.weight,max(tr1.starts.y,1.0));
+        }
+    } else if tr1_soft_box && s.id==tr1_self {
+        let pad=max(tr1_box_hi*0.04,vec3<f32>(8e-4));
+        let clamped=clamp(h.colour,max(tr1_box_lo-pad,vec3<f32>(0.0)),tr1_box_hi+pad);
+        if any(clamped!=h.colour) {
+            h.colour=clamped;
+            h.weight=min(h.weight,1.0);
         }
     }
     return h;
@@ -668,6 +687,16 @@ fn tr1_sample_point(q:vec2<i32>,id:u32)->vec3<f32> {
     let x=receiver_point(tr1_position(batch,i),tr1_position(batch,i+1u),tr1_position(batch,i+2u),vec3<f32>(1.0-uv.x-uv.y,uv));
     return world_position(x,slot).xyz;
 }
+// The world geometric normal of sample q's surface `id`.
+fn tr1_sample_normal(q:vec2<i32>,id:u32)->vec3<f32> {
+    let record=textureLoad(primary_hit,q,0);
+    let slot=id-1u;
+    let batch=primary_placements[slot]&0x1fffffffu;
+    let i=record.y*3u;
+    let wa=world_position(tr1_position(batch,i),slot).xyz;
+    let n=cross(world_position(tr1_position(batch,i+1u),slot).xyz-wa,world_position(tr1_position(batch,i+2u),slot).xyz-wa);
+    return n*inverseSqrt(max(tr1_dot(n,n),1e-30));
+}
 // The 5x5 start (tent radius 3 pixels, about 18 effective samples on an open surface): the
 // weighted mean and its effective sample count; zero weight when no sample passes.
 fn tr1_wide_start(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->vec4<f32> {
@@ -772,21 +801,9 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         if v!=0u && v!=tested {tested=v;tr1_near_skin=tr1_near_skin || tr1_moving(v-1u);}
         if v!=s.id && (other<0 || (i%2==1 && other%2==0)) {other=i;}
     }
-    let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
-    tr1_box_active=tr1_box_applies(s);
-    if tr1_box_active {
-        tr1_box_lo=vec3<f32>(3.4e38);tr1_box_hi=vec3<f32>(-3.4e38);
-        for(var i=0;i<9;i+=1) {
-            let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
-            if !tr1_inside(t,size) {continue;}
-            let c=textureLoad(tr1_sample,tr1_map(t),0).xyz;
-            tr1_box_lo=min(tr1_box_lo,c);tr1_box_hi=max(tr1_box_hi,c);
-        }
-    }
-    var kept:Tr1Second;
-    kept.id=TR1_NONE;
     // SK1: a character that left this pixel is not a still silhouette missed by
-    // this frame's sample. Retire its retained slot, even outside the current ring.
+    // this frame's sample. Retire its retained slot and mark `tr1_near_skin`
+    // before `tr1_box_applies` so vacated pixels clamp immediately.
     if tr1.flags.x==0u && tr1.flags.z!=0u {
         let ax=textureLoad(tr1_anchor_in,p,0).x;
         let first=ax&TR1_ID;
@@ -794,6 +811,25 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         if first!=0u && first!=tested {tr1_near_skin=tr1_near_skin || tr1_moving(first-1u);}
         if second!=0u && second!=TR1_NONE && second!=tested {tr1_near_skin=tr1_near_skin || tr1_moving(second-1u);}
     }
+    let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
+    tr1_box_active=tr1_box_applies(s);
+    if tr1_box_active || tr1_soft_box {
+        tr1_box_lo=vec3<f32>(3.4e38);tr1_box_hi=vec3<f32>(-3.4e38);
+        var flat=tr1_soft_box && !tr1_box_active && other<0 && s.id!=0u;
+        for(var i=0;i<9;i+=1) {
+            let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
+            if !tr1_inside(t,size) {continue;}
+            if !tr1_box_active && tr1_ring(i)!=s.id {continue;}
+            if flat && i!=4 && abs(tr1_dot(s.normal,tr1_sample_normal(tr1_map(t),s.id)))<0.92 {flat=false;}
+            let c=textureLoad(tr1_sample,tr1_map(t),0).xyz;
+            tr1_box_lo=min(tr1_box_lo,c);tr1_box_hi=max(tr1_box_hi,c);
+        }
+        if tr1_soft_box && !tr1_box_active && (!flat || any(tr1_box_hi-tr1_box_lo>max(tr1_box_hi*0.25,vec3<f32>(2e-3)))) {
+            tr1_mover_window=tr1.windows.x;
+        }
+    }
+    var kept:Tr1Second;
+    kept.id=TR1_NONE;
     // P-RELIT: not in a changed light's restart sphere, where the third-surface case below
     // would carry both stored colours at the light's old intensity.
     if tr1.flags.z!=0u && tr1.flags.x==0u && !tr1_near_skin && !s.moved && !(s.id!=0u && tr1_relit(s.point.xyz)) {
