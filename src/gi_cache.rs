@@ -5068,9 +5068,11 @@ impl GiState {
         // for the claim rounds that follow.
         let b = 6 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_gather");
-        // The emitter list for this frame's gathers (gi_emitters.wgsl), from last frame's
-        // per-draw emission probe and this frame's transforms.
-        if plan.bounce && (self.emitter_readers || emitters_on()) {
+        // The emitter list for this frame's cache gathers (gi_emitters.wgsl), when cache gathers
+        // themselves read it (`emitters_on()`). When only external readers (the final gather) read
+        // it, the list is built right after cell shading below so frame 1 and emission edits see
+        // every emitter immediately with zero 1-frame startup lag.
+        if plan.bounce && emitters_on() {
             main_pass(encoder, "indirect emitters", &p.emitters_build, u32::MAX, Some([EMITTER_GROUPS, 1]));
             main_pass(encoder, "indirect emitters publish", &p.emitters_publish, u32::MAX, Some([1, 1]));
             main_pass(encoder, "indirect emitters power", &p.emitters_cdf, u32::MAX, Some([1, 1]));
@@ -5221,6 +5223,13 @@ impl GiState {
                     pass.dispatch_workgroups(LIGHT_GROUPS, 1, 1);
                 }
             }
+        }
+        // Build the emitter list right after cell shading when only external readers (the final
+        // gather) consume it, so frame 1 and emission edits publish all emitters before fg_trace.
+        if plan.bounce && self.emitter_readers && !emitters_on() {
+            main_pass(encoder, "indirect emitters", &p.emitters_build, u32::MAX, Some([EMITTER_GROUPS, 1]));
+            main_pass(encoder, "indirect emitters publish", &p.emitters_publish, u32::MAX, Some([1, 1]));
+            main_pass(encoder, "indirect emitters power", &p.emitters_cdf, u32::MAX, Some([1, 1]));
         }
         if let Some(profile) = self.profile.as_ref() {
             if profile.priority && p.priority.is_none() {

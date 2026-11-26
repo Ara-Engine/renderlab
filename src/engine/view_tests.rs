@@ -594,3 +594,400 @@ fn arena_corner_still_and_fast_pan_without_gi_spots_or_blotches() {
         );
     }
 }
+
+/// Reproduces the My project 5 Night preset scene (4 lux moonlight, SkyAtmosphere, HeightFog,
+/// 3 warm accent point lights, 8000 lm panel rect/spot light, 3000 cd/m² emissive Light panel,
+/// EV100 = 4 exposure) from the saved Scene view camera under cold start, 36-frame Scene view
+/// settle, 96-frame reference, and fast camera pans on both RT and Non-RT.
+#[test]
+#[ignore]
+fn arena_night_preset_repro() {
+    const W: u32 = 1280;
+    const H: u32 = 720;
+    let dump_dir = std::env::var_os("RENDERLAB_NIGHT_DUMP").map(std::path::PathBuf::from);
+    if let Some(dir) = &dump_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    // Exact Ara emissive program (ara-renderlab/src/scene.rs emissive_source).
+    const FIELDS: &str = "alpha:f32 };";
+    const BUILT: &str = "decal_mr.x,alpha);";
+    const RETURN: &str = "    return exposed;";
+    let emissive_wgsl = format!(
+        "struct Parameters {{ glow:vec3<f32>, everywhere:f32, bounce:vec3<f32>, mapped:f32 }};\n\
+         const DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0),0.0,vec3<f32>(0.0),0.0);\n\
+         fn ara_glows(input:SurfaceInput) -> bool {{ return params.everywhere>0.5 || abs(input.material.base_color.a-0.737)<0.002; }}\n\
+         {}\n\
+         fn emission(s:Surface, input:SurfaceInput) -> vec3<f32> {{ return select(vec3<f32>(0.0),max(params.bounce,vec3<f32>(0.0)),ara_glows(input)); }}\n",
+        crate::STANDARD_PROGRAM
+            .replace(FIELDS, "alpha:f32, glow:vec3<f32> };")
+            .replace(
+                BUILT,
+                "decal_mr.x,alpha,select(vec3<f32>(0.0),max(params.glow,vec3<f32>(0.0)),ara_glows(input)));",
+            )
+            .replace(
+                RETURN,
+                "    return min(exposed+exposed_product(s.glow,vec3<f32>(1.0)),vec3<f32>(65504.0));",
+            )
+            .replace(
+                "s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),",
+                "s.n,s.base,s.alpha,s.metal,s.rough,s.glow,",
+            )
+            .replace(
+                "    s.alpha=m.alpha;\n    return s;",
+                "    s.alpha=m.alpha;\n    s.glow=m.emission;\n    return s;",
+            )
+    );
+
+    for path in [RenderPath::HardwareRt, RenderPath::NonRt] {
+        let adapter = test_adapter();
+        // SAFETY: the test suite's documented experimental-feature acknowledgement.
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let mut engine = Engine::new(
+            &adapter,
+            EngineDescriptor {
+                path,
+                experimental_ray_query,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let emissive_prog = engine.create_program("ara_emissive", &emissive_wgsl).unwrap();
+
+        let spawn = |engine: &mut Engine, c, h, colour, roughness| {
+            let (vertices, indices) = cube(c, h);
+            let mesh = engine
+                .create_mesh(&MeshData {
+                    vertices: &vertices,
+                    indices: &indices,
+                })
+                .unwrap();
+            let material = engine
+                .create_material(&MaterialDesc {
+                    base_color: colour,
+                    roughness,
+                    double_sided: true,
+                    ..Default::default()
+                })
+                .unwrap();
+            engine.spawn(mesh, material, Mat4::IDENTITY).unwrap()
+        };
+
+        // Exact My project 5 arena geometry & materials.
+        spawn(&mut engine, [0.0, -0.25, 0.0], [20.0, 0.25, 20.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn(&mut engine, [0.0, 2.0, -19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [0.0, 2.0, 19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [-19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        // Platform, Archway (jambs + lintel).
+        spawn(&mut engine, [0.0, 1.0, -8.0], [4.0, 1.0, 3.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn(&mut engine, [-12.4, 2.5, 4.0], [0.6, 2.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [-7.6, 2.5, 4.0], [0.6, 2.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [-10.0, 4.5, 4.0], [1.8, 0.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        // 4 Pillars.
+        for [px, pz] in [[-14.0, -14.0], [14.0, -14.0], [-14.0, 14.0], [14.0, 14.0]] {
+            spawn(&mut engine, [px, 2.0, pz], [0.6, 2.0, 0.6], [0.70, 0.67, 0.62, 1.0], 0.90);
+        }
+        // 5 Covers.
+        spawn(&mut engine, [6.0, 0.6, 6.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn(&mut engine, [-6.0, 0.6, 9.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn(&mut engine, [9.0, 0.6, -2.0], [0.3, 0.6, 1.0], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn(&mut engine, [12.0, 0.6, 11.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn(&mut engine, [-14.0, 0.6, -5.0], [0.3, 0.6, 1.0], [0.52, 0.18, 0.04, 1.0], 0.78);
+        // Crates.
+        for pos in [
+            [5.0, 0.4, 12.0],
+            [5.9, 0.4, 12.0],
+            [5.45, 1.2, 12.0],
+            [-7.0, 0.4, 13.0],
+            [-1.2, 2.4, -9.0],
+            [0.0, 2.4, -9.5],
+        ] {
+            spawn(&mut engine, pos, [0.4, 0.4, 0.4], [0.4, 0.24, 0.12, 1.0], 0.55);
+        }
+        // Emissive Light panel (`e_panel`): [0, 3, -19.45], size [4, 1, 0.1], emissive [3000, 2250, 1450], castShadows: false.
+        {
+            let (vertices, indices) = cube([0.0, 3.0, -19.45], [2.0, 0.5, 0.05]);
+            let mesh = engine
+                .create_mesh(&MeshData {
+                    vertices: &vertices,
+                    indices: &indices,
+                })
+                .unwrap();
+            let mat = engine
+                .create_material(&MaterialDesc {
+                    base_color: [0.8, 0.8, 0.8, 0.737],
+                    roughness: 0.4,
+                    double_sided: true,
+                    program: Some(emissive_prog),
+                    ..Default::default()
+                })
+                .unwrap();
+            engine
+                .set_material_parameters(
+                    mat,
+                    &[
+                        ("glow", crate::Value::Vec3([3000.0, 2250.0, 1450.0])),
+                        ("everywhere", crate::Value::F32(0.0)),
+                        ("bounce", crate::Value::Vec3([3000.0, 2250.0, 1450.0])),
+                        ("mapped", crate::Value::F32(0.0)),
+                    ],
+                )
+                .unwrap();
+            let obj = engine.spawn(mesh, mat, Mat4::IDENTITY).unwrap();
+            engine.set_casts_shadows(obj, false).unwrap();
+        }
+
+        // Exact Night preset lighting: 4 lux cool moon + 3 warm point lamps + 8000 lm panel light.
+        let el = 35.0f32.to_radians();
+        let az = 32.0f32.to_radians();
+        let toward = Vec3::new(-el.cos() * az.sin(), el.sin(), el.cos() * az.cos());
+        engine
+            .set_sun(Some(Sun {
+                travel: -toward.normalize(),
+                illuminance: [4.0 * 0.64161, 4.0 * 0.73686, 4.0],
+                angular_radius: 0.5357f32.to_radians() * 0.5,
+            }))
+            .unwrap();
+        let lm_to_cd = |lm: f32, c: [f32; 3]| {
+            let s = lm / (4.0 * std::f32::consts::PI);
+            [c[0] * s, c[1] * s, c[2] * s]
+        };
+        engine
+            .set_lights(&[
+                crate::engine::Light::Point {
+                    position: Vec3::new(0.0, 3.6, -8.0),
+                    candela: lm_to_cd(6000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Point {
+                    position: Vec3::new(-10.0, 4.4, 5.5),
+                    candela: lm_to_cd(5000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Point {
+                    position: Vec3::new(12.0, 2.5, 12.0),
+                    candela: lm_to_cd(4000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Spot {
+                    position: Vec3::new(0.0, 3.0, -19.35),
+                    travel: Vec3::Z,
+                    candela: lm_to_cd(8000.0, [1.0, 0.75, 0.48]),
+                    range: Some(16.0),
+                    inner: 0.0,
+                    outer: 1.55,
+                    source_radius: 0.5,
+                    cast_shadows: Some(true),
+                },
+            ])
+            .unwrap();
+        engine.set_sky(crate::engine::Sky::Atmosphere(crate::engine::AtmosphereMedium::default())).unwrap();
+        engine
+            .set_settings(crate::engine::Settings {
+                aerial_perspective: true,
+                height_fog: Some(crate::engine::HeightFog {
+                    density: 0.004,
+                    falloff: 1.0 / 30.0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // EV100 = 4 (auto-exposure minEv100 in My project 5): exposure = 1 / (1.2 * 2^4) => stops ≈ -4.263.
+        let view = engine
+            .create_view(&ViewDesc {
+                look: ViewLook {
+                    exposure: Exposure::Manual { stops: -4.263 },
+                    post: crate::PostSettings {
+                        bloom: 0.05,
+                        motion_blur: false,
+                        tonemapper: crate::Tonemapper::Filmic,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..ViewDesc::new(W, H)
+            })
+            .unwrap();
+
+        let save = |name: &str, img: &Image| {
+            let Some(dir) = &dump_dir else {
+                return;
+            };
+            let p = dir.join(name);
+            let file = std::fs::File::create(&p).unwrap();
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&img.rgba8).unwrap();
+        };
+
+        // Exact saved Scene View camera from scene-cameras.json (`My project 5` sc_main001).
+        let target = Vec3::new(-1.9061034, 8.896457, 12.530297);
+        let base_yaw = 1.33f32;
+        let base_pitch = 0.70f32;
+        let dist = 0.16160744f32;
+        let cam_at = |dyaw: f32| {
+            let yaw = base_yaw + dyaw;
+            let back = Vec3::new(yaw.sin() * base_pitch.cos(), base_pitch.sin(), yaw.cos() * base_pitch.cos());
+            let eye = target + back * dist;
+            Camera::look_at(eye, target, Vec3::Y, 75.0f32.to_radians(), 0.05, 4000.0).unwrap()
+        };
+        let home = cam_at(0.0);
+        let step = |engine: &mut Engine, camera: &Camera| {
+            engine.tick(1.0 / 60.0).unwrap();
+            engine.render_view(view, camera).unwrap();
+        };
+        let tag = if path == RenderPath::HardwareRt { "rt" } else { "nonrt" };
+
+        // Cold start -> frame 1, frame 8, frame 36 (Scene settle), frame 96 (deep settle).
+        step(&mut engine, &home);
+        let f1 = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_f1.png"), &f1);
+        for _ in 1..8 {
+            step(&mut engine, &home);
+        }
+        let f8 = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_f8.png"), &f8);
+        for _ in 8..36 {
+            step(&mut engine, &home);
+        }
+        let f36 = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_f36.png"), &f36);
+        for _ in 36..96 {
+            step(&mut engine, &home);
+        }
+        let f96 = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_f96.png"), &f96);
+
+        // Fast left-right pan returning to home, then 36-frame Scene view settle.
+        let mut dyaw = 0.0f32;
+        for _ in 0..5 {
+            dyaw -= 0.15;
+            step(&mut engine, &cam_at(dyaw));
+        }
+        for _ in 0..10 {
+            dyaw += 0.15;
+            step(&mut engine, &cam_at(dyaw));
+        }
+        for _ in 0..5 {
+            dyaw -= 0.15;
+            step(&mut engine, &cam_at(dyaw));
+        }
+        let pan = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_pan.png"), &pan);
+        for _ in 0..36 {
+            step(&mut engine, &home);
+        }
+        let pan36 = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_pan36.png"), &pan36);
+
+        // Second angle: wide overview facing North wall, Light panel, Accent light 1 & 2, and West wall.
+        let overview = |dyaw: f32| {
+            let eye = Vec3::new(0.0, 5.5, 14.0);
+            let yaw = dyaw;
+            let pitch = 0.22f32;
+            let fwd = Vec3::new(yaw.sin() * pitch.cos(), -pitch.sin(), -yaw.cos() * pitch.cos());
+            Camera::look_at(eye, eye + fwd, Vec3::Y, 75.0f32.to_radians(), 0.05, 4000.0).unwrap()
+        };
+        engine.cut_view(view);
+        for _ in 0..36 {
+            step(&mut engine, &overview(0.0));
+        }
+        let ov36 = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_ov36.png"), &ov36);
+        for _ in 36..96 {
+            step(&mut engine, &overview(0.0));
+        }
+        let ov96 = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_ov96.png"), &ov96);
+        // Pan across overview.
+        let mut od = 0.0f32;
+        for _ in 0..5 {
+            od -= 0.14;
+            step(&mut engine, &overview(od));
+        }
+        for _ in 0..10 {
+            od += 0.14;
+            step(&mut engine, &overview(od));
+        }
+        for _ in 0..5 {
+            od -= 0.14;
+            step(&mut engine, &overview(od));
+        }
+        let ov_pan = engine.capture_view(view).unwrap();
+        save(&format!("night_{tag}_ov_pan.png"), &ov_pan);
+
+        // Measure pixel-level and 24x24 block-level differences against 96-frame reference.
+        let diff = |a: &[u8], b: &[u8]| -> (f64, f64, f64) {
+            let (mut psq, mut bsq, mut bmax, mut bn) = (0.0f64, 0.0f64, 0.0f64, 0u32);
+            for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+                let dr = f64::from(pa[0]) - f64::from(pb[0]);
+                let dg = f64::from(pa[1]) - f64::from(pb[1]);
+                let db = f64::from(pa[2]) - f64::from(pb[2]);
+                psq += (dr * dr + dg * dg + db * db) / 3.0;
+            }
+            for ty in (0..H as usize).step_by(24) {
+                for tx in (0..W as usize).step_by(24) {
+                    if ty + 24 > H as usize || tx + 24 > W as usize {
+                        continue;
+                    }
+                    let (mut dr, mut dg, mut db) = (0.0, 0.0, 0.0);
+                    for dy in 0..24 {
+                        for dx in 0..24 {
+                            let i = ((ty + dy) * W as usize + (tx + dx)) * 4;
+                            dr += f64::from(a[i]) - f64::from(b[i]);
+                            dg += f64::from(a[i + 1]) - f64::from(b[i + 1]);
+                            db += f64::from(a[i + 2]) - f64::from(b[i + 2]);
+                        }
+                    }
+                    let d = (dr * dr + dg * dg + db * db).sqrt() / 576.0;
+                    bsq += d * d;
+                    bmax = bmax.max(d);
+                    bn += 1;
+                }
+            }
+            let pix_rms = (psq / f64::from(W * H)).sqrt();
+            ((bsq / f64::from(bn)).sqrt(), bmax, pix_rms)
+        };
+        let (f1_b, f1_m, f1_p) = diff(&f1.rgba8, &f96.rgba8);
+        let (f36_b, f36_m, f36_p) = diff(&f36.rgba8, &f96.rgba8);
+        let (pan_b, pan_m, pan_p) = diff(&pan.rgba8, &f96.rgba8);
+        let (p36_b, p36_m, p36_p) = diff(&pan36.rgba8, &f96.rgba8);
+        let (ov36_b, ov36_m, ov36_p) = diff(&ov36.rgba8, &ov96.rgba8);
+        let (ovp_b, ovp_m, ovp_p) = diff(&ov_pan.rgba8, &ov96.rgba8);
+        eprintln!(
+            "night_repro path={tag} f1(brms={f1_b:.2},bmax={f1_m:.2},prms={f1_p:.2}) f36(brms={f36_b:.2},bmax={f36_m:.2},prms={f36_p:.2}) pan(brms={pan_b:.2},bmax={pan_m:.2},prms={pan_p:.2}) pan36(brms={p36_b:.2},bmax={p36_m:.2},prms={p36_p:.2}) ov36(brms={ov36_b:.2},bmax={ov36_m:.2},prms={ov36_p:.2}) ov_pan(brms={ovp_b:.2},bmax={ovp_m:.2},prms={ovp_p:.2})"
+        );
+        assert!(
+            f1_b < 8.0,
+            "{tag} night frame 1 must include live emitter GI instead of flashing dark (brms={f1_b:.2})"
+        );
+        assert!(
+            f36_b < 2.0 && f36_m < 10.0,
+            "{tag} night 36-frame settle drifted from 96-frame reference (brms={f36_b:.2}, bmax={f36_m:.2})"
+        );
+        assert!(
+            pan_b < 3.5 && pan_m < 24.0,
+            "{tag} night fast pan smeared shadows/walls (brms={pan_b:.2}, bmax={pan_m:.2})"
+        );
+        assert!(
+            p36_b < 2.0 && p36_m < 12.0,
+            "{tag} night post-pan 36-frame settle did not recover cleanly (brms={p36_b:.2}, bmax={p36_m:.2})"
+        );
+        assert!(
+            ov36_b < 2.0,
+            "{tag} night overview 36-frame settle drifted from reference (brms={ov36_b:.2})"
+        );
+    }
+}

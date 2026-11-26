@@ -96,6 +96,7 @@ fn emitter_readers() -> String {
         "gi_emitter_pick",
         "gi_batch_emission",
         "gi_triangle_emission",
+        "gi_emitter_sh",
     ] {
         out.push_str(&block(SOURCE.find(&format!("fn {name}(")).unwrap()));
     }

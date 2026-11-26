@@ -312,8 +312,10 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     fg_no_value=cell.w==0.0;
     fg_unanswered=fg_no_value;
     fg_changing=cell.w>0.0 && cell.w<0.9;
-    // A ray that meets an emitting draw keeps its cell's reflected light and its emission weighted
-    // against the probe's emitter samples (fg_nee, multiple importance sampling).
+    // A ray that meets an emitting draw keeps its cell's reflected light. When the scene's
+    // emitter list is handled analytically by fg_direct_emitters_lane (n <= FG_DIRECT_EMITTERS),
+    // emission is excluded from hemisphere rays entirely (zero double counting and zero MIS
+    // noise); for huge emitter meshes (n > FG_DIRECT_EMITTERS), combine via MIS with fg_nee.
     let hit=primary_decode(traced.record);
     let emission=gi_triangle_emission(hit.batch,hit.placement,traced.record.y);
     if all(emission<=vec3<f32>(0.0)) {return rl_finite(cell.rgb);}
@@ -321,8 +323,9 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     // cell has no value (thin emitting strips' fine cells are often orphans that never get one);
     // only its reflected light, small on Glint's dark emitter bases, is then missing.
     fg_unanswered=false;
-    let light=fg_light_pdf(fg_luminance(emission),traced.t,abs(dot(unit_normal(rl_cache_geometric),d)));
     let reflected=select(vec3<f32>(0.0),max(cell.rgb-emission,vec3<f32>(0.0)),cell.w>0.0);
+    if fg_direct_emitters() {return rl_finite(reflected);}
+    let light=fg_light_pdf(fg_luminance(emission),traced.t,abs(dot(unit_normal(rl_cache_geometric),d)));
     return rl_finite(reflected+emission*fg_mis(FG_HEMISPHERE_PDF*f32(FG_HEMI),light*f32(FG_NEE)));
 }
 // Probe rays are uniform over the hemisphere: their density in solid angle.
@@ -445,10 +448,11 @@ fn fg_find_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
     }
     return chosen;
 }
-// Co-planar bilinear reprojection of a previous-frame tile probe for `s`. On still cameras where
-// the probe stays on its exact previous world point, returns `fg_load(prev_idx)` with zero blur;
-// during camera motion/pans, smoothly interpolates the 2x2 surrounding co-planar previous tiles
-// so probe histories never snap between discrete tiles or boil across walls.
+// Co-planar edge-preserving bilinear reprojection of a previous-frame tile probe for `s`. On still
+// cameras where the probe stays on its exact previous world point, returns `fg_load(prev_idx)` with
+// zero blur and full history; during camera motion/pans, interpolates the 2x2 co-planar previous
+// tiles with irradiance edge-stopping (never dragging bright wall light across a shadow edge) and
+// decays history proportionally to bilinear resampling blur so shadows never wash out during pans.
 fn fg_load_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32,prev_idx:u32)->FgProbe {
     var empty:FgProbe;
     if prev_idx==0xffffffffu {return empty;}
@@ -465,6 +469,7 @@ fn fg_load_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32,prev_idx:u32)->FgP
     let bank=fg_read_bank();
     let view_to=lighting.eye-s.world;
     let view_cos=max(abs(dot(view_to,s.normal))*inverseSqrt(max(dot(view_to,view_to),1e-12)),0.25);
+    let e_anchor=fg_probe_dc_luma(prev_idx,size);
     fg_clear();
     var w_sum=0.0;
     var hist_sum=0.0;
@@ -482,7 +487,10 @@ fn fg_load_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32,prev_idx:u32)->FgP
             let tangent_scale=scale/view_cos;
             let d3=length(s.prev_world-p.point.xyz)/max(tangent_scale,1e-6);
             if d3>1.5 {continue;}
-            let w=bil*fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*4.0);
+            let e_p=fg_probe_dc_luma(idx,size);
+            let rel=abs(e_p-e_anchor)/max(max(e_p,e_anchor),1e-4);
+            let lum_w=exp(-rel*rel*1.5);
+            let w=bil*fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*4.0)*lum_w;
             if w<=1e-5 {continue;}
             fg_add(idx,size,w);
             w_sum+=w;
@@ -493,9 +501,11 @@ fn fg_load_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32,prev_idx:u32)->FgP
     var out:FgProbe;
     let inv=1.0/w_sum;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=fg_sum[v]*inv;}
-    // Cap bilinearly interpolated moving history at 24 frames to prevent recursive diffusion while
-    // retaining smooth temporal stability across rapid pans.
-    out.point=vec4<f32>(s.prev_world,min(hist_sum*inv,24.0));
+    // Decay moving bilinear history by resampling blur (4..8 frames) so rapid pans neither smear
+    // real shadows recursively nor lock stale pan blur after the camera stops.
+    let blur=fr.x*(1.0-fr.x)+fr.y*(1.0-fr.y);
+    let move_cap=mix(8.0,4.0,clamp(blur*2.0,0.0,1.0));
+    out.point=vec4<f32>(s.prev_world,min(hist_sum*inv,move_cap));
     out.normal=vec4<f32>(s.normal,footprint);
     return out;
 }
@@ -560,6 +570,66 @@ fn fg_request(cell:vec4<u32>) {
     atomicStore(&fg_requests[at+2u],cell.z);
     atomicStore(&fg_requests[at+3u],cell.w);
 }
+// Analytical polygon solid-angle emitter evaluation for scenes with up to FG_DIRECT_EMITTERS
+// listed emitter triangles (light panels, room fixtures, lamps): exact horizon-clipped SH
+// (`gi_emitter_sh`) with Bayer+R2 stratified visibility rays across all FG_RAYS lanes, giving
+// zero unshadowed variance on frame 1 and crisp, blotch-free emitter shadows. Huge emitter
+// meshes (n > FG_DIRECT_EMITTERS) fall back to stratified MIS NEE (`fg_nee`).
+const FG_DIRECT_EMITTERS:u32=64u;
+fn fg_direct_emitters()->bool {
+    let n=gi_word(GI_H_EMITTER_COUNT);
+    return n>0u && n<=FG_DIRECT_EMITTERS;
+}
+fn fg_direct_emitters_lane(lane:u32,ray:u32,s:FgSurface,tile_xy:vec2<u32>) {
+    let n=gi_word(GI_H_EMITTER_COUNT);
+    let spp=clamp(FG_RAYS/max(n,1u),1u,4u);
+    let total=n*spp;
+    let base=gi_word(GI_H_EMITTERS);
+    let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
+    let bx=f32(fg_bayer4(tile_xy+vec2<u32>(1u,3u)))*(1.0/16.0);
+    let by=f32(fg_bayer4(tile_xy+vec2<u32>(3u,2u)))*(1.0/16.0);
+    let t=f32(fg_frame()&1023u);
+    let base_seq=fract(vec2<f32>(bx,by)+vec2<f32>(0.754877666,0.569840296)*t);
+    let inv_spp=1.0/f32(spp);
+    for(var idx=ray;idx<total;idx+=FG_RAYS) {
+        let e=idx/spp;
+        let sub=idx%spp;
+        let r=base+e*GI_EMITTER_WORDS;
+        let a=gi_emitter_vec(r);
+        let e1=gi_emitter_vec(r+3u);
+        let e2=gi_emitter_vec(r+6u);
+        let radiance=gi_emitter_vec(r+9u);
+        if all(radiance<=vec3<f32>(0.0)) {continue;}
+        let sh=gi_emitter_sh(s.world,s.normal,a,a+e1,a+e2);
+        if sh.x<=2.8e-7 {continue;}
+        let seq=fract(base_seq+vec2<f32>(0.754877666,0.569840296)*f32(sub*17u+e*7u));
+        var uv=seq;
+        if uv.x+uv.y>1.0 {uv=vec2<f32>(1.0)-uv;}
+        var x=a+e1*uv.x+e2*uv.y;
+        if dot(x-s.world,s.normal)<=1e-5 {
+            x=a+(e1+e2)*(1.0/3.0);
+            if dot(x-s.world,s.normal)<=1e-5 {
+                let h0=dot(a-s.world,s.normal);
+                let h1=dot(a+e1-s.world,s.normal);
+                let h2=dot(a+e2-s.world,s.normal);
+                x=select(select(a+e2,a+e1,h1>=h2),a,h0>=h1 && h0>=h2);
+            }
+        }
+        let to=x-origin;
+        let dist=length(to);
+        if dist<=1e-6 {continue;}
+        atomicAdd(&fg_rays[1],1u);
+        if rl_blocked(origin,to/dist,s.epsilon,dist*0.999) {continue;}
+        let c0=radiance*(sh.x*inv_spp);
+        let c1=radiance*(sh.y*inv_spp);
+        let c2=radiance*(sh.z*inv_spp);
+        let c3=radiance*(sh.w*inv_spp);
+        fg_nee_sh[lane][0u]+=c0.x;fg_nee_sh[lane][1u]+=c0.y;fg_nee_sh[lane][2u]+=c0.z;
+        fg_nee_sh[lane][3u]+=c1.x;fg_nee_sh[lane][4u]+=c1.y;fg_nee_sh[lane][5u]+=c1.z;
+        fg_nee_sh[lane][6u]+=c2.x;fg_nee_sh[lane][7u]+=c2.y;fg_nee_sh[lane][8u]+=c2.z;
+        fg_nee_sh[lane][9u]+=c3.x;fg_nee_sh[lane][10u]+=c3.y;fg_nee_sh[lane][11u]+=c3.z;
+    }
+}
 // Traces lane `ray` of a probe at s and stores its SH terms in fg_lane_sh[lane]: a miss's as the
 // sky's L2, a hit's as the bounce's L1 (zero when the probe has no surface).
 fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32,tile_xy:vec2<u32>) {
@@ -569,12 +639,15 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32,tile_xy:vec2<u32>)
     var answered=false;
     for(var i=0u;i<40u;i+=1u) {fg_lane_sh[lane][i]=0.0;}
     for(var i=0u;i<12u;i+=1u) {fg_nee_sh[lane][i]=0.0;}
+    let direct=fg_direct_emitters();
+    let hemi_count=select(FG_HEMI,FG_RAYS,direct);
     if s.placement!=0u {
-        if ray<FG_NEE {
-            // An emitter sample takes this lane's one ray (fg_nee), rotated across frames.
-            fg_nee(lane,ray,s,fg_hash(r^(fg_frame()*0x27d4eb2fu)));
+        if !direct && ray<FG_NEE {
+            // Large emitter meshes: stratified emitter sample takes this lane's one ray (fg_nee).
+            fg_nee(lane,ray,s,fg_hash(r^(fg_frame()*0x27d4eb2fu)),tile_xy);
         } else {
-            d=fg_direction(s.normal,ray-FG_NEE,FG_HEMI,tile_xy);
+            let hemi_ray=select(ray-FG_NEE,ray,direct);
+            d=fg_direction(s.normal,hemi_ray,hemi_count,tile_xy);
             radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
             atomicAdd(&fg_rays[0],1u);
             if fg_hit && fg_no_value && rl_cache_missed.x!=0xffffffffu && atomicAdd(&fg_asked[lane/FG_RAYS],1u)<4u {fg_request(rl_cache_missed);}
@@ -585,8 +658,11 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32,tile_xy:vec2<u32>)
             if fg_hit && (fg_unanswered || fg_changing) {atomicAdd(&fg_wg_cold[lane/FG_RAYS],1u);}
             // A hit no cache level answers yet is left out of the bounce average (fg_accumulate
             // renormalizes answered bounce over geometry hits alone) while sky rays always keep
-            // their exact 2*pi/FG_HEMI solid-angle share so missing cache cells never over-brighten sky light.
+            // their exact 2*pi/hemi_count solid-angle share so missing cache cells never over-brighten sky light.
             answered=!(fg_hit && fg_unanswered);
+        }
+        if direct {
+            fg_direct_emitters_lane(lane,ray,s,tile_xy);
         }
     }
     if !answered {return;}
@@ -603,28 +679,20 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32,tile_xy:vec2<u32>)
 }
 // Emitters as lights (next-event estimation from the lighting cache's emitter list,
 // gi_emitters.wgsl, the list the cache's own gathers sample), combined with the probe's own rays
-// by multiple importance sampling: lanes 0 .. FG_NEE of a probe each pick one emitter triangle in
-// proportion to its power (gi_emitter_pick, the list's power CDF) and a point of it, and where
-// one ray to it is unblocked add its radiance in that direction weighted by the power heuristic
-// against the probe's FG_HEMI hemisphere rays; a hemisphere ray that meets an emitter takes the
-// complementary weight (fg_radiance). Small bright emitters (lamps, Glint's orange rims) then
-// come mostly from the samples, and large dim ones (Glint's glowing white surfaces, nearly all
-// the list's power) mostly from the rays: picked by power alone, a probe's nearby white floor was
-// almost never sampled, and its rare picks' large weights did not survive TR1. Divided by
-// fg_accumulate's per-ray scale, so the sums come out exact. The samples take FG_NEE of a probe's
-// FG_RAYS lanes, each tracing its one ray alongside the FG_HEMI hemisphere rays: traced after
-// them on the same lanes, they doubled the warp's traversal rounds (fg_trace +0.53 ms without
-// ray hardware on Glint).
+// by multiple importance sampling when the scene has more than FG_DIRECT_EMITTERS triangles.
+// Stores absolute L1 SH directly in fg_nee_sh (matching fg_direct_emitters_lane).
 const FG_NEE:u32=2u;
 const FG_HEMI:u32=FG_RAYS-FG_NEE;
-fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
-    let h=fg_hash(r^((ray+1u)*0x9e3779b9u));
-    let pick=gi_emitter_pick(f32(h>>8u)*(1.0/16777216.0));
+fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32,tile_xy:vec2<u32>) {
+    let bx=f32(fg_bayer4(tile_xy))*(1.0/16.0);
+    let t=f32(fg_frame()&1023u);
+    let u_pick=fract((f32(ray)+fract(bx+0.754877666*t))/f32(FG_NEE));
+    let pick=gi_emitter_pick(u_pick);
     if pick.probability<=0.0 {return;}
     let w=gi_word(GI_H_EMITTERS)+pick.index*GI_EMITTER_WORDS;
     let e1=gi_emitter_vec(w+3u);
     let e2=gi_emitter_vec(w+6u);
-    let g=fg_hash(h);
+    let g=fg_hash(r^((ray+1u)*0x9e3779b9u));
     var uv=vec2<f32>(f32(g&0xffffu),f32(g>>16u))*(1.0/65536.0);
     if uv.x+uv.y>1.0 {uv=vec2<f32>(1.0)-uv;}
     let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
@@ -641,7 +709,7 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
     atomicAdd(&fg_rays[1],1u);
     if rl_blocked(origin,d,s.epsilon,dist*0.999) {return;}
     let weight=fg_mis(density*f32(FG_NEE),FG_HEMISPHERE_PDF*f32(FG_HEMI));
-    let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_HEMI)/(density*f32(FG_NEE)));
+    let light=gi_emitter_vec(w+9u)*(weight/(density*f32(FG_NEE)));
     gi_sh_basis(d);
     for(var k=0u;k<4u;k+=1u) {
         fg_nee_sh[lane][k*3u]+=light.x*gi_y[k];
@@ -654,9 +722,10 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
 // rows of 52 alone, its probe's other lanes idle, cost 0.45 ms on Glint without ray hardware.
 fn fg_reduce(lane:u32) {
     let first=(lane/FG_RAYS)*FG_RAYS;
+    let nee_lanes=select(FG_NEE,FG_RAYS,fg_direct_emitters());
     // Exposure-invariant lone-ray firefly clamp evaluated over bounce SH independently of bright
-    // daylight sky: suppresses single-ray spikes on tiny bright sunlit/emissive patches without
-    // biasing uniform furnaces or multi-ray nearby bounce sources.
+    // daylight sky: suppresses extreme single-ray spikes (>6x rest) without biasing uniform
+    // furnaces or legitimate multi-bounce pools near night lamps.
     var total_luma=0.0;
     var max_luma=0.0;
     var max_lane=0u;
@@ -667,7 +736,7 @@ fn fg_reduce(lane:u32) {
         if y>max_luma {max_luma=y;max_lane=l;}
     }
     let rest_sum=max(total_luma-max_luma,0.0);
-    let cap_scale=select(1.0,min(1.0,(3.5*rest_sum)/max(max_luma,1e-30)),max_luma>3.5*rest_sum && rest_sum>1e-6);
+    let cap_scale=select(1.0,min(1.0,(6.0*rest_sum)/max(max_luma,1e-30)),max_luma>6.0*rest_sum && rest_sum>1e-6);
     workgroupBarrier();
     for(var i=lane%FG_RAYS;i<52u;i+=FG_RAYS) {
         var sum=0.0;
@@ -678,7 +747,7 @@ fn fg_reduce(lane:u32) {
             }
             fg_lane_sh[first][i]=sum;
         } else {
-            for(var l=0u;l<FG_NEE;l+=1u) {sum+=fg_nee_sh[first+l][i-40u];}
+            for(var l=0u;l<nee_lanes;l+=1u) {sum+=fg_nee_sh[first+l][i-40u];}
             fg_nee_sh[first][i-40u]=sum;
         }
     }
@@ -751,9 +820,12 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
         else {old=fg_load(prev_index,size);}
     }
     let answered=sh[FG_ANSWERED];
+    let has_nee=(nee[0]+nee[1]+nee[2])>1e-6;
     // Zero-answer guard: when every hemisphere ray hit an unshaded cache cell (e.g. frame 0 in a
-    // tight corner), preserve valid on-plane history or invalidate rather than storing pitch-black.
-    if answered<=0.0 {
+    // tight corner) and no direct emitter light arrived, preserve valid on-plane history or
+    // invalidate rather than storing pitch-black. When direct emitters already arrived (e.g. night
+    // light panels on frame 1), keep their exact irradiance immediately so frame 1 is never black.
+    if answered<=0.0 && !has_nee {
         if has_old && old.point.w>0.0 {
             var kept=old;
             kept.point=vec4<f32>(s.world,old.point.w);
@@ -764,29 +836,33 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
         }
         return;
     }
-    // Uniform hemisphere: pdf 1/(2 pi). Sky rays ALWAYS carry their exact 2*pi / FG_HEMI share so
-    // unanswered geometry hits never over-amplify sky light. Unanswered bounce hits borrow their
+    // Uniform hemisphere: pdf 1/(2 pi). Sky rays ALWAYS carry their exact 2*pi / hemi_count share
+    // so unanswered geometry hits never over-amplify sky light. Unanswered bounce hits borrow their
     // exact missing geometry fraction from on-plane history when available; on brand-new probes,
     // cap renormalization tightly (1.25x) so cached bright sunlit surfaces never get amplified
     // to stand in for uncached dark shadows, and downweight incomplete probes in fg_filter.
-    let hemi_scale=6.283185307179586/f32(FG_HEMI);
-    let missing_frac=clamp((f32(FG_HEMI)-answered)/f32(FG_HEMI),0.0,1.0);
+    let direct=fg_direct_emitters();
+    let hemi_count=select(FG_HEMI,FG_RAYS,direct);
+    let hemi_scale=6.283185307179586/f32(hemi_count);
+    let missing_frac=clamp((f32(hemi_count)-answered)/f32(hemi_count),0.0,1.0);
     let geom_hits=atomicLoad(&fg_wg_geom[probe_slot]);
     let geom_ans=atomicLoad(&fg_wg_geom_ans[probe_slot]);
     let geom_missing_frac=select(0.0,clamp(f32(geom_hits-geom_ans)/f32(geom_hits),0.0,1.0),geom_hits>0u);
-    let cold_frac=clamp(f32(atomicLoad(&fg_wg_cold[probe_slot]))/f32(FG_HEMI),0.0,1.0);
+    let cold_frac=clamp(f32(atomicLoad(&fg_wg_cold[probe_slot]))/f32(hemi_count),0.0,1.0);
     sh[FG_ANSWERED]=0.0;
     for(var i=0u;i<FG_BOUNCE;i+=1u) {sh[i]*=hemi_scale;}
     if has_old && old.point.w>0.0 && geom_missing_frac>0.0 {
         for(var i=0u;i<12u;i+=1u) {
             let b=FG_BOUNCE+i;
-            sh[b]=sh[b]*hemi_scale+old.sh[b/4u][b%4u]*geom_missing_frac+nee[i]*hemi_scale;
+            let rem=old.sh[b/4u][b%4u]-nee[i];
+            let borrow=select(rem,max(rem,0.0),i<3u);
+            sh[b]=sh[b]*hemi_scale+borrow*geom_missing_frac+nee[i];
         }
     } else if geom_hits>0u && geom_ans>0u {
         let bounce_scale=hemi_scale*min(f32(geom_hits)/f32(geom_ans),1.25);
-        for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*bounce_scale+nee[i]*hemi_scale;}
+        for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*bounce_scale+nee[i];}
     } else {
-        for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*hemi_scale+nee[i]*hemi_scale;}
+        for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*hemi_scale+nee[i];}
     }
     let max_hist=select(FG_HISTORY,16.0,s.moved);
     var count=max(1.0-geom_missing_frac,0.25);
@@ -874,7 +950,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     let old_w=prev_plane.point.w;
     let probe_shifted=prev_idx!=0xffffffffu && length(s.prev_world-prev_plane.point.xyz)>0.05*max(footprint,1e-6);
     let at=fg_state_at(tile_slot);
-    let stable=fg_state[0]==0u && !probe_shifted && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
+    let stable=fg_state[0]==0u && !probe_shifted && old_w>=28.0 && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
     let turn=select((group.x+group.y+frame)&1u,(group.x+2u*group.y+frame)%FG_STABLE_RATE,stable);
     let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
@@ -945,14 +1021,16 @@ const FG_FILTER_SHORT:f32=24.0;
         let index=fg_tile_at(tile_slot,size,bank);
         let c=fg_plane(index,size);
         if c.point.w<=0.0 {fg_invalidate(fg_filtered(tile_slot,size),size);continue;}
-        // Continuous Gaussian width from 2.0 (brand-new 7x7 Bayer-covering probe) down to 1.25
-        // (converged 5x5 co-planar floor on both RT and non-RT), smoothing both still-wall bounce
-        // noise and freshly disoccluded walls without smearing vertical gradients on distant walls
-        // or popping at count=24.
-        let age_t=clamp((c.point.w-1.0)/23.0,0.0,1.0);
-        let sigma=mix(2.0,1.25,age_t);
-        let reach=select(3,2,c.point.w>12.0);
-        let e_c=select(0.0,fg_probe_dc_luma(index,size),c.point.w>8.0);
+        // Nyquist-matched, rotationally isotropic 5x5 co-planar Gaussian reconstruction on the
+        // 16x16 probe lattice. Geometric discontinuities are stopped by fg_on_plane; omitting a
+        // luminance bilateral cliff on the coarse 16x16 grid prevents diagonal indirect shadows
+        // (e.g. night emissive panels behind pillars) from aliasing into 16x16 staircase teeth,
+        // while keeping filter width nearly constant across moving and settled probes so shadows
+        // never pop or morph when panning stops. Capping neighbour history dominance keeps fresh
+        // disoccluded probes from being drowned by mature neighbours.
+        let age_t=clamp((c.point.w-1.0)/15.0,0.0,1.0);
+        let sigma=mix(select(1.35,1.45,FG_HALF_RATE),select(1.15,1.25,FG_HALF_RATE),age_t);
+        let reach=2;
         fg_clear();
         fg_add(index,size,c.point.w);
         var total=c.point.w;
@@ -966,16 +1044,8 @@ const FG_FILTER_SHORT:f32=24.0;
                     let p=fg_plane(at,size);
                     let geo=fg_on_plane(p,c.point.xyz,c.normal.xyz);
                     if geo<=1e-4 {continue;}
-                    let lum_t=smoothstep(8.0,24.0,min(c.point.w,p.point.w));
-                    var lum_w=1.0;
-                    var hist_w=p.point.w;
-                    if lum_t>0.0 {
-                        let e_p=fg_probe_dc_luma(at,size);
-                        let rel=abs(e_p-e_c)/max(max(e_p,e_c),1e-4);
-                        lum_w=mix(1.0,exp(-rel*rel*1.25),lum_t);
-                        hist_w=mix(p.point.w,min(p.point.w,c.point.w),lum_t);
-                    }
-                    let w=geo*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*hist_w*lum_w;
+                    let hist_w=min(p.point.w,max(c.point.w*2.5,4.0));
+                    let w=geo*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*hist_w;
                     if w<=1e-4 {continue;}
                     fg_add(at,size,w);
                     total+=w;
@@ -1108,11 +1178,14 @@ var<workgroup> fg_pair:array<u32,2>;
     }
     let footprint=select(0.0,fg_footprint(pixel,size,s.world),s.placement!=0u);
     let prev_idx=select(0xffffffffu,fg_find_prev_adapt(s,size,footprint),s.placement!=0u);
-    // Half rate (and quarter/eighth rate once stable, matching fg_trace): align turn parity to
-    // the 2-block workgroup (group.x) so both blocks sharing one warp skip together cleanly.
-    let old_w=select(0.0,fg_plane(prev_idx,size).point.w,prev_idx!=0xffffffffu);
+    // Half rate (and eighth rate once truly converged and still, matching fg_trace): align turn
+    // parity to the 2-block workgroup (group.x) so both blocks sharing one warp skip together.
+    var prev_plane:FgPlane;
+    if prev_idx!=0xffffffffu {prev_plane=fg_plane(prev_idx,size);}
+    let old_w=prev_plane.point.w;
+    let probe_shifted=prev_idx!=0xffffffffu && length(s.prev_world-prev_plane.point.xyz)>0.05*max(footprint,1e-6);
     let at=fg_state_at(state_idx);
-    let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE;
+    let stable=fg_state[0]==0u && !probe_shifted && old_w>=28.0 && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE;
     let turn=select((group.x+block.y+frame)&1u,(group.x+2u*block.y+frame)%FG_STABLE_RATE,stable);
     let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
