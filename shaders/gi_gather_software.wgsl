@@ -95,14 +95,15 @@ var<workgroup> gi_drain_base:u32;
             var changing=0u;
             var rays=0u;
             let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
+            let stride_phase=c.key.x&(stride-1u);
             // The fixed directions' hits read cells sized to the ray's cone (gi_hit_radiance).
             gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
             // Fixed-direction rays that hit (outside lights' near regions), and those whose hit
             // had a value: the average leaves out the rest (gi_wg_hits, gi_wg_valued).
             var hits=0u;
             var valued=0u;
-            for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
-                if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
+            for(var k=lane*stride+stride_phase;k<GI_DIRECTIONS;k+=GI_GATHER_LANES*stride) {
+                if (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
                 let h=gi_closest(origin,d,0.0,1e20);
                 let through=gi_hit_transmission;

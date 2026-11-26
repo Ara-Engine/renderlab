@@ -1367,6 +1367,11 @@ pub(crate) struct PlanInputs<'a> {
     /// The world box of each placement drawn with a material edited in place since this
     /// view's last frame (`MaterialEdits`): its surfaces restart, its neighbours are boxed.
     pub(crate) edited_bounds: Vec<crate::shadow_plan::Bounds>,
+    /// True when an emitting placement moved or a moving shadow caster intersected a shadowed
+    /// local light's sphere: applies a padded same-surface soft-box clamp globally so static
+    /// floors/walls clear moving emitter glow and local-light shadows immediately without boiling
+    /// unrelated geometric or textured edges.
+    pub(crate) soft_global_box: bool,
 }
 
 /// A frame's plan: the `Tr1Frame` record, and the primary frame record's sampling words
@@ -1643,11 +1648,12 @@ impl Planner {
             _ => (matrix, eye, 1.0, jitter),
         };
         self.parity = 1 - self.parity;
+        let soft_global = !self.reset && i.soft_global_box && settings.motion_box;
         // MV1 keeps the shared motion source; MQ1/MQ2 clamp rigid or skinned motion.
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
             | u32::from(
-                (moved || relit || edited || (posed && !self.reset)) && settings.motion_box,
+                (moved || relit || edited || soft_global || (posed && !self.reset)) && settings.motion_box,
             ) << 3
             | u32::from(settings.upscale_interpolation) << 4;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
@@ -1848,7 +1854,12 @@ impl Planner {
         let global_box = relit
             || (moved && i.moving_boxes.is_empty())
             || (posed && !self.reset && changed_skin_boxes.is_empty());
-        for w in [mover_boxes.len() as u32, u32::from(global_box), 0u32, 0u32] {
+        for w in [
+            mover_boxes.len() as u32,
+            u32::from(global_box),
+            u32::from(soft_global),
+            0u32,
+        ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
         let mover_light = one_sun.map_or([0.0f32; 4], |l| {
@@ -2520,6 +2531,8 @@ impl Renderer {
         let mut rigid_only = true;
         let mut moving_bounds = None;
         let mut moving_boxes = vec![];
+        let mut emitter_moved = false;
+        let mut local_caster_boxes = vec![];
         for d in draws {
             // Nothing edited since this view's last frame and no skin: no placement moved, and
             // the scene box is the union of the collection's cached world boxes.
@@ -2535,10 +2548,14 @@ impl Renderer {
                 }
                 continue;
             }
+            let program = d.material.map_or(self.standard.id(), |m| m.program.id());
+            let emits = self.program_slot(program).traits.emits;
             let previous = d.instances.state.previous_models(self.view_key.0, self.view.last_frame);
             let mut any_moved = false;
             rigid_only &= !edited || previous.len() == d.instances.state.models.len();
-            for (&model, &previous_model) in d.instances.state.models.iter().zip(previous) {
+            for (slot, (&model, &previous_model)) in
+                d.instances.state.models.iter().zip(previous).enumerate()
+            {
                 let moved = model
                     .to_cols_array()
                     .iter()
@@ -2546,6 +2563,9 @@ impl Renderer {
                     .any(|(&a, b)| (a - b).abs() > 1e-5);
                 rigid_motion |= moved;
                 any_moved |= moved;
+                if moved && emits {
+                    emitter_moved = true;
+                }
                 // U-RTVIS: no held stop in a moving or skinned placement's swept shadow.
                 if moved || d.mesh.skin.is_some() {
                     let mut own = None;
@@ -2555,7 +2575,12 @@ impl Renderer {
                             own = Some(union(own, b));
                         }
                     }
-                    moving_boxes.extend(own);
+                    if let Some(b) = own {
+                        moving_boxes.push(b);
+                        if moved && state.casts_shadows(slot) {
+                            local_caster_boxes.push(b);
+                        }
+                    }
                 }
                 if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, model) {
                     scene_bounds = Some(union(scene_bounds, b));
@@ -2655,6 +2680,35 @@ impl Renderer {
                 ],
             );
         }
+        let local_shadow_moved = !local_caster_boxes.is_empty()
+            && self.lighting.source_lights.iter().any(|l| {
+                let (pos, range, casts) = match *l {
+                    Light::Point {
+                        position,
+                        range,
+                        cast_shadows,
+                        ..
+                    }
+                    | Light::Spot {
+                        position,
+                        range,
+                        cast_shadows,
+                        ..
+                    } => (position, range, cast_shadows),
+                    Light::Directional { .. } => return false,
+                };
+                if casts == Some(false) {
+                    return false;
+                }
+                local_caster_boxes.iter().any(|b| match range {
+                    Some(r) => {
+                        let c = pos.clamp(b.min, b.max);
+                        c.distance_squared(pos) <= r * r
+                    }
+                    None => true,
+                })
+            });
+        let soft_global_box = emitter_moved || local_shadow_moved || self.gi.emitter_relighting();
         let planned = self
             .view
             .reconstruction_state
@@ -2687,6 +2741,7 @@ impl Renderer {
                 moving_boxes,
                 listing,
                 edited_bounds,
+                soft_global_box,
             });
         // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
         let primary_frame = &primary.frame.as_ref().unwrap().0.value;
@@ -2875,6 +2930,7 @@ mod tests {
             moving_boxes: vec![],
             listing: false,
             edited_bounds: vec![],
+            soft_global_box: false,
         }
     }
     /// The courtyard's fire at `scale` of its peak.

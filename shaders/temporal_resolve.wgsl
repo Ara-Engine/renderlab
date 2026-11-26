@@ -52,7 +52,9 @@ struct Tr1Frame {
     zones:Tr1Zones,
     // x: Reconstruction::sharp_blur_budget.
     resample:vec4<f32>,
-    // Scoped TR1_BOX rigid mover zones: x box count (0..=16), y 1 for global clamp (relit/posed/fallback).
+    // Scoped TR1_BOX rigid mover zones: x box count (0..=16), y 1 for global hard clamp
+    // (relit/posed/fallback), z 1 for global soft-box clamp (moving emitters or casters inside
+    // shadowed local lights: clears stale floor/wall trails without boiling static edges).
     mover_meta:vec4<u32>,
     // xyz unit direction toward shadowed sun (safe nonzero components), w widened disk tangent (0: none).
     mover_light:vec4<f32>,
@@ -103,6 +105,29 @@ fn tr1_moving(slot:u32)->bool {
 const TR1_ID:u32=0x7fffffu;
 const TR1_NONE:u32=0xffffffffu;
 const TR1_FIRST_OCCLUDES:u32=0x1000000u;
+// 6-bit octahedral viewed normal packed in bits 25..30 of anchor.x and layer.x (zero extra
+// memory/bandwidth): stops 90-degree crease bleeding (e.g. a bright vertical box/platform face
+// leaking into its newly revealed grazing top face during jumps or walks on the same placement id).
+const TR1_NORMAL_MASK:u32=0x7e000000u;
+fn tr1_pack_normal6(n:vec3<f32>)->u32 {
+    let s=abs(n.x)+abs(n.y)+abs(n.z);
+    if s<=1e-12 {return 0u;}
+    var p=n.xy/s;
+    if n.z<0.0 { p=(vec2<f32>(1.0)-abs(p.yx))*select(vec2<f32>(-1.0),vec2<f32>(1.0),p>=vec2<f32>(0.0)); }
+    let q=vec2<u32>(clamp(round((p*0.5+vec2<f32>(0.5))*7.0),vec2<f32>(0.0),vec2<f32>(7.0)));
+    return (q.x|(q.y<<3u))<<25u;
+}
+fn tr1_unpack_normal6(word:u32)->vec3<f32> {
+    let code=(word>>25u)&63u;
+    let p=vec2<f32>(f32(code&7u),f32(code>>3u))*(2.0/7.0)-vec2<f32>(1.0);
+    var n=vec3<f32>(p.x,p.y,1.0-abs(p.x)-abs(p.y));
+    if n.z<0.0 {
+        let t=max(-n.z,0.0);
+        n.x+=select(t,-t,n.x>=0.0);
+        n.y+=select(t,-t,n.y>=0.0);
+    }
+    return n*inverseSqrt(max(tr1_dot(n,n),1e-12));
+}
 // Lean resolve (`RENDERLAB_TR1_LEAN=0` sets both false; src/temporal_reconstruction.rs). Both
 // leave every output bit unchanged.
 // Anchor bit 31 marks a pixel that holds a second slot (a silhouette): elsewhere the layer
@@ -244,6 +269,10 @@ fn tr1_box_applies(s:Tr1Surface)->bool {
     if (tr1.flags.y&TR1_BOX)==0u {return false;}
     if tr1.mover_meta.y!=0u || s.moved || tr1_near_skin {return true;}
     if s.id==0u {return false;}
+    if tr1.mover_meta.z!=0u {
+        tr1_soft_box=true;
+        tr1_mover_window=min(tr1_mover_window,near_w);
+    }
     var sun_hit=false;
     var min_t=1.0;
     for(var k=0u;k<tr1.mover_meta.x;k+=1u) {
@@ -377,7 +406,7 @@ fn tr1_anchor_point(t:vec2<i32>,distance:f32,size:vec2<f32>)->vec3<f32> {
 }
 
 // The second slot of a previous-frame tap.
-struct Tr1Second { id:u32, side:u32, colour:vec3<f32>, weight:f32, coverage:f32, coverage_weight:f32, first_occludes:bool };
+struct Tr1Second { id:u32, side:u32, normal_bits:u32, colour:vec3<f32>, weight:f32, coverage:f32, coverage_weight:f32, first_occludes:bool };
 // `anchor` is the tap's anchor word x (TR1_HAS_SECOND says whether its layer was stored).
 fn tr1_second(t:vec2<i32>,anchor:u32)->Tr1Second {
     var s:Tr1Second;
@@ -386,18 +415,18 @@ fn tr1_second(t:vec2<i32>,anchor:u32)->Tr1Second {
     let l=textureLoad(tr1_layer_in,t,0);
     if l.x==TR1_NONE {return s;}
     let rg=unpack2x16float(l.y);let bw=unpack2x16float(l.z);let cw=unpack2x16float(l.w);
-    return Tr1Second(l.x&TR1_ID,(l.x>>23u)&1u,vec3<f32>(rg,bw.x),bw.y,cw.x,cw.y,(l.x&TR1_FIRST_OCCLUDES)!=0u);
+    return Tr1Second(l.x&TR1_ID,(l.x>>23u)&1u,l.x&TR1_NORMAL_MASK,vec3<f32>(rg,bw.x),bw.y,cw.x,cw.y,(l.x&TR1_FIRST_OCCLUDES)!=0u);
 }
 
 // The history surface `s` left at previous-frame tap `t`, if any: (mean, weight), weight
-// zero when none. The first slot shows the surface when its placement and viewed side match
-// and, moving, its sample point (rebuilt from its own ray) lies within four pixel footprints
-// of the current point's tangent plane: a fold or ridge of the same mesh in front of or
-// behind the surface fails at any viewing angle. The second slot (a silhouette's other
-// surface) shows it by placement and side. Still frames read the pixel's own slots.
+// zero when none. The first slot shows the surface when its placement, viewed side, packed
+// normal, and tangent plane match; the second slot matches placement, side, and packed normal
+// (preventing bright front-face silhouette slots from leaking across 90-degree edges onto newly
+// revealed grazing faces of the same mesh). Still frames read the pixel's own slots.
 fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
     if !tr1_inside(t,size) {return vec4<f32>(0.0);}
     let thin=s.id!=0u && (primary_placements[s.id-1u]&0x20000000u)!=0u;
+    let cur_n=select(s.previous_normal,-s.previous_normal,s.side==0u);
     let a=textureLoad(tr1_anchor_in,t,0).xy;
     // Loaded with the anchor, not after its tests, so the two loads overlap.
     let colour=textureLoad(tr1_colour_in,t,0);
@@ -405,13 +434,17 @@ fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
         var ok=s.id==0u || tr1_still(s);
         if !ok {
             let point=tr1_anchor_point(t,bitcast<f32>(a.y),vec2<f32>(size));
-            ok=abs(tr1_dot(s.previous_normal,point-s.previous_point.xyz))<=4.0*tr1.previous_eye.w*expected;
+            let plane_ok=abs(tr1_dot(s.previous_normal,point-s.previous_point.xyz))<=4.0*tr1.previous_eye.w*expected;
+            let normal_ok=tr1_dot(tr1_unpack_normal6(a.x),cur_n)>=0.55;
+            ok=plane_ok && normal_ok;
         }
         if ok {return colour;}
     }
     let second=tr1_second(t,a.x);
     if second.id==s.id && !(thin && second.side!=s.side) && second.weight>0.0 {
-        return vec4<f32>(second.colour,second.weight);
+        if s.id==0u || tr1_still(s) || tr1_dot(tr1_unpack_normal6(second.normal_bits),cur_n)>=0.55 {
+            return vec4<f32>(second.colour,second.weight);
+        }
     }
     return vec4<f32>(0.0);
 }
@@ -763,7 +796,8 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
 }
 
 fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
-    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
+    let nbits=select(0u,tr1_pack_normal6(select(s.normal,-s.normal,s.side==0u)),s.id!=0u);
+    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u)|nbits,bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,film);
     if !TR1_LAYER_BIT {textureStore(tr1_layer_out,p,vec4<u32>(TR1_NONE,0u,0u,0u));}
     textureStore(tr1_output,p,vec4<f32>(film.xyz,1.0));
@@ -848,6 +882,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
                     // Last frame's sample showed the other surface: the first slot is the other.
                     kept.id=first;
                     kept.side=(a.x>>23u)&1u;
+                    kept.normal_bits=a.x&TR1_NORMAL_MASK;
                 }
                 other=-1;
             } else {
@@ -923,10 +958,12 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // Whole coverage shows one layer exactly: mix's arithmetic is not exact at its ends when
     // the layers differ by orders of magnitude (a bright sky behind rock).
     let film=select(select(mix(back,front,coverage),back,coverage<=0.0),front,coverage>=1.0);
-    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u)|select(0u,TR1_HAS_SECOND,TR1_LAYER_BIT),bitcast<u32>(s.distance),0u,0u));
+    let s_nbits=select(0u,tr1_pack_normal6(select(s.normal,-s.normal,s.side==0u)),s.id!=0u);
+    let u_nbits=select(kept.normal_bits,select(0u,tr1_pack_normal6(select(u.normal,-u.normal,u.side==0u)),u.id!=0u),other>=0);
+    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u)|s_nbits|select(0u,TR1_HAS_SECOND,TR1_LAYER_BIT),bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,mine);
     let first_coverage=select(1.0-coverage,coverage,occluder_is_s);
-    textureStore(tr1_layer_out,p,vec4<u32>((u.id&TR1_ID)|((u.side&1u)<<23u)|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy),
+    textureStore(tr1_layer_out,p,vec4<u32>((u.id&TR1_ID)|((u.side&1u)<<23u)|u_nbits|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy),
         pack2x16float(vec2<f32>(theirs.z,theirs.w)),pack2x16float(vec2<f32>(first_coverage,coverage_weight))));
     textureStore(tr1_output,p,vec4<f32>(film,1.0));
 }

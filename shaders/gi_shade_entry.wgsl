@@ -249,9 +249,10 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
     // rotation so large static emitter meshes (Glint's 91k glowing triangles) do not re-shade every
     // triangle every frame.
     let emitter_frame=gi_word(GI_H_FRAME);
-    for(var k=id.x;k<gi_word(GI_H_EMITTER_COUNT);k+=groups.x*64u) {
+    let emitter_count=gi_word(GI_H_EMITTER_COUNT);
+    for(var k=id.x;k<emitter_count;k+=groups.x*64u) {
         let out_at=gi_emitter_mean_at(k);
-        if gi_shade_out[out_at].w>0.0 && ((k+emitter_frame)&15u)!=0u { continue; }
+        if emitter_count>64u && gi_shade_out[out_at].w>0.0 && ((k+emitter_frame)&15u)!=0u { continue; }
         let own=gs_owns_draw(gi_word(gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS+12u));
         if own==1 { gi_shade_out[out_at]=vec4<f32>(gs_triangle_emission(k),1.0); }
         if own==0 { gi_shade_out[out_at]=vec4<f32>(0.0,0.0,0.0,1.0); }

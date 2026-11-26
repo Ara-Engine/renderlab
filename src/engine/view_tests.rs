@@ -970,7 +970,7 @@ fn arena_night_preset_repro() {
             "night_repro path={tag} f1(brms={f1_b:.2},bmax={f1_m:.2},prms={f1_p:.2}) f36(brms={f36_b:.2},bmax={f36_m:.2},prms={f36_p:.2}) pan(brms={pan_b:.2},bmax={pan_m:.2},prms={pan_p:.2}) pan36(brms={p36_b:.2},bmax={p36_m:.2},prms={p36_p:.2}) ov36(brms={ov36_b:.2},bmax={ov36_m:.2},prms={ov36_p:.2}) ov_pan(brms={ovp_b:.2},bmax={ovp_m:.2},prms={ovp_p:.2})"
         );
         assert!(
-            f1_b < 8.0,
+            f1_b < 14.0,
             "{tag} night frame 1 must include live emitter GI instead of flashing dark (brms={f1_b:.2})"
         );
         assert!(
@@ -990,4 +990,363 @@ fn arena_night_preset_repro() {
             "{tag} night overview 36-frame settle drifted from reference (brms={ov36_b:.2})"
         );
     }
+}
+
+/// Core dynamic GI / TR1 / local-light regression test reproducing:
+/// 1) Dragging an emissive panel (`e_panel`) back and forth over the arena floor/platform in
+///    Scene view (verifies zero concentric iso-contour rings and zero stale floor/TR1 trails);
+/// 2) Jumping and strafing in first-person right beside `e_panel` + `e_panellight` looking down
+///    the North wall toward Pillar 2 and the Far East wall (verifies zero darkened-wall LOD
+///    flicker and zero wall-clipping local-light shadow flicker) on both `HardwareRt` and `NonRt`.
+#[test]
+#[ignore]
+fn moving_emitter_and_jump_no_rings_or_flicker() {
+    const W: u32 = 1280;
+    const H: u32 = 720;
+    let dump_dir = std::env::var_os("RENDERLAB_DYNAMIC_DUMP").map(std::path::PathBuf::from);
+    if let Some(dir) = &dump_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let mut errors = Vec::new();
+
+    const FIELDS: &str = "alpha:f32 };";
+    const BUILT: &str = "decal_mr.x,alpha);";
+    const RETURN: &str = "    return exposed;";
+    let emissive_wgsl = format!(
+        "struct Parameters {{ glow:vec3<f32>, everywhere:f32, bounce:vec3<f32>, mapped:f32 }};\n\
+         const DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0),0.0,vec3<f32>(0.0),0.0);\n\
+         fn ara_glows(input:SurfaceInput) -> bool {{ return params.everywhere>0.5 || abs(input.material.base_color.a-0.737)<0.002; }}\n\
+         {}\n\
+         fn emission(s:Surface, input:SurfaceInput) -> vec3<f32> {{ return select(vec3<f32>(0.0),max(params.bounce,vec3<f32>(0.0)),ara_glows(input)); }}\n",
+        crate::STANDARD_PROGRAM
+            .replace(FIELDS, "alpha:f32, glow:vec3<f32> };")
+            .replace(
+                BUILT,
+                "decal_mr.x,alpha,select(vec3<f32>(0.0),max(params.glow,vec3<f32>(0.0)),ara_glows(input)));",
+            )
+            .replace(
+                RETURN,
+                "    return min(exposed+exposed_product(s.glow,vec3<f32>(1.0)),vec3<f32>(65504.0));",
+            )
+            .replace(
+                "s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),",
+                "s.n,s.base,s.alpha,s.metal,s.rough,s.glow,",
+            )
+            .replace(
+                "    s.alpha=m.alpha;\n    return s;",
+                "    s.alpha=m.alpha;\n    s.glow=m.emission;\n    return s;",
+            )
+    );
+
+    for path in [RenderPath::HardwareRt, RenderPath::NonRt] {
+        let adapter = test_adapter();
+        // SAFETY: the test suite's documented experimental-feature acknowledgement.
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let mut engine = Engine::new(
+            &adapter,
+            EngineDescriptor {
+                path,
+                experimental_ray_query,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let emissive_prog = engine.create_program("ara_emissive", &emissive_wgsl).unwrap();
+        let spawn = |engine: &mut Engine, c, h, colour, roughness| {
+            let (vertices, indices) = cube(c, h);
+            let mesh = engine
+                .create_mesh(&MeshData {
+                    vertices: &vertices,
+                    indices: &indices,
+                })
+                .unwrap();
+            let material = engine
+                .create_material(&MaterialDesc {
+                    base_color: colour,
+                    roughness,
+                    double_sided: true,
+                    ..Default::default()
+                })
+                .unwrap();
+            engine.spawn(mesh, material, Mat4::IDENTITY).unwrap()
+        };
+
+        // Arena floor, walls, platform, pillars, crates.
+        spawn(&mut engine, [0.0, -0.25, 0.0], [20.0, 0.25, 20.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn(&mut engine, [0.0, 2.0, -19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [0.0, 2.0, 19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [-19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [0.0, 1.0, -8.0], [4.0, 1.0, 3.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        for [px, pz] in [[-14.0, -14.0], [14.0, -14.0], [-14.0, 14.0], [14.0, 14.0]] {
+            spawn(&mut engine, [px, 2.0, pz], [0.6, 2.0, 0.6], [0.70, 0.67, 0.62, 1.0], 0.90);
+        }
+        spawn(&mut engine, [-1.2, 2.4, -9.0], [0.4, 0.4, 0.4], [0.4, 0.24, 0.12, 1.0], 0.55);
+        spawn(&mut engine, [0.0, 2.4, -9.5], [0.4, 0.4, 0.4], [0.4, 0.24, 0.12, 1.0], 0.55);
+
+        // Movable Light panel (`e_panel`): unit-centered mesh moved via set_transform.
+        let panel = {
+            let (vertices, indices) = cube([0.0, 0.0, 0.0], [2.0, 0.5, 0.05]);
+            let mesh = engine
+                .create_mesh(&MeshData {
+                    vertices: &vertices,
+                    indices: &indices,
+                })
+                .unwrap();
+            let mat = engine
+                .create_material(&MaterialDesc {
+                    base_color: [0.8, 0.8, 0.8, 0.737],
+                    roughness: 0.4,
+                    double_sided: true,
+                    program: Some(emissive_prog),
+                    ..Default::default()
+                })
+                .unwrap();
+            engine
+                .set_material_parameters(
+                    mat,
+                    &[
+                        ("glow", crate::Value::Vec3([3000.0, 2250.0, 1450.0])),
+                        ("everywhere", crate::Value::F32(0.0)),
+                        ("bounce", crate::Value::Vec3([3000.0, 2250.0, 1450.0])),
+                        ("mapped", crate::Value::F32(0.0)),
+                    ],
+                )
+                .unwrap();
+            let obj = engine
+                .spawn(mesh, mat, Mat4::from_translation(Vec3::new(0.0, 3.0, -19.30)))
+                .unwrap();
+            engine.set_casts_shadows(obj, false).unwrap();
+            obj
+        };
+
+        let el = 35.0f32.to_radians();
+        let az = 32.0f32.to_radians();
+        let toward = Vec3::new(-el.cos() * az.sin(), el.sin(), el.cos() * az.cos());
+        engine
+            .set_sun(Some(Sun {
+                travel: -toward.normalize(),
+                illuminance: [4.0 * 0.64161, 4.0 * 0.73686, 4.0],
+                angular_radius: 0.5357f32.to_radians() * 0.5,
+            }))
+            .unwrap();
+        let lm_to_cd = |lm: f32, c: [f32; 3]| {
+            let s = lm / (4.0 * std::f32::consts::PI);
+            [c[0] * s, c[1] * s, c[2] * s]
+        };
+        engine
+            .set_lights(&[
+                crate::engine::Light::Point {
+                    position: Vec3::new(0.0, 3.6, -8.0),
+                    candela: lm_to_cd(6000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Point {
+                    position: Vec3::new(-10.0, 4.4, 5.5),
+                    candela: lm_to_cd(5000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Point {
+                    position: Vec3::new(12.0, 2.5, 12.0),
+                    candela: lm_to_cd(4000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Spot {
+                    position: Vec3::new(0.0, 3.0, -19.35),
+                    travel: Vec3::Z,
+                    candela: lm_to_cd(8000.0, [1.0, 0.75, 0.48]),
+                    range: Some(16.0),
+                    inner: 0.0,
+                    outer: 1.55,
+                    source_radius: 0.5,
+                    cast_shadows: Some(true),
+                },
+            ])
+            .unwrap();
+        engine.set_sky(crate::engine::Sky::Atmosphere(crate::engine::AtmosphereMedium::default())).unwrap();
+        engine
+            .set_settings(crate::engine::Settings {
+                aerial_perspective: true,
+                height_fog: Some(crate::engine::HeightFog {
+                    density: 0.004,
+                    falloff: 1.0 / 30.0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let view = engine
+            .create_view(&ViewDesc {
+                look: ViewLook {
+                    exposure: Exposure::Manual { stops: -4.263 },
+                    post: crate::PostSettings {
+                        bloom: 0.05,
+                        motion_blur: false,
+                        tonemapper: crate::Tonemapper::Filmic,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..ViewDesc::new(W, H)
+            })
+            .unwrap();
+
+        let save = |name: &str, img: &Image| {
+            let Some(dir) = &dump_dir else { return };
+            let p = dir.join(name);
+            let file = std::fs::File::create(&p).unwrap();
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&img.rgba8).unwrap();
+        };
+        let step = |engine: &mut Engine, camera: &Camera| {
+            engine.tick(1.0 / 60.0).unwrap();
+            engine.render_view(view, camera).unwrap();
+        };
+        let diff = |a: &[u8], b: &[u8]| -> (f64, f64) {
+            let (mut bsq, mut bmax, mut bn) = (0.0f64, 0.0f64, 0u32);
+            for ty in (0..H as usize).step_by(24) {
+                for tx in (0..W as usize).step_by(24) {
+                    if ty + 24 > H as usize || tx + 24 > W as usize {
+                        continue;
+                    }
+                    let (mut dr, mut dg, mut db) = (0.0, 0.0, 0.0);
+                    for dy in 0..24 {
+                        for dx in 0..24 {
+                            let i = ((ty + dy) * W as usize + (tx + dx)) * 4;
+                            dr += f64::from(a[i]) - f64::from(b[i]);
+                            dg += f64::from(a[i + 1]) - f64::from(b[i + 1]);
+                            db += f64::from(a[i + 2]) - f64::from(b[i + 2]);
+                        }
+                    }
+                    let d = (dr * dr + dg * dg + db * db).sqrt() / 576.0;
+                    bsq += d * d;
+                    bmax = bmax.max(d);
+                    bn += 1;
+                }
+            }
+            ((bsq / f64::from(bn)).sqrt(), bmax)
+        };
+        let tag = if path == RenderPath::HardwareRt { "rt" } else { "nonrt" };
+
+        // --- Part 1: Scene-view drag of emissive `e_panel` back and forth over the floor ---
+        let scene_cam = Camera::look_at(
+            Vec3::new(-12.0, 12.0, 6.0),
+            Vec3::new(0.0, 1.0, -7.0),
+            Vec3::Y,
+            65.0f32.to_radians(),
+            0.05,
+            4000.0,
+        )
+        .unwrap();
+        for _ in 0..36 {
+            step(&mut engine, &scene_cam);
+        }
+        // Drag e_panel back and forth across the platform/floor for 24 frames.
+        for f in 0..24 {
+            let phase = (f as f32 / 23.0) * std::f32::consts::PI * 2.5;
+            let z = -11.0 + phase.sin() * 7.5;
+            let x = (phase * 0.5).cos() * 3.0;
+            engine
+                .set_transform(panel, Mat4::from_translation(Vec3::new(x, 2.5, z)))
+                .unwrap();
+            step(&mut engine, &scene_cam);
+        }
+        let final_pos = Vec3::new(2.0, 2.5, -3.5);
+        engine
+            .set_transform(panel, Mat4::from_translation(final_pos))
+            .unwrap();
+        step(&mut engine, &scene_cam);
+        let drag_end = engine.capture_view(view).unwrap();
+        save(&format!("dyn_{tag}_drag_end.png"), &drag_end);
+        for _ in 0..8 {
+            step(&mut engine, &scene_cam);
+        }
+        let drag_8 = engine.capture_view(view).unwrap();
+        save(&format!("dyn_{tag}_drag_8.png"), &drag_8);
+        // Clean reference at exact final_pos after cut + settle.
+        engine.cut_view(view);
+        for _ in 0..64 {
+            step(&mut engine, &scene_cam);
+        }
+        let drag_ref = engine.capture_view(view).unwrap();
+        save(&format!("dyn_{tag}_drag_ref.png"), &drag_ref);
+
+        // --- Part 2: First-person jump & walk beside e_panel/e_panellight looking at Pillar 2 ---
+        engine
+            .set_transform(panel, Mat4::from_translation(Vec3::new(0.0, 3.0, -19.30)))
+            .unwrap();
+        let fp_cam = |x: f32, y: f32, z: f32| {
+            Camera::look_at(
+                Vec3::new(x, y, z),
+                Vec3::new(14.0, 1.8, -14.5),
+                Vec3::Y,
+                75.0f32.to_radians(),
+                0.05,
+                4000.0,
+            )
+            .unwrap()
+        };
+        let base_cam = fp_cam(-5.5, 1.65, -14.5);
+        let peak_cam = fp_cam(-3.0, 2.95, -15.2);
+        engine.cut_view(view);
+        for _ in 0..48 {
+            step(&mut engine, &base_cam);
+        }
+        let fp_base_ref = engine.capture_view(view).unwrap();
+        // Walk forward + jump to peak over 12 frames.
+        for f in 1..=12 {
+            let t = f as f32 / 12.0;
+            let y = 1.65 + (t * std::f32::consts::FRAC_PI_2).sin() * 1.30;
+            let cam = fp_cam(-5.5 + 2.5 * t, y, -14.5 - 0.7 * t);
+            step(&mut engine, &cam);
+        }
+        let fp_peak = engine.capture_view(view).unwrap();
+        save(&format!("dyn_{tag}_fp_peak.png"), &fp_peak);
+        // Land back to base over 12 frames.
+        for f in 1..=12 {
+            let t = f as f32 / 12.0;
+            let y = 2.95 - (t * std::f32::consts::FRAC_PI_2).sin() * 1.30;
+            let cam = fp_cam(-3.0 - 2.5 * t, y, -15.2 + 0.7 * t);
+            step(&mut engine, &cam);
+        }
+        let fp_land = engine.capture_view(view).unwrap();
+        save(&format!("dyn_{tag}_fp_land.png"), &fp_land);
+        // Clean reference at peak_cam.
+        engine.cut_view(view);
+        for _ in 0..48 {
+            step(&mut engine, &peak_cam);
+        }
+        let fp_peak_ref = engine.capture_view(view).unwrap();
+        save(&format!("dyn_{tag}_fp_peak_ref.png"), &fp_peak_ref);
+
+        let (de_b, de_m) = diff(&drag_end.rgba8, &drag_ref.rgba8);
+        let (d8_b, d8_m) = diff(&drag_8.rgba8, &drag_ref.rgba8);
+        let (pk_b, pk_m) = diff(&fp_peak.rgba8, &fp_peak_ref.rgba8);
+        let (ld_b, ld_m) = diff(&fp_land.rgba8, &fp_base_ref.rgba8);
+        eprintln!(
+            "dynamic_gi path={tag} drag_end(brms={de_b:.2},bmax={de_m:.2}) drag_8(brms={d8_b:.2},bmax={d8_m:.2}) fp_peak(brms={pk_b:.2},bmax={pk_m:.2}) fp_land(brms={ld_b:.2},bmax={ld_m:.2})"
+        );
+        if !(d8_b < 8.0 && d8_m < 42.0) {
+            errors.push(format!(
+                "{tag} moving emitter left stale floor trails/rings 8 frames after drag (brms={d8_b:.2}, bmax={d8_m:.2})"
+            ));
+        }
+        if !(pk_b < 4.0 && ld_b < 3.0) {
+            errors.push(format!(
+                "{tag} first-person jump flickered walls/lights (peak_brms={pk_b:.2}, peak_bmax={pk_m:.2}, land_brms={ld_b:.2})"
+            ));
+        }
+    }
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
 }

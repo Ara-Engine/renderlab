@@ -308,6 +308,8 @@ impl ProgramModules {
 pub(super) struct ProgramTraits {
     /// Its cell shading calls hooks (`program::reflects`).
     pub reflects: bool,
+    /// It declares `fn emission(...)` (`program::emits`).
+    pub emits: bool,
     /// It declares a reflection lobe that reads the incident (`program::declares_reflection`).
     pub declares_reflection: bool,
 }
@@ -315,6 +317,7 @@ impl ProgramTraits {
     pub fn of(source: &str) -> Self {
         Self {
             reflects: program::reflects(source),
+            emits: program::emits(source),
             declares_reflection: program::declares_reflection(source),
         }
     }

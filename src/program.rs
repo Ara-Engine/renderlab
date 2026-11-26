@@ -1769,6 +1769,11 @@ pub(crate) fn compose_list(head: &str, program: &str, stage: Stage, parameters: 
 pub(crate) fn reflects(program: &str) -> bool {
     declares(program, "fn", "scatter") || declares(program, "fn", "emission")
 }
+/// Whether `program` declares `fn emission(...)`, so moving one of its placements updates emitters
+/// and triggers dynamic GI/temporal invalidation across its illuminated region.
+pub(crate) fn emits(program: &str) -> bool {
+    declares(program, "fn", "emission")
+}
 /// Cell shading's calls into the hooks, zero for an absent one.
 /// The live reference entry's `rf_record`: the program's own material record (`material_out`) when
 /// it declares the record mapping, else the engine's material factors and textures, as the view

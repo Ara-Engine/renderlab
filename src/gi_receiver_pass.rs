@@ -382,7 +382,7 @@ const FG_STATE_HEAD: u64 = 20;
 /// The final gather's probe tile in pixels and probe size in bytes (gi_receiver_pass.wgsl
 /// FG_TILE, FgProbe).
 const FG_TILE: u32 = 16;
-const FG_PROBE_BYTES: u64 = 192;
+const FG_PROBE_BYTES: u64 = 240;
 /// Probes per tile (gi_receiver_pass.wgsl FG_SLOTS): a second where the tile holds a second plane.
 const FG_SLOTS: u64 = 2;
 /// The adaptive probes' block in pixels (gi_receiver_pass.wgsl FG_BLOCK): one probe each.
@@ -516,7 +516,8 @@ impl Renderer {
                     .is_some_and(|s| s.plan.reset);
                 let prev = target.previous_vp.filter(|_| !reset && !moved);
                 let mut words = [0u32; FG_STATE_HEAD as usize];
-                words[0] = u32::from(self.gi.recently_changed());
+                words[0] = u32::from(self.gi.recently_changed())
+                    | (u32::from(self.gi.emitter_moved()) << 1);
                 words[1] = target.gather_frame;
                 words[2] = target.gather_frame & 1;
                 words[3] = u32::from(prev.is_some());

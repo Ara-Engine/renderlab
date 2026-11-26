@@ -18,9 +18,14 @@
 // GI_H_EMITTERS (57), GI_H_EMITTER_COUNT (58) and GI_EMITTER_WORDS: gi_cells.wgsl.
 const GI_H_EMITTER_DRAWS:u32=59u;
 const GI_H_EMITTERS_MAX:u32=60u;
-// Nonzero: the cache's own gathers neither sample the list nor subtract emission at hits
-// (default; RENDERLAB_GI_EMITTERS=1 turns them on). Readers outside the cache are unaffected.
-const GI_H_EMITTERS_OFF:u32=43u;
+// Maximum listed emitter triangle count for which the cache's own gathers evaluate emitters
+// analytically (default 64; RENDERLAB_GI_EMITTERS=1 sets u32::MAX, =0 sets 0). Scenes above the
+// limit fall back to stochastic bounce hits in the cache while final gather still uses NEE.
+const GI_H_EMITTERS_LIMIT:u32=43u;
+fn gi_cache_emitters_on() -> bool {
+    let n=gi_word(GI_H_EMITTER_COUNT);
+    return n>0u && n<=gi_word(GI_H_EMITTERS_LIMIT);
+}
 // Per emitting draw after the triangles: its stable id, its batch index, its probe radiance (the
 // brightest of three sampled triangles: whether it emits, never an estimate), the index of its
 // first listed triangle, its triangle count and its first placement (src/gi_cache.rs
@@ -178,7 +183,7 @@ fn gi_emitter_pick(u:f32) -> GiEmitterPick {
 // The emitted radiance of the draw a material identity + 1 names (gi_hit_identity), or zero.
 fn gi_identity_emission(identity:u32) -> vec3<f32> {
     let n=gi_word(GI_H_EMITTER_DRAWS);
-    if identity==0u || n==0u || gi_word(GI_H_EMITTERS_OFF)!=0u { return vec3<f32>(0.0); }
+    if identity==0u || n==0u || !gi_cache_emitters_on() { return vec3<f32>(0.0); }
     let id=(identity-1u)>>16u;
     let base=gi_emitter_draws_at();
     for(var k=0u;k<n;k+=1u) {
@@ -245,7 +250,7 @@ fn gi_emitter_sh(q:vec3<f32>, n:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>
 // gi_gather_sh. Returns the visibility rays traced.
 fn gi_emitter_gather(lane:u32, q:vec3<f32>, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>) -> u32 {
     let count=gi_word(GI_H_EMITTER_COUNT);
-    if count==0u || gi_word(GI_H_EMITTERS_OFF)!=0u { return 0u; }
+    if !gi_cache_emitters_on() { return 0u; }
     let base=gi_word(GI_H_EMITTERS);
     var rays=0u;
     for(var e=lane;e<count;e+=GI_GATHER_LANES) {
@@ -259,12 +264,18 @@ fn gi_emitter_gather(lane:u32, q:vec3<f32>, origin:vec3<f32>, n:vec3<f32>, key:v
         if sh.x<=2.8e-7 { continue; }
         // Visibility along one ray to a fixed point of the triangle, from the cell's own hash
         // (the same point every frame for this cell); a point under the cell's horizon moves to
-        // the triangle's centroid, which the clipped polygon keeps when any of it is above.
+        // the triangle's centroid, or its highest vertex above the horizon when clipped across it.
         let hash=gi_mix(key.y^(e*0x9e3779b9u));
         var uv=vec2<f32>(f32(hash&0xffffu),f32(hash>>16u))*(1.0/65536.0);
         if uv.x+uv.y>1.0 { uv=vec2<f32>(1.0)-uv; }
         var x=a+e1*uv.x+e2*uv.y;
-        if dot(x-q,n)<=0.0 { x=a+(e1+e2)*(1.0/3.0); }
+        if dot(x-q,n)<=1e-5 {
+            x=a+(e1+e2)*(1.0/3.0);
+            if dot(x-q,n)<=1e-5 {
+                let h0=dot(a-q,n);let h1=dot(a+e1-q,n);let h2=dot(a+e2-q,n);
+                x=select(select(a+e2,a+e1,h1>=h2),a,h0>=h1 && h0>=h2);
+            }
+        }
         let to=x-origin;
         let dist=length(to);
         if dist<=1e-6 { continue; }

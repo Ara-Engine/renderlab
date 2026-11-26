@@ -560,6 +560,7 @@ impl Cache {
                 still_extent: scene.size.map(u32::to_le_bytes).concat(),
                 instances: &[scene.models, scene.normals].concat(),
                 skin_revisions: scene.skin_revisions.clone(),
+                emitter_relight: false,
             },
         );
         let record = StorageBuffer::new(gpu, &finished.frame)?;

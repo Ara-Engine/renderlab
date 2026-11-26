@@ -101,6 +101,7 @@ const GI_SCAN_PARTIAL:u32=8u;
 // Lighting, environment or program changed (G2): cells relight (bounce.z says which).
 const GI_SCAN_RELIGHT:u32=16u;
 const GI_RELIGHT_ALL:u32=0x80000000u;
+const GI_RELIGHT_GATHER_ONLY:u32=0x40000000u;
 const GI_RELIGHT_REQUESTS:u32=0x20000000u;
 // Work counters: misses, traces, integrations, then statistics.
 const GI_W_MISSES:u32=0u;
@@ -1920,8 +1921,16 @@ fn gi_count_read(at:u32, cold:u32) {
         if (flags&GI_SCAN_RELIGHT)!=0u {
             let relight=gi_frame.bounce.z;
             let all=(relight&GI_RELIGHT_ALL)!=0u;
+            let gather_only=(relight&GI_RELIGHT_GATHER_ONLY)!=0u;
             let p=relight&0xffu;
-            if all || p==0u || (slot+((relight>>8u)&0xffu))%p==0u {
+            if gather_only && gi_fixed_on() {
+                // Moving emitter: analytical light visibility did not change. Clear GI_SETTLED
+                // and GI_DIRTY on every live cell (seen and unseen) so gi_fixed_rank drains seen
+                // cells in strict oldest-first age order (100% round-robin coverage with zero
+                // random bin-94 starvation), while unseen cells cost 0 rays until touched and
+                // then immediately re-gather first when the camera reveals them.
+                gi_table[cold+GI_C_STATE]=state&~(GI_SETTLED|GI_DIRTY);
+            } else if all || p==0u || (slot+((relight>>8u)&0xffu))%p==0u {
                 gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
                 gi_queue_shade(slot);
                 gi_schedule(slot,select(1u,gi_word(GI_H_GATHERS),all));
@@ -2468,7 +2477,8 @@ const GI_GATHER_REST_BINS:u32=5u*GI_GATHER_SPREAD;
 fn gi_gather_rays(slot:u32) -> u32 {
     let cold=gi_cold(slot);
     let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
-    let lanes=select(select(0x11111111u,0x55555555u,stride==2u),0xffffffffu,stride==1u);
+    let stride_phase=gi_table[gi_hot(slot)]&(stride-1u);
+    let lanes=select(select(0x11111111u,0x55555555u,stride==2u)<<stride_phase,0xffffffffu,stride==1u);
     var rays=0u;
     for(var w=0u;w<GI_DIRECTIONS/32u;w+=1u) { rays+=countOneBits(~gi_table[cold+GI_C_BITS+w]&lanes); }
     let aimed=gi_word(GI_H_NEAR_RAYS);
@@ -2639,14 +2649,15 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             var changing=0u;
             var rays=0u;
             let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
+            let stride_phase=c.key.x&(stride-1u);
             // The fixed directions' hits read cells sized to the ray's cone (gi_hit_radiance).
             gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
             // Fixed-direction rays that hit (outside lights' near regions), and those whose hit
             // had a value: the average leaves out the rest (gi_wg_hits, gi_wg_valued).
             var hits=0u;
             var valued=0u;
-            for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
-                if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
+            for(var k=lane*stride+stride_phase;k<GI_DIRECTIONS;k+=GI_GATHER_LANES*stride) {
+                if (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
                 let h=gi_closest(origin,d,0.0,1e20);
                 let through=gi_hit_transmission;
