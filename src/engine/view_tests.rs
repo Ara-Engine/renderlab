@@ -420,3 +420,177 @@ fn backward_motion_reveals_shadowed_wall_without_gi_blotches() {
         );
     }
 }
+
+/// Reproduces the My project 5 arena corner (shadowed West/South walls, dark floor, sunlit white
+/// Pillar 3, sunlit rust-orange Cover 5, Archway, and emissive Light panel) under still (24-frame
+/// editor settle), 64-frame converged, and fast left-right camera pan on both RT and non-RT.
+#[test]
+#[ignore]
+fn arena_corner_still_and_fast_pan_without_gi_spots_or_blotches() {
+    const W: u32 = 1280;
+    const H: u32 = 720;
+    let dump_dir = std::env::var_os("RENDERLAB_ARENA_DUMP").map(std::path::PathBuf::from);
+    for path in [RenderPath::HardwareRt, RenderPath::NonRt] {
+        let adapter = test_adapter();
+        // SAFETY: the test suite's documented experimental-feature acknowledgement.
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let mut engine = Engine::new(
+            &adapter,
+            EngineDescriptor {
+                path,
+                experimental_ray_query,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let spawn = |engine: &mut Engine, c, h, colour, roughness| {
+            let (vertices, indices) = cube(c, h);
+            let mesh = engine
+                .create_mesh(&MeshData {
+                    vertices: &vertices,
+                    indices: &indices,
+                })
+                .unwrap();
+            let material = engine
+                .create_material(&MaterialDesc {
+                    base_color: colour,
+                    roughness,
+                    double_sided: true,
+                    ..Default::default()
+                })
+                .unwrap();
+            engine.spawn(mesh, material, Mat4::IDENTITY).unwrap()
+        };
+        // Floor & perimeter walls (exact My project 5 geometry & colours).
+        spawn(&mut engine, [0.0, -0.25, 0.0], [20.0, 0.25, 20.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn(&mut engine, [0.0, 2.0, -19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [0.0, 2.0, 19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [-19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn(&mut engine, [19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        // Pillar 3 (sunlit bright pillar right beside the West wall shadow) + Pillar 1.
+        spawn(&mut engine, [-14.0, 2.0, 14.0], [0.6, 2.0, 0.6], [0.70, 0.67, 0.62, 1.0], 0.90);
+        spawn(&mut engine, [-14.0, 2.0, -14.0], [0.6, 2.0, 0.6], [0.70, 0.67, 0.62, 1.0], 0.90);
+        // Cover 5 (rust-orange sunlit block across from the shadowed West wall) & Archway.
+        spawn(&mut engine, [-14.0, 0.6, -5.0], [0.3, 0.6, 1.0], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn(&mut engine, [-6.0, 0.6, 9.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn(&mut engine, [-10.0, 2.5, 4.0], [3.0, 2.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        // Directional sun matching My project 5 rotation [-38, -32, 0] (both West and South inner
+        // walls shadowed, left faces of Pillar 3 and orange Cover 5 directly sunlit), 90,000 lux.
+        let el = 38.0f32.to_radians();
+        let az = 32.0f32.to_radians();
+        let toward = Vec3::new(-el.cos() * az.sin(), el.sin(), el.cos() * az.cos());
+        engine
+            .set_sun(Some(Sun {
+                travel: -toward.normalize(),
+                illuminance: [90_000.0, 85_500.0, 77_400.0],
+                ..Sun::default()
+            }))
+            .unwrap();
+        let view = engine
+            .create_view(&ViewDesc {
+                look: ViewLook {
+                    exposure: Exposure::Manual { stops: -13.0 },
+                    post: crate::PostSettings {
+                        motion_blur: false,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..ViewDesc::new(W, H)
+            })
+            .unwrap();
+        let base_eye = Vec3::new(-12.75, 6.66, 16.47);
+        let cam_yaw = |delta_yaw: f32| {
+            let yaw = 1.065001 + delta_yaw;
+            let pitch = 0.725f32;
+            let fwd = Vec3::new(-pitch.cos() * yaw.sin(), -pitch.sin(), -pitch.cos() * yaw.cos());
+            Camera::look_at(base_eye, base_eye + fwd, Vec3::Y, 75.0f32.to_radians(), 0.05, 400.0).unwrap()
+        };
+        let step = |engine: &mut Engine, camera: &Camera| {
+            engine.tick(1.0 / 60.0).unwrap();
+            engine.render_view(view, camera).unwrap();
+        };
+        let home = cam_yaw(0.0);
+        // Reference: deeply settled (96 frames).
+        for _ in 0..96 {
+            step(&mut engine, &home);
+        }
+        let ref_img = engine.capture_view(view).unwrap();
+        // Fast left-right camera pan away and back to home, ending mid-pan right at home.
+        let mut dyaw = 0.0f32;
+        for _ in 0..5 {
+            dyaw -= 0.16;
+            step(&mut engine, &cam_yaw(dyaw));
+        }
+        for _ in 0..10 {
+            dyaw += 0.16;
+            step(&mut engine, &cam_yaw(dyaw));
+        }
+        for _ in 0..5 {
+            dyaw -= 0.16;
+            step(&mut engine, &cam_yaw(dyaw));
+        }
+        let pan_img = engine.capture_view(view).unwrap();
+        // Editor-like 24-frame settle after stopping the pan.
+        for _ in 0..24 {
+            step(&mut engine, &home);
+        }
+        let still24 = engine.capture_view(view).unwrap();
+
+        if let Some(dir) = &dump_dir {
+            let _ = std::fs::create_dir_all(dir);
+            let tag = if path == RenderPath::HardwareRt { "rt" } else { "nonrt" };
+            for (kind, img) in [("ref", &ref_img), ("pan", &pan_img), ("still24", &still24)] {
+                let p = dir.join(format!("arena_{tag}_{kind}.png"));
+                let file = std::fs::File::create(&p).unwrap();
+                let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&img.rgba8).unwrap();
+            }
+        }
+
+        // Measure 24x24 block-mean RMS and max deviation on the shadowed West wall & corner floor.
+        let measure = |a: &[u8], b: &[u8]| -> (f64, f64) {
+            let (mut sq, mut mx, mut n) = (0.0f64, 0.0f64, 0u32);
+            // West wall band + shadowed floor region (avoiding pillar & sunlit floor).
+            for &(x0, y0, x1, y1) in &[(240usize, 192usize, 1080usize, 312usize), (288, 432, 600, 624)] {
+                for ty in (y0..y1).step_by(24) {
+                    for tx in (x0..x1).step_by(24) {
+                        let (mut ra, mut ga, mut ba, mut rb, mut gb, mut bb) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+                        for dy in 0..24 {
+                            for dx in 0..24 {
+                                let i = ((ty + dy) * W as usize + (tx + dx)) * 4;
+                                ra += f64::from(a[i]);
+                                ga += f64::from(a[i + 1]);
+                                ba += f64::from(a[i + 2]);
+                                rb += f64::from(b[i]);
+                                gb += f64::from(b[i + 1]);
+                                bb += f64::from(b[i + 2]);
+                            }
+                        }
+                        let inv = 1.0 / 576.0;
+                        let dr = (ra - rb) * inv;
+                        let dg = (ga - gb) * inv;
+                        let db = (ba - bb) * inv;
+                        let d = (dr * dr + dg * dg + db * db).sqrt();
+                        sq += d * d;
+                        mx = mx.max(d);
+                        n += 1;
+                    }
+                }
+            }
+            ((sq / f64::from(n)).sqrt(), mx)
+        };
+        let (pan_rms, pan_max) = measure(&pan_img.rgba8, &ref_img.rgba8);
+        let (s24_rms, s24_max) = measure(&still24.rgba8, &ref_img.rgba8);
+        eprintln!(
+            "arena_corner path={path:?} pan_rgb_rms={pan_rms:.2} pan_rgb_max={pan_max:.2} still24_rgb_rms={s24_rms:.2} still24_rgb_max={s24_max:.2}"
+        );
+        assert!(
+            pan_rms < 4.0 && pan_max < 12.0 && s24_rms < 2.5 && s24_max < 8.0,
+            "{path:?}: arena corner GI instability (pan rms={pan_rms:.2} max={pan_max:.2}, still24 rms={s24_rms:.2} max={s24_max:.2})"
+        );
+    }
+}

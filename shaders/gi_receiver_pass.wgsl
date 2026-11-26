@@ -437,13 +437,67 @@ fn fg_find_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
                 if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.78 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
                 let tangent_scale=scale/view_cos;
                 let d3=length(s.prev_world-p.point.xyz)/max(tangent_scale,1e-6);
-                if d3>1.5 {continue;}
-                let score=fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*4.0);
+                if d3>2.0 {continue;}
+                let score=fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*3.0);
                 if score>best {best=score;chosen=idx;}
             }
         }
     }
     return chosen;
+}
+// Co-planar bilinear reprojection of a previous-frame tile probe for `s`. On still cameras where
+// the probe stays on its exact previous world point, returns `fg_load(prev_idx)` with zero blur;
+// during camera motion/pans, smoothly interpolates the 2x2 surrounding co-planar previous tiles
+// so probe histories never snap between discrete tiles or boil across walls.
+fn fg_load_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32,prev_idx:u32)->FgProbe {
+    var empty:FgProbe;
+    if prev_idx==0xffffffffu {return empty;}
+    let anchor=fg_plane(prev_idx,size);
+    if length(s.prev_world-anchor.point.xyz)<=0.05*max(footprint,1e-6) {
+        return fg_load(prev_idx,size);
+    }
+    let rp=fg_reproject_pixel(s.prev_world,size);
+    if rp.z<=0.0 {return fg_load(prev_idx,size);}
+    let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
+    let f=(rp.xy+vec2<f32>(0.5))/f32(FG_TILE)-vec2<f32>(0.5);
+    let base=vec2<i32>(floor(f));
+    let fr=f-floor(f);
+    let bank=fg_read_bank();
+    let view_to=lighting.eye-s.world;
+    let view_cos=max(abs(dot(view_to,s.normal))*inverseSqrt(max(dot(view_to,view_to),1e-12)),0.25);
+    fg_clear();
+    var w_sum=0.0;
+    var hist_sum=0.0;
+    for(var k=0u;k<4u;k+=1u) {
+        let o=vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
+        let t=clamp(base+o,vec2<i32>(0),tiles-vec2<i32>(1));
+        let bil=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
+        if bil<=1e-4 {continue;}
+        for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
+            let idx=fg_tile_at(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size,bank);
+            let p=fg_plane(idx,size);
+            let scale=max(footprint,p.normal.w);
+            let tol=FG_PLANE*scale;
+            if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.82 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
+            let tangent_scale=scale/view_cos;
+            let d3=length(s.prev_world-p.point.xyz)/max(tangent_scale,1e-6);
+            if d3>1.5 {continue;}
+            let w=bil*fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*4.0);
+            if w<=1e-5 {continue;}
+            fg_add(idx,size,w);
+            w_sum+=w;
+            hist_sum+=w*p.point.w;
+        }
+    }
+    if w_sum<=1e-4 {return fg_load(prev_idx,size);}
+    var out:FgProbe;
+    let inv=1.0/w_sum;
+    for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=fg_sum[v]*inv;}
+    // Cap bilinearly interpolated moving history at 24 frames to prevent recursive diffusion while
+    // retaining smooth temporal stability across rapid pans.
+    out.point=vec4<f32>(s.prev_world,min(hist_sum*inv,24.0));
+    out.normal=vec4<f32>(s.normal,footprint);
+    return out;
 }
 // Best matching previous-frame adaptive (or tile fallback) probe in read_bank for surface `s`.
 fn fg_find_prev_adapt(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
@@ -600,21 +654,20 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
 // rows of 52 alone, its probe's other lanes idle, cost 0.45 ms on Glint without ray hardware.
 fn fg_reduce(lane:u32) {
     let first=(lane/FG_RAYS)*FG_RAYS;
-    // Exposure-invariant lone-ray firefly clamp on bounce SH (analogous to reflections.wgsl's
-    // lone-stratum bound): suppresses single-ray hits on tiny bright emitters without biasing
-    // large area lights hit by multiple rays.
+    // Exposure-invariant lone-ray firefly clamp evaluated over bounce SH independently of bright
+    // daylight sky: suppresses single-ray spikes on tiny bright sunlit/emissive patches without
+    // biasing uniform furnaces or multi-ray nearby bounce sources.
     var total_luma=0.0;
     var max_luma=0.0;
     var max_lane=0u;
     for(var l=0u;l<FG_RAYS;l+=1u) {
-        let c=vec3<f32>(fg_lane_sh[first+l][FG_BOUNCE],fg_lane_sh[first+l][FG_BOUNCE+1u],fg_lane_sh[first+l][FG_BOUNCE+2u])
-            +vec3<f32>(fg_lane_sh[first+l][0u],fg_lane_sh[first+l][1u],fg_lane_sh[first+l][2u]);
+        let c=vec3<f32>(fg_lane_sh[first+l][FG_BOUNCE],fg_lane_sh[first+l][FG_BOUNCE+1u],fg_lane_sh[first+l][FG_BOUNCE+2u]);
         let y=dot(max(c,vec3<f32>(0.0)),vec3<f32>(0.2126,0.7152,0.0722));
         total_luma+=y;
         if y>max_luma {max_luma=y;max_lane=l;}
     }
     let rest_sum=max(total_luma-max_luma,0.0);
-    let cap_scale=select(1.0,min(1.0,(2.0*rest_sum)/max(max_luma,1e-30)),max_luma>2.0*rest_sum && rest_sum>1e-6);
+    let cap_scale=select(1.0,min(1.0,(3.5*rest_sum)/max(max_luma,1e-30)),max_luma>3.5*rest_sum && rest_sum>1e-6);
     workgroupBarrier();
     for(var i=lane%FG_RAYS;i<52u;i+=FG_RAYS) {
         var sum=0.0;
@@ -683,7 +736,7 @@ const FG_RESTART:f32=6.0;
 // Folds the lanes from `first` (summed into that row by fg_reduce) into probe `write_index`
 // (in write_bank), continuing from `prev_index` (in read_bank, 0xffffffffu when none) and
 // recording change state at `state_index`.
-fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,probe_slot:u32,s:FgSurface,pixel:vec2<u32>) {
+fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,probe_slot:u32,s:FgSurface,pixel:vec2<u32>,bilinear_tile:bool) {
     let first=probe_slot*FG_RAYS;
     var sh:array<f32,40>;
     var nee:array<f32,12>;
@@ -693,7 +746,10 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     let footprint=fg_footprint(pixel,size,s.world);
     let has_old=prev_index!=0xffffffffu;
     var old:FgProbe;
-    if has_old {old=fg_load(prev_index,size);}
+    if has_old {
+        if bilinear_tile {old=fg_load_prev_tile(s,size,footprint,prev_index);}
+        else {old=fg_load(prev_index,size);}
+    }
     let answered=sh[FG_ANSWERED];
     // Zero-answer guard: when every hemisphere ray hit an unshaded cache cell (e.g. frame 0 in a
     // tight corner), preserve valid on-plane history or invalidate rather than storing pitch-black.
@@ -710,8 +766,9 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     }
     // Uniform hemisphere: pdf 1/(2 pi). Sky rays ALWAYS carry their exact 2*pi / FG_HEMI share so
     // unanswered geometry hits never over-amplify sky light. Unanswered bounce hits borrow their
-    // exact missing geometry fraction from on-plane history, or renormalize over geometry hits
-    // alone (never diluted by sky hits) when newly revealed.
+    // exact missing geometry fraction from on-plane history when available; on brand-new probes,
+    // cap renormalization tightly (1.25x) so cached bright sunlit surfaces never get amplified
+    // to stand in for uncached dark shadows, and downweight incomplete probes in fg_filter.
     let hemi_scale=6.283185307179586/f32(FG_HEMI);
     let missing_frac=clamp((f32(FG_HEMI)-answered)/f32(FG_HEMI),0.0,1.0);
     let geom_hits=atomicLoad(&fg_wg_geom[probe_slot]);
@@ -726,13 +783,13 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
             sh[b]=sh[b]*hemi_scale+old.sh[b/4u][b%4u]*geom_missing_frac+nee[i]*hemi_scale;
         }
     } else if geom_hits>0u && geom_ans>0u {
-        let bounce_scale=hemi_scale*min(f32(geom_hits)/f32(geom_ans),4.0);
+        let bounce_scale=hemi_scale*min(f32(geom_hits)/f32(geom_ans),1.25);
         for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*bounce_scale+nee[i]*hemi_scale;}
     } else {
         for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*hemi_scale+nee[i]*hemi_scale;}
     }
     let max_hist=select(FG_HISTORY,16.0,s.moved);
-    var count=select(1.0,0.25,geom_hits>0u && geom_ans==0u);
+    var count=max(1.0-geom_missing_frac,0.25);
     if has_old && old.point.w>0.0 {
         count=min(old.point.w+1.0,max_hist);
     }
@@ -810,10 +867,14 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     let footprint=select(0.0,fg_footprint(pixel,size,s.world),s.placement!=0u);
     let prev_idx=select(0xffffffffu,fg_find_prev_tile(s,size,footprint),s.placement!=0u);
     // Half rate: on alternate frames, a checkerboard of tiles carries forward a reprojected probe
-    // that has history on its plane instead of tracing it. Moving surfaces always trace.
-    let old_w=select(0.0,fg_plane(prev_idx,size).point.w,prev_idx!=0xffffffffu);
+    // that has history on its plane instead of tracing it. Drop out of stable 1/8 cadence when the
+    // probe shifted across the surface (camera pan/motion) so moving walls stay crisp on non-RT.
+    var prev_plane:FgPlane;
+    if prev_idx!=0xffffffffu {prev_plane=fg_plane(prev_idx,size);}
+    let old_w=prev_plane.point.w;
+    let probe_shifted=prev_idx!=0xffffffffu && length(s.prev_world-prev_plane.point.xyz)>0.05*max(footprint,1e-6);
     let at=fg_state_at(tile_slot);
-    let stable=fg_state[0]==0u && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
+    let stable=fg_state[0]==0u && !probe_shifted && at<arrayLength(&fg_state) && (fg_state[at]&0x3fu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
     let turn=select((group.x+group.y+frame)&1u,(group.x+2u*group.y+frame)%FG_STABLE_RATE,stable);
     let keep=FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
@@ -836,7 +897,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
         fg_store(write_idx,size,carried);
         return;
     }
-    fg_accumulate(write_idx,prev_idx,tile_slot,size,slot,s,pixel);
+    fg_accumulate(write_idx,prev_idx,tile_slot,size,slot,s,pixel,true);
 }
 // The tile probes around a pixel on its plane, bilinear by tile position: weighted SH and the
 // weights' sum.
@@ -884,15 +945,14 @@ const FG_FILTER_SHORT:f32=24.0;
         let index=fg_tile_at(tile_slot,size,bank);
         let c=fg_plane(index,size);
         if c.point.w<=0.0 {fg_invalidate(fg_filtered(tile_slot,size),size);continue;}
-        let mature=c.point.w>FG_FILTER_SHORT;
-        let fresh_probe=c.point.w<=8.0;
-        // Freshly revealed probes (walking backward, fast camera turns, cuts) widen their
-        // co-planar reach to 9x9 tiles so Bayer-stratified probes average cleanly and pull in
-        // converged co-planar neighbours from up to 4 tiles away without bleeding across corners.
-        let reach=select(select(3,4,fresh_probe),select(1,2,FG_HALF_RATE),mature);
-        let sigma=select(select(2.0,2.8,fresh_probe),select(1.0,1.3,FG_HALF_RATE),mature);
-        let lum_k=select(1.0,0.75,FG_HALF_RATE);
-        let e_c=select(0.0,fg_probe_dc_luma(index,size),mature);
+        // Continuous Gaussian width from 2.0 (brand-new 7x7 Bayer-covering probe) down to 1.25
+        // (converged 5x5 co-planar floor on both RT and non-RT), smoothing both still-wall bounce
+        // noise and freshly disoccluded walls without smearing vertical gradients on distant walls
+        // or popping at count=24.
+        let age_t=clamp((c.point.w-1.0)/23.0,0.0,1.0);
+        let sigma=mix(2.0,1.25,age_t);
+        let reach=select(3,2,c.point.w>12.0);
+        let e_c=select(0.0,fg_probe_dc_luma(index,size),c.point.w>8.0);
         fg_clear();
         fg_add(index,size,c.point.w);
         var total=c.point.w;
@@ -906,13 +966,14 @@ const FG_FILTER_SHORT:f32=24.0;
                     let p=fg_plane(at,size);
                     let geo=fg_on_plane(p,c.point.xyz,c.normal.xyz);
                     if geo<=1e-4 {continue;}
+                    let lum_t=smoothstep(8.0,24.0,min(c.point.w,p.point.w));
                     var lum_w=1.0;
                     var hist_w=p.point.w;
-                    if mature && p.point.w>FG_FILTER_SHORT {
+                    if lum_t>0.0 {
                         let e_p=fg_probe_dc_luma(at,size);
                         let rel=abs(e_p-e_c)/max(max(e_p,e_c),1e-4);
-                        lum_w=exp(-rel*rel*lum_k);
-                        hist_w=min(p.point.w,c.point.w);
+                        lum_w=mix(1.0,exp(-rel*rel*1.25),lum_t);
+                        hist_w=mix(p.point.w,min(p.point.w,c.point.w),lum_t);
                     }
                     let w=geo*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*hist_w*lum_w;
                     if w<=1e-4 {continue;}
@@ -1074,7 +1135,7 @@ var<workgroup> fg_pair:array<u32,2>;
         fg_store(write_idx,size,carried);
         return;
     }
-    fg_accumulate(write_idx,prev_idx,state_idx,size,b,s,pixel);
+    fg_accumulate(write_idx,prev_idx,state_idx,size,b,s,pixel,false);
 }
 @compute @workgroup_size(8,4) fn fg_resolve(@builtin(global_invocation_id) grid:vec3<u32>) {
     let id=grid.xy+primary_region.xy;
