@@ -741,12 +741,17 @@ fn arena_night_preset_repro() {
         }
 
         // Exact Night preset lighting: 4 lux cool moon + 3 warm point lamps + 8000 lm panel light.
-        let el = 35.0f32.to_radians();
-        let az = 32.0f32.to_radians();
-        let toward = Vec3::new(-el.cos() * az.sin(), el.sin(), el.cos() * az.cos());
+        // Exact Ara EulerRot::XYZ for e_sun rotation [-35, -32, 0]: toward = quat * +Z.
+        let sun_q = glam::Quat::from_euler(
+            glam::EulerRot::XYZ,
+            -35.0f32.to_radians(),
+            -32.0f32.to_radians(),
+            0.0,
+        );
+        let toward = (sun_q * Vec3::Z).normalize();
         engine
             .set_sun(Some(Sun {
-                travel: -toward.normalize(),
+                travel: -toward,
                 illuminance: [4.0 * 0.64161, 4.0 * 0.73686, 4.0],
                 angular_radius: 0.5357f32.to_radians() * 0.5,
             }))
@@ -1122,12 +1127,17 @@ fn moving_emitter_and_jump_no_rings_or_flicker() {
             obj
         };
 
-        let el = 35.0f32.to_radians();
-        let az = 32.0f32.to_radians();
-        let toward = Vec3::new(-el.cos() * az.sin(), el.sin(), el.cos() * az.cos());
+        // Exact Ara EulerRot::XYZ for e_sun rotation [-35, -32, 0]: toward = quat * +Z.
+        let sun_q = glam::Quat::from_euler(
+            glam::EulerRot::XYZ,
+            -35.0f32.to_radians(),
+            -32.0f32.to_radians(),
+            0.0,
+        );
+        let toward = (sun_q * Vec3::Z).normalize();
         engine
             .set_sun(Some(Sun {
-                travel: -toward.normalize(),
+                travel: -toward,
                 illuminance: [4.0 * 0.64161, 4.0 * 0.73686, 4.0],
                 angular_radius: 0.5357f32.to_radians() * 0.5,
             }))
@@ -1349,4 +1359,559 @@ fn moving_emitter_and_jump_no_rings_or_flicker() {
         }
     }
     assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
+
+/// Exact My project 5 geometry + Night preset reproducer for:
+/// 1) Wall-edge shadow semicircle, sharp NW-corner shadow boundary, pillar-base shadow gap,
+///    and moving-camera shadow/GI flicker (View 1: close-up along North wall + Pillar 1 + Platform);
+/// 2) Second stair-step light bleed and wide-view shadow stability (View 2: elevated overview
+///    facing stairs, ramp, platform, Pillar 1, and North wall) on both HardwareRt and NonRt.
+#[test]
+#[ignore]
+fn arena_night_shadows_and_stairs_repro() {
+    const W: u32 = 1280;
+    const H: u32 = 720;
+    let dump_dir = std::env::var_os("RENDERLAB_SHADOWS_REPRO_DUMP").map(std::path::PathBuf::from);
+    if let Some(dir) = &dump_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    let vtx = |position: [f32; 3], normal: [f32; 3]| Vertex {
+        position,
+        normal,
+        uv: [0.0; 2],
+        color: [1.0; 4],
+    };
+    let push_quad = |verts: &mut Vec<Vertex>, idxs: &mut Vec<u32>, corners: [Vec3; 4]| {
+        let n = (corners[1] - corners[0])
+            .cross(corners[2] - corners[0])
+            .normalize_or_zero();
+        let base = verts.len() as u32;
+        for c in corners {
+            verts.push(vtx(c.to_array(), n.to_array()));
+        }
+        idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    let make_cylinder = |center: Vec3, radius: f32, half_h: f32| -> (Vec<Vertex>, Vec<u32>) {
+        const SEGS: u32 = 32;
+        let mut verts = Vec::new();
+        let mut idxs = Vec::new();
+        for i in 0..SEGS {
+            let a0 = (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / SEGS as f32) * std::f32::consts::TAU;
+            let (s0, c0) = a0.sin_cos();
+            let (s1, c1) = a1.sin_cos();
+            let n0 = [s0, 0.0, c0];
+            let n1 = [s1, 0.0, c1];
+            let base = verts.len() as u32;
+            verts.push(vtx((center + Vec3::new(radius * s0, -half_h, radius * c0)).to_array(), n0));
+            verts.push(vtx((center + Vec3::new(radius * s1, -half_h, radius * c1)).to_array(), n1));
+            verts.push(vtx((center + Vec3::new(radius * s1, half_h, radius * c1)).to_array(), n1));
+            verts.push(vtx((center + Vec3::new(radius * s0, half_h, radius * c0)).to_array(), n0));
+            idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        let top_c = verts.len() as u32;
+        verts.push(vtx((center + Vec3::new(0.0, half_h, 0.0)).to_array(), [0.0, 1.0, 0.0]));
+        for i in 0..SEGS {
+            let a0 = (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / SEGS as f32) * std::f32::consts::TAU;
+            let b = verts.len() as u32;
+            verts.push(vtx((center + Vec3::new(radius * a0.sin(), half_h, radius * a0.cos())).to_array(), [0.0, 1.0, 0.0]));
+            verts.push(vtx((center + Vec3::new(radius * a1.sin(), half_h, radius * a1.cos())).to_array(), [0.0, 1.0, 0.0]));
+            idxs.extend_from_slice(&[top_c, b, b + 1]);
+        }
+        let bot_c = verts.len() as u32;
+        verts.push(vtx((center + Vec3::new(0.0, -half_h, 0.0)).to_array(), [0.0, -1.0, 0.0]));
+        for i in 0..SEGS {
+            let a0 = (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / SEGS as f32) * std::f32::consts::TAU;
+            let b = verts.len() as u32;
+            verts.push(vtx((center + Vec3::new(radius * a1.sin(), -half_h, radius * a1.cos())).to_array(), [0.0, -1.0, 0.0]));
+            verts.push(vtx((center + Vec3::new(radius * a0.sin(), -half_h, radius * a0.cos())).to_array(), [0.0, -1.0, 0.0]));
+            idxs.extend_from_slice(&[bot_c, b, b + 1]);
+        }
+        (verts, idxs)
+    };
+
+    let make_wedge = |center: Vec3, half: Vec3| -> (Vec<Vertex>, Vec<u32>) {
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        let Vec3 { x, y, z } = half;
+        let fl = center + Vec3::new(-x, -y, z);
+        let fr = center + Vec3::new(x, -y, z);
+        let bl = center + Vec3::new(-x, -y, -z);
+        let br = center + Vec3::new(x, -y, -z);
+        let tl = center + Vec3::new(-x, y, -z);
+        let tr = center + Vec3::new(x, y, -z);
+        push_quad(&mut v, &mut idx, [bl, br, fr, fl]);
+        push_quad(&mut v, &mut idx, [br, bl, tl, tr]);
+        push_quad(&mut v, &mut idx, [fl, fr, tr, tl]);
+        for tri in [[fl, tl, bl], [fr, br, tr]] {
+            let n = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalize_or_zero();
+            let b = v.len() as u32;
+            for c in tri {
+                v.push(vtx(c.to_array(), n.to_array()));
+            }
+            idx.extend_from_slice(&[b, b + 1, b + 2]);
+        }
+        (v, idx)
+    };
+
+    let make_stairs = |center: Vec3, half: Vec3| -> (Vec<Vertex>, Vec<u32>) {
+        const STEPS: u32 = 8;
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        let Vec3 { x, y, z } = half;
+        let at_z = |i: u32| z - 2.0 * z * (i as f32 / STEPS as f32);
+        let at_y = |i: u32| -y + 2.0 * y * (i as f32 / STEPS as f32);
+        push_quad(
+            &mut v,
+            &mut idx,
+            [
+                center + Vec3::new(-x, -y, -z),
+                center + Vec3::new(x, -y, -z),
+                center + Vec3::new(x, -y, z),
+                center + Vec3::new(-x, -y, z),
+            ],
+        );
+        push_quad(
+            &mut v,
+            &mut idx,
+            [
+                center + Vec3::new(x, -y, -z),
+                center + Vec3::new(-x, -y, -z),
+                center + Vec3::new(-x, y, -z),
+                center + Vec3::new(x, y, -z),
+            ],
+        );
+        for i in 0..STEPS {
+            let (front, back, low, high) = (at_z(i), at_z(i + 1), at_y(i), at_y(i + 1));
+            push_quad(
+                &mut v,
+                &mut idx,
+                [
+                    center + Vec3::new(-x, low, front),
+                    center + Vec3::new(x, low, front),
+                    center + Vec3::new(x, high, front),
+                    center + Vec3::new(-x, high, front),
+                ],
+            );
+            push_quad(
+                &mut v,
+                &mut idx,
+                [
+                    center + Vec3::new(-x, high, front),
+                    center + Vec3::new(x, high, front),
+                    center + Vec3::new(x, high, back),
+                    center + Vec3::new(-x, high, back),
+                ],
+            );
+        }
+        let mut profile: Vec<(f32, f32)> = (0..STEPS)
+            .flat_map(|i| [(at_z(i), at_y(i)), (at_z(i), at_y(i + 1))])
+            .collect();
+        profile.push((-z, y));
+        profile.push((-z, -y));
+        let corner = profile.len() as u32 - 1;
+        for (sx, nx, flip) in [(-x, -1.0f32, false), (x, 1.0f32, true)] {
+            let base = v.len() as u32;
+            for &(pz, py) in &profile {
+                v.push(vtx((center + Vec3::new(sx, py, pz)).to_array(), [nx, 0.0, 0.0]));
+            }
+            for k in 0..(corner - 1) {
+                if flip {
+                    idx.extend_from_slice(&[base + corner, base + k + 1, base + k]);
+                } else {
+                    idx.extend_from_slice(&[base + corner, base + k, base + k + 1]);
+                }
+            }
+        }
+        (v, idx)
+    };
+
+    const FIELDS: &str = "alpha:f32 };";
+    const BUILT: &str = "decal_mr.x,alpha);";
+    const RETURN: &str = "    return exposed;";
+    let emissive_wgsl = format!(
+        "struct Parameters {{ glow:vec3<f32>, everywhere:f32, bounce:vec3<f32>, mapped:f32 }};\n\
+         const DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0),0.0,vec3<f32>(0.0),0.0);\n\
+         fn ara_glows(input:SurfaceInput) -> bool {{ return params.everywhere>0.5 || abs(input.material.base_color.a-0.737)<0.002; }}\n\
+         {}\n\
+         fn emission(s:Surface, input:SurfaceInput) -> vec3<f32> {{ return select(vec3<f32>(0.0),max(params.bounce,vec3<f32>(0.0)),ara_glows(input)); }}\n",
+        crate::STANDARD_PROGRAM
+            .replace(FIELDS, "alpha:f32, glow:vec3<f32> };")
+            .replace(
+                BUILT,
+                "decal_mr.x,alpha,select(vec3<f32>(0.0),max(params.glow,vec3<f32>(0.0)),ara_glows(input)));",
+            )
+            .replace(
+                RETURN,
+                "    return min(exposed+exposed_product(s.glow,vec3<f32>(1.0)),vec3<f32>(65504.0));",
+            )
+            .replace(
+                "s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),",
+                "s.n,s.base,s.alpha,s.metal,s.rough,s.glow,",
+            )
+            .replace(
+                "    s.alpha=m.alpha;\n    return s;",
+                "    s.alpha=m.alpha;\n    s.glow=m.emission;\n    return s;",
+            )
+    );
+
+    for path in [RenderPath::HardwareRt, RenderPath::NonRt] {
+        let adapter = test_adapter();
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let mut engine = Engine::new(
+            &adapter,
+            EngineDescriptor {
+                path,
+                experimental_ray_query,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let emissive_prog = engine.create_program("ara_emissive", &emissive_wgsl).unwrap();
+
+        let spawn_mesh = |engine: &mut Engine, vertices: &[Vertex], indices: &[u32], colour, roughness| {
+            let mesh = engine.create_mesh(&MeshData { vertices, indices }).unwrap();
+            let material = engine
+                .create_material(&MaterialDesc {
+                    base_color: colour,
+                    roughness,
+                    double_sided: true,
+                    ..Default::default()
+                })
+                .unwrap();
+            engine.spawn(mesh, material, Mat4::IDENTITY).unwrap()
+        };
+        let spawn_box = |engine: &mut Engine, c, h, colour, roughness| {
+            let (v, i) = cube(c, h);
+            spawn_mesh(engine, &v, &i, colour, roughness)
+        };
+
+        // Exact My project 5 geometry.
+        spawn_box(&mut engine, [0.0, -0.25, 0.0], [20.0, 0.25, 20.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn_box(&mut engine, [0.0, 2.0, -19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [0.0, 2.0, 19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [-19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [0.0, 1.0, -8.0], [4.0, 1.0, 3.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn_box(&mut engine, [-12.4, 2.5, 4.0], [0.6, 2.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [-7.6, 2.5, 4.0], [0.6, 2.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [-10.0, 4.5, 4.0], [1.8, 0.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        // Ramp & Stairs.
+        let (rv, ri) = make_wedge(Vec3::new(-2.0, 1.0, -2.0), Vec3::new(1.5, 1.0, 3.0));
+        spawn_mesh(&mut engine, &rv, &ri, [0.04, 0.16, 0.60, 1.0], 0.78);
+        let (sv, si) = make_stairs(Vec3::new(2.0, 1.0, -3.0), Vec3::new(1.5, 1.0, 2.0));
+        spawn_mesh(&mut engine, &sv, &si, [0.70, 0.67, 0.62, 1.0], 0.90);
+        // 4 Cylindrical Pillars.
+        for [px, pz] in [[-14.0, -14.0], [14.0, -14.0], [-14.0, 14.0], [14.0, 14.0]] {
+            let (cv, ci) = make_cylinder(Vec3::new(px, 2.0, pz), 0.6, 2.0);
+            spawn_mesh(&mut engine, &cv, &ci, [0.70, 0.67, 0.62, 1.0], 0.90);
+        }
+        // Covers & Crates.
+        spawn_box(&mut engine, [6.0, 0.6, 6.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [-6.0, 0.6, 9.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [9.0, 0.6, -2.0], [0.3, 0.6, 1.0], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [12.0, 0.6, 11.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [-14.0, 0.6, -5.0], [0.3, 0.6, 1.0], [0.52, 0.18, 0.04, 1.0], 0.78);
+        for pos in [
+            [5.0, 0.4, 12.0],
+            [5.9, 0.4, 12.0],
+            [5.45, 1.2, 12.0],
+            [-7.0, 0.4, 13.0],
+            [-1.2, 2.4, -9.0],
+            [0.0, 2.4, -9.5],
+        ] {
+            spawn_box(&mut engine, pos, [0.4, 0.4, 0.4], [0.4, 0.24, 0.12, 1.0], 0.55);
+        }
+        // Emissive Light panel at exact My project 5 position [0, 3, -19.303816].
+        {
+            let (vertices, indices) = cube([0.0, 3.0, -19.303816], [2.0, 0.5, 0.05]);
+            let mesh = engine
+                .create_mesh(&MeshData {
+                    vertices: &vertices,
+                    indices: &indices,
+                })
+                .unwrap();
+            let mat = engine
+                .create_material(&MaterialDesc {
+                    base_color: [0.8, 0.8, 0.8, 0.737],
+                    roughness: 0.4,
+                    double_sided: true,
+                    program: Some(emissive_prog),
+                    ..Default::default()
+                })
+                .unwrap();
+            engine
+                .set_material_parameters(
+                    mat,
+                    &[
+                        ("glow", crate::Value::Vec3([3000.0, 2250.0, 1450.0])),
+                        ("everywhere", crate::Value::F32(0.0)),
+                        ("bounce", crate::Value::Vec3([3000.0, 2250.0, 1450.0])),
+                        ("mapped", crate::Value::F32(0.0)),
+                    ],
+                )
+                .unwrap();
+            let obj = engine.spawn(mesh, mat, Mat4::IDENTITY).unwrap();
+            engine.set_casts_shadows(obj, false).unwrap();
+        }
+
+        // Exact Ara EulerRot::XYZ for e_sun rotation [-35, -32, 0]: toward = quat * +Z.
+        let sun_q = glam::Quat::from_euler(
+            glam::EulerRot::XYZ,
+            -35.0f32.to_radians(),
+            -32.0f32.to_radians(),
+            0.0,
+        );
+        let toward = (sun_q * Vec3::Z).normalize();
+        engine
+            .set_sun(Some(Sun {
+                travel: -toward,
+                illuminance: [4.0 * 0.64161, 4.0 * 0.73686, 4.0],
+                angular_radius: 0.5357f32.to_radians() * 0.5,
+            }))
+            .unwrap();
+        let lm_to_cd = |lm: f32, c: [f32; 3]| {
+            let s = lm / (4.0 * std::f32::consts::PI);
+            [c[0] * s, c[1] * s, c[2] * s]
+        };
+        engine
+            .set_lights(&[
+                crate::engine::Light::Point {
+                    position: Vec3::new(0.0, 3.6, -8.0),
+                    candela: lm_to_cd(6000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Point {
+                    position: Vec3::new(-10.0, 4.4, 5.5),
+                    candela: lm_to_cd(5000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Point {
+                    position: Vec3::new(12.0, 2.5, 12.0),
+                    candela: lm_to_cd(4000.0, [1.0, 0.72, 0.45]),
+                    range: Some(14.0),
+                    source_radius: 0.1,
+                    cast_shadows: Some(true),
+                },
+                crate::engine::Light::Spot {
+                    position: Vec3::new(0.0, 3.0, -19.35),
+                    travel: Vec3::Z,
+                    candela: lm_to_cd(8000.0, [1.0, 0.75, 0.48]),
+                    range: Some(16.0),
+                    inner: 0.0,
+                    outer: 1.55,
+                    source_radius: 0.5,
+                    cast_shadows: Some(true),
+                },
+            ])
+            .unwrap();
+        engine
+            .set_sky(crate::engine::Sky::Atmosphere(
+                crate::engine::AtmosphereMedium::default(),
+            ))
+            .unwrap();
+        engine
+            .set_settings(crate::engine::Settings {
+                aerial_perspective: true,
+                height_fog: Some(crate::engine::HeightFog {
+                    density: 0.004,
+                    falloff: 1.0 / 30.0,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let view = engine
+            .create_view(&ViewDesc {
+                look: ViewLook {
+                    exposure: Exposure::Manual { stops: -4.263 },
+                    post: crate::PostSettings {
+                        bloom: 0.05,
+                        motion_blur: false,
+                        tonemapper: crate::Tonemapper::Filmic,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..ViewDesc::new(W, H)
+            })
+            .unwrap();
+
+        let save = |name: &str, img: &Image| {
+            let Some(dir) = &dump_dir else {
+                return;
+            };
+            let p = dir.join(name);
+            let file = std::fs::File::create(&p).unwrap();
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&img.rgba8).unwrap();
+        };
+        let step = |engine: &mut Engine, camera: &Camera| {
+            engine.tick(1.0 / 60.0).unwrap();
+            engine.render_view(view, camera).unwrap();
+        };
+        let tag = if path == RenderPath::HardwareRt { "rt" } else { "nonrt" };
+
+        let diff_stats = |a: &Image, b: &Image| -> (f64, f64, f64) {
+            let (mut sum, mut bsq, mut bmax, mut bn) = (0.0f64, 0.0f64, 0.0f64, 0u32);
+            for (pa, pb) in a.rgba8.chunks_exact(4).zip(b.rgba8.chunks_exact(4)) {
+                sum += (f64::from(pa[0]) - f64::from(pb[0])).abs()
+                    + (f64::from(pa[1]) - f64::from(pb[1])).abs()
+                    + (f64::from(pa[2]) - f64::from(pb[2])).abs();
+            }
+            for ty in (0..H as usize).step_by(16) {
+                for tx in (0..W as usize).step_by(16) {
+                    if ty + 16 > H as usize || tx + 16 > W as usize {
+                        continue;
+                    }
+                    let (mut dr, mut dg, mut db) = (0.0, 0.0, 0.0);
+                    for dy in 0..16 {
+                        for dx in 0..16 {
+                            let i = ((ty + dy) * W as usize + (tx + dx)) * 4;
+                            dr += f64::from(a.rgba8[i]) - f64::from(b.rgba8[i]);
+                            dg += f64::from(a.rgba8[i + 1]) - f64::from(b.rgba8[i + 1]);
+                            db += f64::from(a.rgba8[i + 2]) - f64::from(b.rgba8[i + 2]);
+                        }
+                    }
+                    let d = (dr * dr + dg * dg + db * db).sqrt() / 256.0;
+                    bsq += d * d;
+                    bmax = bmax.max(d);
+                    bn += 1;
+                }
+            }
+            (sum / (3.0 * f64::from(W * H)), (bsq / f64::from(bn)).sqrt(), bmax)
+        };
+
+        // View 1: Close-up along North wall, Pillar 1, and Platform (matches Islam's Image 1).
+        let wall_cam = |t: f32| {
+            let eye = Vec3::new(3.8 + t * 2.5, 4.8 + t * 0.4, -6.8 + t * 1.5);
+            let target = Vec3::new(-5.8, 1.2, -15.0);
+            Camera::look_at(eye, target, Vec3::Y, 75.0f32.to_radians(), 0.05, 4000.0).unwrap()
+        };
+        engine.cut_view(view);
+        for _ in 0..48 {
+            step(&mut engine, &wall_cam(0.0));
+        }
+        let wall_ref = engine.capture_view(view).unwrap();
+        save(&format!("repro_{tag}_wall_ref.png"), &wall_ref);
+        for f in 1..=10 {
+            step(&mut engine, &wall_cam(f as f32 / 10.0));
+        }
+        for f in (0..10).rev() {
+            step(&mut engine, &wall_cam(f as f32 / 10.0));
+        }
+        let wall_move = engine.capture_view(view).unwrap();
+        save(&format!("repro_{tag}_wall_move.png"), &wall_move);
+        let (wm_abs, wm_brms, wm_bmax) = diff_stats(&wall_move, &wall_ref);
+
+        // View 2: Exact Islam Image 2 angle (from SW looking NE across blue ramp, stairs,
+        // platform, Pillar 1, and North wall) to reproduce 2nd stair-step GI bleed.
+        let stairs_cam = |t: f32| {
+            let eye = Vec3::new(-9.5 + t * 3.5, 8.2, 5.5 + t * 1.5);
+            let target = Vec3::new(0.5, 1.3, -8.5);
+            Camera::look_at(eye, target, Vec3::Y, 75.0f32.to_radians(), 0.05, 4000.0).unwrap()
+        };
+        engine.cut_view(view);
+        for _ in 0..48 {
+            step(&mut engine, &stairs_cam(0.0));
+        }
+        let stairs_ref = engine.capture_view(view).unwrap();
+        save(&format!("repro_{tag}_stairs_ref.png"), &stairs_ref);
+        for f in 1..=10 {
+            step(&mut engine, &stairs_cam(f as f32 / 10.0));
+        }
+        for f in (0..10).rev() {
+            step(&mut engine, &stairs_cam(f as f32 / 10.0));
+        }
+        let stairs_move = engine.capture_view(view).unwrap();
+        save(&format!("repro_{tag}_stairs_move.png"), &stairs_move);
+        let (sm_abs, sm_brms, sm_bmax) = diff_stats(&stairs_move, &stairs_ref);
+
+        // View 3: Close-range walk across the 4m/12m sun-shadow cascade boundary facing the
+        // NW corner & Pillar 1 shadow on the North wall (checks cascade clipping & local shadow flicker).
+        let close_cam = |t: f32| {
+            let eye = Vec3::new(-10.5, 2.2, -16.8 + t * 5.0);
+            let target = Vec3::new(-14.5, 1.2, -18.5);
+            Camera::look_at(eye, target, Vec3::Y, 75.0f32.to_radians(), 0.05, 4000.0).unwrap()
+        };
+        engine.cut_view(view);
+        for _ in 0..48 {
+            step(&mut engine, &close_cam(0.0));
+        }
+        let close_ref = engine.capture_view(view).unwrap();
+        save(&format!("repro_{tag}_close_ref.png"), &close_ref);
+        for f in 1..=12 {
+            step(&mut engine, &close_cam(f as f32 / 12.0));
+        }
+        for f in (0..12).rev() {
+            step(&mut engine, &close_cam(f as f32 / 12.0));
+        }
+        let close_move = engine.capture_view(view).unwrap();
+        save(&format!("repro_{tag}_close_move.png"), &close_move);
+        let (cm_abs, cm_brms, cm_bmax) = diff_stats(&close_move, &close_ref);
+
+        let step2_luma = |img: &Image| -> f64 {
+            let (mut sum, mut n) = (0.0f64, 0u32);
+            for y in 368..=372 {
+                for x in 755..770 {
+                    let i = (y * W as usize + x) * 4;
+                    sum += 0.2126 * f64::from(img.rgba8[i])
+                        + 0.7152 * f64::from(img.rgba8[i + 1])
+                        + 0.0722 * f64::from(img.rgba8[i + 2]);
+                    n += 1;
+                }
+            }
+            sum / f64::from(n)
+        };
+        let s2_ref = step2_luma(&stairs_ref);
+        let s2_mov = step2_luma(&stairs_move);
+        let cyl_fringe_max = (55..59usize)
+            .map(|x| close_move.rgba8[(500 * W as usize + x) * 4])
+            .max()
+            .unwrap();
+        let top_edge_min = (411..420usize)
+            .map(|x| wall_move.rgba8[(244 * W as usize + x) * 4])
+            .min()
+            .unwrap();
+
+        eprintln!(
+            "repro path={tag} wall(abs={wm_abs:.2},brms={wm_brms:.2},bmax={wm_bmax:.2},edge_min={top_edge_min}) stairs(abs={sm_abs:.2},brms={sm_brms:.2},bmax={sm_bmax:.2},step2_ref={s2_ref:.1},step2_mov={s2_mov:.1}) close(abs={cm_abs:.2},brms={cm_brms:.2},bmax={cm_bmax:.2},fringe_max={cyl_fringe_max})"
+        );
+        assert!(
+            s2_ref < 45.0 && s2_mov < 45.0,
+            "{tag}: second stair step light bleed regressed (ref={s2_ref:.1}, mov={s2_mov:.1})"
+        );
+        assert!(
+            wm_brms < 2.6 && wm_bmax < 25.0,
+            "{tag}: wall motion stability regressed (brms={wm_brms:.2}, bmax={wm_bmax:.2})"
+        );
+        assert!(
+            sm_brms < 2.3 && sm_bmax < 22.0,
+            "{tag}: stairs motion stability regressed (brms={sm_brms:.2}, bmax={sm_bmax:.2})"
+        );
+        assert!(
+            cm_brms < 2.6 && cm_bmax < 28.0,
+            "{tag}: close walk motion stability regressed (brms={cm_brms:.2}, bmax={cm_bmax:.2})"
+        );
+        assert!(
+            cyl_fringe_max < 22,
+            "{tag}: moving cylinder silhouette 2-px fringe regressed (max={cyl_fringe_max})"
+        );
+        assert!(
+            top_edge_min >= 42,
+            "{tag}: moving wall top edge notch breakup regressed (min={top_edge_min})"
+        );
+    }
 }

@@ -351,6 +351,7 @@ pub(super) struct LocalMaps {
     keys: Vec<Option<[u8; 32]>>,
     slots: Vec<Option<u32>>,
     strengths: Vec<f32>,
+    started: bool,
     tiles: Vec<Option<lc::Tile>>,
     /// The tick whose selection has been made (`Renderer::begin_tick`).
     tick: u64,
@@ -366,6 +367,7 @@ impl LocalMaps {
             keys: vec![],
             slots: vec![],
             strengths: vec![],
+            started: false,
             tiles: vec![],
             tick: 0,
         }
@@ -383,6 +385,7 @@ impl LocalMaps {
     pub fn test_reset_selection(&mut self) {
         self.slots.clear();
         self.strengths.clear();
+        self.started = false;
         self.tiles.clear();
     }
 }
@@ -427,9 +430,13 @@ impl Renderer {
         }
     }
     /// A camera cut for the selected view: its ray-shadowed lights are chosen afresh, at
-    /// full strength (`LocalShadows::rays`).
+    /// full strength (`LocalShadows::rays`). Single-view non-RT shadow maps also snap to full
+    /// strength on the cut frame so TR1 never averages unshadowed fade-in frames into shadows.
     pub(crate) fn cut_light_selection(&mut self) {
         self.view.clusters.rays = lc::RaySelection::default();
+        if self.parked.is_empty() {
+            self.local_maps.started = false;
+        }
     }
     pub fn light_cluster_stats(&self) -> LightClusterStats {
         self.view.clusters.stats.clone()
@@ -496,8 +503,33 @@ impl Renderer {
                 let mut demands = vec![&desired[..]];
                 demands.extend(self.parked.iter().map(|(_, v)| &v.clusters.desired[..]));
                 let wanted = union(&demands, count);
-                let (slots, strengths) =
-                    lc::transition(&shared.slots, &shared.strengths, &wanted, count);
+                let (slots, strengths) = if shared.started {
+                    lc::transition(&shared.slots, &shared.strengths, &wanted, count)
+                } else {
+                    // First frame or single-view cut: admit wanted lights at full shadow strength
+                    // immediately (matching RaySelection) while preserving existing slot indices so
+                    // already-rasterized shadow tiles stay cached across cuts.
+                    let mut slots = vec![None; count as usize];
+                    let mut strengths = vec![0.0; count as usize];
+                    for (slot, prev) in shared.slots.iter().take(count as usize).enumerate() {
+                        if let Some(light) = *prev
+                            && wanted.contains(&Some(light))
+                        {
+                            slots[slot] = Some(light);
+                            strengths[slot] = 1.0;
+                        }
+                    }
+                    for light in wanted.iter().flatten() {
+                        if !slots.contains(&Some(*light))
+                            && let Some(slot) = slots.iter().position(Option::is_none)
+                        {
+                            slots[slot] = Some(*light);
+                            strengths[slot] = 1.0;
+                        }
+                    }
+                    (slots, strengths)
+                };
+                shared.started = true;
                 shared.strengths = strengths;
                 state.desired = desired;
                 slots

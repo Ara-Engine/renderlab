@@ -423,10 +423,15 @@ fn tr1_second(t:vec2<i32>,anchor:u32)->Tr1Second {
 // normal, and tangent plane match; the second slot matches placement, side, and packed normal
 // (preventing bright front-face silhouette slots from leaking across 90-degree edges onto newly
 // revealed grazing faces of the same mesh). Still frames read the pixel's own slots.
+// True when the current pixel sits on a sub-pixel-thin 90-degree crease right at a mesh
+// silhouette (e.g. a 0.3 px tall wall top cap meeting the front wall against sky), where the
+// pixel footprint physically spans both faces and must temporally anti-alias them together.
+var<private> tr1_subpixel_crease:bool;
 fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
     if !tr1_inside(t,size) {return vec4<f32>(0.0);}
     let thin=s.id!=0u && (primary_placements[s.id-1u]&0x20000000u)!=0u;
     let cur_n=select(s.previous_normal,-s.previous_normal,s.side==0u);
+    let cur_nbits=select(0u,tr1_pack_normal6(cur_n),s.id!=0u);
     let a=textureLoad(tr1_anchor_in,t,0).xy;
     // Loaded with the anchor, not after its tests, so the two loads overlap.
     let colour=textureLoad(tr1_colour_in,t,0);
@@ -434,15 +439,28 @@ fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
         var ok=s.id==0u || tr1_still(s);
         if !ok {
             let point=tr1_anchor_point(t,bitcast<f32>(a.y),vec2<f32>(size));
-            let plane_ok=abs(tr1_dot(s.previous_normal,point-s.previous_point.xyz))<=4.0*tr1.previous_eye.w*expected;
-            let normal_ok=tr1_dot(tr1_unpack_normal6(a.x),cur_n)>=0.55;
-            ok=plane_ok && normal_ok;
+            let prev_n=tr1_unpack_normal6(a.x);
+            let diff=point-s.previous_point.xyz;
+            let pixel_w=tr1.previous_eye.w*expected;
+            let reach=4.0*pixel_w;
+            let edge_r=1.8*pixel_w;
+            let near_edge=tr1_dot(diff,diff)<=edge_r*edge_r;
+            let s_plane_ok=abs(tr1_dot(s.previous_normal,diff))<=reach;
+            let crease_ok=tr1_subpixel_crease && s.id==tr1_self && s_plane_ok;
+            let plane_ok=s_plane_ok
+                && ((a.x&TR1_NORMAL_MASK)==cur_nbits || abs(tr1_dot(prev_n,diff))<=reach);
+            let normal_ok=tr1_dot(prev_n,cur_n)>=0.88;
+            ok=near_edge || crease_ok || (plane_ok && normal_ok);
         }
         if ok {return colour;}
     }
     let second=tr1_second(t,a.x);
     if second.id==s.id && !(thin && second.side!=s.side) && second.weight>0.0 {
-        if s.id==0u || tr1_still(s) || tr1_dot(tr1_unpack_normal6(second.normal_bits),cur_n)>=0.55 {
+        let prev_v=tr1.previous_eye.xyz-s.previous_point.xyz;
+        if s.id==0u || tr1_still(s)
+            || (tr1_subpixel_crease && s.id==tr1_self)
+            || (tr1_dot(tr1_unpack_normal6(second.normal_bits),cur_n)>=0.90
+                && ((second.normal_bits&TR1_NORMAL_MASK)==cur_nbits || tr1_dot(cur_n,prev_v)>0.15*expected)) {
             return vec4<f32>(second.colour,second.weight);
         }
     }
@@ -483,6 +501,13 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     if s.id!=0u {
         let v=s.previous_point.xyz-tr1.previous_eye.xyz;
         expected=sqrt(tr1_dot(v,v));
+        if !tr1_still(s) {
+            let cur_n=select(s.previous_normal,-s.previous_normal,s.side==0u);
+            // A surface that faced away from the previous eye could not have been visible
+            // there (convex self-disocclusion on cylinders, spheres, pillars): reject history
+            // so grazing limbs never copy brighter front-facing colours across frames.
+            if tr1_dot(cur_n,-v)<=0.0 {var rejected:Tr1History;return rejected;}
+        }
     }
     let scale=tr1.jitter.z;
     var h:Tr1History;
@@ -610,6 +635,7 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
     let q=tr1_fetch_position(p,o,vec2<f32>(size));
     let base=vec2<i32>(floor(q));
     let f=q-floor(q);
+    let o_still=tr1_still(o);
     var total=0.0;var coverage=0.0;var weight=0.0;
     var taps=vec4<f32>(-1.0);
     for(var i=0;i<4;i+=1) {
@@ -621,9 +647,23 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
         let second=tr1_second(t,ax);
         var c=-1.0;var n=0.0;
         if first==o.id {
-            if second.id==TR1_NONE {c=1.0;n=textureLoad(tr1_colour_in,t,0).w;} else {c=second.coverage;n=second.coverage_weight;}
+            if second.id==TR1_NONE {
+                c=1.0;
+                n=textureLoad(tr1_colour_in,t,0).w;
+                if !o_still {n=min(n,tr1.windows.z);}
+            } else {
+                c=second.coverage;n=second.coverage_weight;
+            }
         } else if first==u {
-            if second.id==TR1_NONE {c=0.0;n=textureLoad(tr1_colour_in,t,0).w;} else if second.id==o.id {c=1.0-second.coverage;n=second.coverage_weight;} else {c=0.0;n=second.coverage_weight;}
+            if second.id==TR1_NONE {
+                c=0.0;
+                n=textureLoad(tr1_colour_in,t,0).w;
+                if !o_still {n=min(n,tr1.windows.z);}
+            } else if second.id==o.id {
+                c=1.0-second.coverage;n=second.coverage_weight;
+            } else {
+                c=0.0;n=second.coverage_weight;
+            }
         } else if second.id==o.id {
             c=1.0-second.coverage;n=second.coverage_weight;
         }
@@ -637,17 +677,15 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
     let blur=fma(f.x,1.0-f.x,f.y*(1.0-f.y));
     var window=tr1.windows.x;
     if blur>0.0 {window=min(min(window,1.0+tr1.windows.w/blur),tr1.windows.z);}
-    if blur>0.0 {
+    if blur>0.0 && all(taps>=vec4<f32>(0.0)) {
         // The edge normal: the coverage gradient over the rows and columns of valid taps.
         var g=vec2<f32>(0.0);
-        if taps.x>=0.0 && taps.y>=0.0 {g.x+=taps.y-taps.x;}
-        if taps.z>=0.0 && taps.w>=0.0 {g.x+=taps.w-taps.z;}
-        if taps.x>=0.0 && taps.z>=0.0 {g.y+=taps.z-taps.x;}
-        if taps.y>=0.0 && taps.w>=0.0 {g.y+=taps.w-taps.y;}
+        g.x=(taps.y-taps.x)+(taps.w-taps.z);
+        g.y=(taps.z-taps.x)+(taps.w-taps.y);
         let gg=tr1_dot(vec3<f32>(g,0.0),vec3<f32>(g,0.0));
-        if gg>=0.0025 {
+        if gg>=0.01 {
             let n=g*inverseSqrt(gg);
-            var sd=0.0;var sw=0.0;
+            var sd=0.0;var sw=0.0;var partials=0u;
             for(var i=0;i<4;i+=1) {
                 let c=taps[i];
                 if c<=0.001 || c>=0.999 {continue;}
@@ -656,8 +694,9 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
                 // This tap's edge distance at its centre, moved to the fetch point.
                 sd=fma(tr1_box_distance(c,n)+tr1_dot(vec3<f32>(n,0.0),vec3<f32>(f-vec2<f32>(d),0.0)),w,sd);
                 sw+=w;
+                partials+=1u;
             }
-            if sw>0.0 {
+            if partials>=1u && sw>0.0 {
                 return vec3<f32>(tr1_box_area(sd/sw,n),weight,min(min(tr1.windows.x,tr1.windows.z),tr1.windows.y));
             }
         }
@@ -741,7 +780,7 @@ fn tr1_wide_start(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->vec4<f32> {
         let o=vec2<i32>(i%5,i/5)-vec2<i32>(2);
         let t=p+o;
         if !tr1_inside(t,size) || tr1_sample_id(t)!=s.id {continue;}
-        if any(o!=vec2<i32>(0)) && abs(tr1_dot(s.normal,tr1_sample_point(t,s.id)-s.point.xyz))>reach {continue;}
+        if any(o!=vec2<i32>(0)) && (abs(tr1_dot(s.normal,tr1_sample_point(t,s.id)-s.point.xyz))>reach || abs(tr1_dot(s.normal,tr1_sample_normal(t,s.id)))<0.88) {continue;}
         let d=abs(vec2<f32>(o)+tr1.jitter.xy)/3.0;
         let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
         sum=fma(textureLoad(tr1_sample,t,0).xyz,vec3<f32>(w),sum);
@@ -788,8 +827,15 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
     }
     if (tr1.flags.y&TR1_SPATIAL_START)!=0u {
         var start=vec4<f32>(0.0);
-        if TR1_WIDE_START && tr1.flags.x==0u && s.id!=0u && tr1_native() {start=tr1_wide_start(p,s,size);}
-        if start.w<=0.0 {start=tr1_spatial(p,s.id,size);}
+        let live_wide=TR1_WIDE_START && tr1.flags.x==0u && s.id!=0u && tr1_native();
+        if live_wide {start=tr1_wide_start(p,s,size);}
+        if start.w>0.0 {
+            // Live disocclusion: show the clean spatially filtered start immediately, but record
+            // its true 1-frame temporal age so any 1-frame disocclusion GI offset flushes out
+            // immediately instead of stamping a 4-frame silhouette band across walls and floors.
+            return vec4<f32>(start.xyz,1.0);
+        }
+        start=tr1_spatial(p,s.id,size);
         return vec4<f32>(start.xyz,clamp(start.w,1.0,max(tr1.starts.y,1.0)));
     }
     return vec4<f32>(sample,1.0);
@@ -823,6 +869,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     tr1_local=p-corner-vec2<i32>(1);
     let s=tr1_surface(p,size);
     tr1_self=s.id;
+    tr1_subpixel_crease=false;
     // A silhouette pixel: some 3x3 sample of this frame shows another surface. The other
     // surface is the nearest such sample's (edge neighbours before corners).
     var other=-1;
@@ -924,6 +971,18 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     }
     var o=u;
     if occluder_is_s {o=s;}
+    // Detect a sub-pixel-thin 90-degree face right on a moving mesh silhouette (e.g. a wall's
+    // grazing 0.3 px top cap between sky and its vertical front face): one cardinal side leaves
+    // the mesh and the opposite cardinal side hits a perpendicular face of the same mesh.
+    if other>=0 && s.id!=0u && !tr1_still(s) {
+        let up_same=tr1_ring(1)==s.id && tr1_inside(p+vec2<i32>(0,-1),size) && abs(tr1_dot(s.normal,tr1_sample_normal(tr1_map(p+vec2<i32>(0,-1)),s.id)))>=0.70;
+        let dn_same=tr1_ring(7)==s.id && tr1_inside(p+vec2<i32>(0,1),size) && abs(tr1_dot(s.normal,tr1_sample_normal(tr1_map(p+vec2<i32>(0,1)),s.id)))>=0.70;
+        let lt_same=tr1_ring(3)==s.id && tr1_inside(p+vec2<i32>(-1,0),size) && abs(tr1_dot(s.normal,tr1_sample_normal(tr1_map(p+vec2<i32>(-1,0)),s.id)))>=0.70;
+        let rt_same=tr1_ring(5)==s.id && tr1_inside(p+vec2<i32>(1,0),size) && abs(tr1_dot(s.normal,tr1_sample_normal(tr1_map(p+vec2<i32>(1,0)),s.id)))>=0.70;
+        let perp_v=(tr1_ring(1)!=s.id && tr1_ring(7)==s.id && !dn_same) || (tr1_ring(7)!=s.id && tr1_ring(1)==s.id && !up_same);
+        let perp_h=(tr1_ring(3)!=s.id && tr1_ring(5)==s.id && !rt_same) || (tr1_ring(5)!=s.id && tr1_ring(3)==s.id && !lt_same);
+        tr1_subpixel_crease=perp_v || perp_h;
+    }
     let mine=tr1_continue(p,s,sample,size);
     // The other surface keeps its history (no sample of it this frame), or starts from this
     // frame's samples of it.
@@ -946,12 +1005,33 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // tent-weighted share of this frame's 3x3 samples.
     var c=vec3<f32>(0.0);
     if tr1.flags.x==0u {c=tr1_coverage(p,o,select(s.id,u.id,occluder_is_s),size);}
-    var coverage=tr1_share(o.id);
+    let share=tr1_share(o.id);
+    var coverage=share;
     var coverage_weight=1.0;
     if c.y>0.0 {
         let w=tr1_weight(p);
-        coverage_weight=clamp(c.y+w,1.0,max(c.z,1.0));
-        coverage=fma(select(0.0,1.0,occluder_is_s)-c.x,w/coverage_weight,c.x);
+        if !tr1_still(o) {
+            // Under motion, pure diagonal-corner touches (zero cardinal hits when outside, or
+            // all 4 cardinal hits when inside) cannot physically drag an occluder 2 pixels past
+            // its silhouette or chomp 2 pixels into a solid corner; 1-pixel edges keep full
+            // coverage-window tracking so sub-pixel Halton jitter stays smooth and monotonic.
+            let card_hits=u32(tr1_ring(1)==o.id)+u32(tr1_ring(3)==o.id)+u32(tr1_ring(5)==o.id)+u32(tr1_ring(7)==o.id);
+            var clamped_c=c.x;
+            var max_w=max(c.z,1.0);
+            if !occluder_is_s && card_hits==0u {
+                clamped_c=min(c.x,share);
+                max_w=min(max_w,4.0);
+            } else if occluder_is_s && card_hits==4u {
+                clamped_c=max(c.x,share);
+                max_w=min(max_w,4.0);
+            }
+            let moved_w=select(min(c.y,max_w),1.0,clamped_c!=c.x);
+            coverage_weight=clamp(moved_w+w,1.0,max_w);
+            coverage=fma(select(0.0,1.0,occluder_is_s)-clamped_c,w/coverage_weight,clamped_c);
+        } else {
+            coverage_weight=clamp(c.y+w,1.0,max(c.z,1.0));
+            coverage=fma(select(0.0,1.0,occluder_is_s)-c.x,w/coverage_weight,c.x);
+        }
     }
     var front=theirs.xyz;var back=mine.xyz;
     if occluder_is_s {front=mine.xyz;back=theirs.xyz;}

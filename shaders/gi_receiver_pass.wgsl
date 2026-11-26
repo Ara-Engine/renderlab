@@ -122,8 +122,9 @@ const FG_CONE:f32=0.45764912225414734;
 // the horizon into the zenith and greyed sky-lit shadow.
 const FG_SKY_ALPHA:f32=0.0;
 const FG_SEARCH:i32=2;
-// A probe's plane reaches this fraction of its footprint along its normal (the Gaussian width).
-const FG_PLANE:f32=0.5;
+// A probe's plane reaches this fraction of its footprint along its normal on flat surfaces,
+// relaxing slightly on smoothly curved surfaces (where chord sag scales with sin(theta)).
+const FG_PLANE:f32=0.12;
 // The incoming radiance as the lighting cache splits it, so shading reads a probe as it reads a
 // cell (the sky's visibility for specular, es_prepare, and the bounce lobe of glossy surfaces,
 // gi_rx_bounce_radiance): floats 0-26 the sky the probe's rays missed into (L2), 27 a pad, 28-39
@@ -280,13 +281,24 @@ fn fg_footprint(pixel:vec2<u32>,size:vec2<u32>,world:vec3<f32>)->f32 {
     let pixel_angle=length(ray.dx_far-ray.dx_near)/max(length(ray.far-ray.near),1e-30);
     return f32(FG_TILE)*pixel_angle*length(world-lighting.eye);
 }
-// How far a point and normal lie on a probe's plane (Gaussian in plane distance over
-// FG_PLANE of its footprint, normals as cos^4): 1 on it, 0 off it or for an invalid probe.
+// How far a point and normal lie on a probe's plane: symmetric plane distance with a hard
+// cutoff beyond two widths so parallel steps/ledges (e.g. 0.25 m stair risers) never bleed from
+// the tread above, curvature-scaled relaxation for smooth curved geometry, and cos^8 normal
+// weighting with a 0.70 cutoff to prevent front-face cylinder probes from leaking onto grazing
+// limbs. Returns 1 on the plane and 0 off it or for an invalid probe.
 fn fg_on_plane(p:FgPlane,world:vec3<f32>,n:vec3<f32>)->f32 {
     if p.point.w<=0.0 {return 0.0;}
-    let plane=abs(dot(p.normal.xyz,world-p.point.xyz))/max(FG_PLANE*p.normal.w,1e-6);
-    let facing=max(dot(p.normal.xyz,n),0.0);
-    return exp(-plane*plane)*facing*facing*facing*facing;
+    let facing=dot(p.normal.xyz,n);
+    if facing<=0.82 {return 0.0;}
+    let d=world-p.point.xyz;
+    let pdist=max(abs(dot(p.normal.xyz,d)),abs(dot(n,d)));
+    let curve=sqrt(max(1.0-facing*facing,0.0));
+    let scale=max((FG_PLANE+0.25*curve)*p.normal.w,1e-6);
+    let plane=pdist/scale;
+    if plane>=2.0 {return 0.0;}
+    let f2=facing*facing;
+    let f4=f2*f2;
+    return exp(-plane*plane)*f4*f4;
 }
 fn fg_basis(n:vec3<f32>)->mat3x3<f32> {
     let s=select(-1.0,1.0,n.z>=0.0);
@@ -461,14 +473,16 @@ fn fg_find_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
             let t=clamp(center+vec2<i32>(ox,oy),vec2<i32>(0),tiles-vec2<i32>(1));
             for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
                 let idx=fg_tile_at(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size,bank);
-                let p=fg_plane(idx,size);
+                var p=fg_plane(idx,size);
+                if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<0.95 {continue;}
                 let scale=max(footprint,p.normal.w);
-                let tol=FG_PLANE*scale;
-                if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.78 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
+                p.normal.w=scale;
+                let geo=fg_on_plane(p,s.prev_world,s.normal);
+                if geo<=0.01 {continue;}
                 let tangent_scale=scale/view_cos;
                 let d3=length(s.prev_world-p.point.xyz)/max(tangent_scale,1e-6);
                 if d3>1.75 {continue;}
-                let score=fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*3.0);
+                let score=geo*exp(-d3*d3*3.0);
                 if score>best {best=score;chosen=idx;}
             }
         }
@@ -503,6 +517,7 @@ fn fg_load_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32,prev_idx:u32)->FgP
     var hist_sum=0.0;
     var dhist_sum=0.0;
     var pos_sum=vec3<f32>(0.0);
+    var ndot_sum=0.0;
     for(var k=0u;k<4u;k+=1u) {
         let o=vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
         let t=clamp(base+o,vec2<i32>(0),tiles-vec2<i32>(1));
@@ -510,47 +525,55 @@ fn fg_load_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32,prev_idx:u32)->FgP
         if bil<=1e-4 {continue;}
         for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
             let idx=fg_tile_at(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size,bank);
-            let p=fg_plane(idx,size);
+            var p=fg_plane(idx,size);
+            let ndot=dot(p.normal.xyz,s.normal);
+            if p.point.w<=0.0 || ndot<0.95 {continue;}
             let scale=max(footprint,p.normal.w);
-            let tol=FG_PLANE*scale;
-            if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.82 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
+            p.normal.w=scale;
+            let geo=fg_on_plane(p,s.prev_world,s.normal);
+            if geo<=0.01 {continue;}
             let tangent_scale=scale/view_cos;
             let d3=length(s.prev_world-p.point.xyz)/max(tangent_scale,1e-6);
             if d3>1.5 {continue;}
             let e_p=fg_probe_dc_luma(idx,size);
             let rel=abs(e_p-e_anchor)/max(max(e_p,e_anchor),1e-4);
             let lum_w=exp(-rel*rel*1.5);
-            let w=bil*fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*4.0)*lum_w;
+            let w=bil*geo*exp(-d3*d3*4.0)*lum_w;
             if w<=1e-5 {continue;}
             fg_add_both(idx,size,w);
             w_sum+=w;
             hist_sum+=w*p.point.w;
             dhist_sum+=w*bitcast<f32>(gi_prepared[fg_at(idx,size)+2u].r0.w);
             pos_sum+=w*p.point.xyz;
+            ndot_sum+=w*ndot;
         }
     }
+    let max_ext=select(0.85,1.15,FG_HALF_RATE);
     if w_sum<=1e-4 {
-        if anchor_shift>1.6 {return empty;}
+        if anchor_shift>max_ext {return empty;}
         var fb=fg_load(prev_idx,size);
-        let ext_t=smoothstep(0.45,1.45,anchor_shift);
-        fb.point.w=min(fb.point.w,mix(6.0,select(1.5,3.0,FG_HALF_RATE),ext_t));
-        fb.sh[6].w=min(fb.sh[6].w,mix(2.0,1.0,smoothstep(0.15,1.0,anchor_shift)));
+        let curved=dot(fb.normal.xyz,s.normal)<0.995;
+        let ext_t=smoothstep(0.25,max_ext,anchor_shift);
+        fb.point.w=min(fb.point.w,mix(6.0,select(1.0,3.0,FG_HALF_RATE),ext_t));
+        fb.sh[6].w=select(min(fb.sh[6].w,select(1.5,2.5,FG_HALF_RATE)),0.0,curved || anchor_shift>0.25);
         return fb;
     }
     let inv=1.0/w_sum;
     let ext_shift=length(s.prev_world-pos_sum*inv)/max(footprint,1e-6);
-    if ext_shift>1.6 {return empty;}
+    if ext_shift>max_ext {return empty;}
     var out:FgProbe;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=fg_sum[v]*inv;}
     for(var v=0u;v<3u;v+=1u) {out.direct[v]=fg_direct_sum[v]*inv;}
-    // Decay moving bilinear history by resampling blur (6..12 frames) and damp one-sided
-    // grazing extrapolation so horizon disocclusions never drag foreground radiance into corners.
-    // Direct analytical emitters (`direct`) are already exact on frame 1, so cap their moving
-    // bilinear history to 1..2 frames to prevent steep 1/r^2 gradient diffusion across floors.
+    // Decay moving bilinear indirect history by resampling blur (6..12 frames) and damp one-sided
+    // boundary extrapolation (wall-floor creases, pillar edges, curved limbs) so bright foreground
+    // radiance never advects sideways across discontinuities. Direct analytical emitters already
+    // evaluate exact solid-angle SH + stratified visibility rays each frame, so reset them on
+    // one-sided/curved shifts and cap flat moving carry to 1.5..2.5 frames (zero 1/r^2 gradient lag).
     let blur=fr.x*(1.0-fr.x)+fr.y*(1.0-fr.y);
-    let ext_t=smoothstep(0.45,1.45,ext_shift);
-    let move_cap=mix(mix(12.0,6.0,clamp(blur*2.0,0.0,1.0)),select(1.5,3.0,FG_HALF_RATE),ext_t);
-    let d_move_cap=mix(2.0,1.0,clamp(blur*2.0+ext_t,0.0,1.0));
+    let ext_t=smoothstep(0.25,max_ext,ext_shift);
+    let curved=ndot_sum*inv<0.995;
+    let move_cap=mix(mix(12.0,6.0,clamp(blur*2.0,0.0,1.0)),select(1.0,3.0,FG_HALF_RATE),ext_t);
+    let d_move_cap=select(select(1.5,2.5,FG_HALF_RATE),0.0,curved || ext_shift>0.25);
     out.sh[6].w=min(dhist_sum*inv,d_move_cap);
     out.point=vec4<f32>(s.prev_world,min(hist_sum*inv,move_cap));
     out.normal=vec4<f32>(s.normal,footprint);
@@ -571,14 +594,16 @@ fn fg_find_prev_adapt(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
         let o=vec2<i32>(i32(k&1u),i32(k>>1u));
         let b=clamp(base+o,vec2<i32>(0),blocks-vec2<i32>(1));
         let idx=fg_adaptive_in(vec2<u32>(b),size,bank);
-        let p=fg_plane(idx,size);
-        let scale=0.5*max(footprint,p.normal.w);
-        let tol=FG_PLANE*max(footprint,p.normal.w);
-        if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.78 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
-        let tangent_scale=scale/view_cos;
+        var p=fg_plane(idx,size);
+        if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<0.95 {continue;}
+        let full_scale=max(footprint,p.normal.w);
+        p.normal.w=full_scale;
+        let geo=fg_on_plane(p,s.prev_world,s.normal);
+        if geo<=0.01 {continue;}
+        let tangent_scale=(0.5*full_scale)/view_cos;
         let d3=length(s.prev_world-p.point.xyz)/max(tangent_scale,1e-6);
         if d3>1.75 {continue;}
-        let score=fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*4.0);
+        let score=geo*exp(-d3*d3*4.0);
         if score>best {best=score;chosen=idx;}
     }
     if chosen!=0xffffffffu {return chosen;}
@@ -629,52 +654,107 @@ fn fg_direct_emitters()->bool {
 }
 fn fg_direct_emitters_lane(lane:u32,ray:u32,s:FgSurface,tile_xy:vec2<u32>) {
     let n=gi_word(GI_H_EMITTER_COUNT);
-    let spp=clamp(FG_RAYS/max(n,1u),1u,4u);
-    let total=n*spp;
+    if n==0u {return;}
     let base=gi_word(GI_H_EMITTERS);
     let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
     let bx=f32(fg_bayer4(tile_xy+vec2<u32>(1u,3u)))*(1.0/16.0);
     let by=f32(fg_bayer4(tile_xy+vec2<u32>(3u,2u)))*(1.0/16.0);
     let t=f32(fg_frame()&1023u);
     let base_seq=fract(vec2<f32>(bx,by)+vec2<f32>(0.754877666,0.569840296)*t);
-    let inv_spp=1.0/f32(spp);
-    for(var idx=ray;idx<total;idx+=FG_RAYS) {
-        let e=idx/spp;
-        let sub=idx%spp;
+    // Pass 1 (uniform across the probe's warp): identify visible emitter triangles and peak
+    // irradiance so we distribute all FG_RAYS lanes across active emitters (instead of wasting
+    // warp lanes on back-facing or tiny box-edge triangles).
+    var vis_lo=0u;
+    var vis_hi=0u;
+    var vis_count=0u;
+    var max_irrad=0.0;
+    for(var e=0u;e<n;e+=1u) {
+        let r=base+e*GI_EMITTER_WORDS;
+        let radiance=gi_emitter_vec(r+9u);
+        if all(radiance<=vec3<f32>(0.0)) {continue;}
+        let a=gi_emitter_vec(r);
+        let e1=gi_emitter_vec(r+3u);
+        let e2=gi_emitter_vec(r+6u);
+        let sh=gi_emitter_sh(s.world,s.normal,a,a+e1,a+e2);
+        if sh.x<=2.8e-7 {continue;}
+        let irrad=fg_luminance(radiance)*sh.x;
+        max_irrad=max(max_irrad,irrad);
+        if e<32u {vis_lo|=1u<<e;} else {vis_hi|=1u<<(e-32u);}
+        vis_count+=1u;
+    }
+    if vis_count==0u {return;}
+    // Classify major (>=15% of peak irradiance) vs minor visible emitter triangles: every minor
+    // triangle still receives 1 unbiased shadow ray while major faces share the remaining warp
+    // lanes (up to 16 R2-stratified rays/triangle), eliminating 2-ray penumbra blotches in one wave.
+    var maj_lo=0u;
+    var maj_hi=0u;
+    var major_count=0u;
+    let thresh=max_irrad*0.15;
+    for(var e=0u;e<n;e+=1u) {
+        let on=select((vis_hi&(1u<<(e-32u)))!=0u,(vis_lo&(1u<<e))!=0u,e<32u);
+        if !on {continue;}
+        let r=base+e*GI_EMITTER_WORDS;
+        let a=gi_emitter_vec(r);
+        let e1=gi_emitter_vec(r+3u);
+        let e2=gi_emitter_vec(r+6u);
+        let sh=gi_emitter_sh(s.world,s.normal,a,a+e1,a+e2);
+        if fg_luminance(gi_emitter_vec(r+9u))*sh.x>=thresh {
+            if e<32u {maj_lo|=1u<<e;} else {maj_hi|=1u<<(e-32u);}
+            major_count+=1u;
+        }
+    }
+    let minor_count=vis_count-major_count;
+    let major_spp=select(1u,clamp((FG_RAYS-minor_count)/max(major_count,1u),1u,16u),FG_RAYS>minor_count && major_count>0u);
+    var slot=0u;
+    for(var e=0u;e<n;e+=1u) {
+        let on=select((vis_hi&(1u<<(e-32u)))!=0u,(vis_lo&(1u<<e))!=0u,e<32u);
+        if !on {continue;}
+        let is_major=select((maj_hi&(1u<<(e-32u)))!=0u,(maj_lo&(1u<<e))!=0u,e<32u);
+        let spp=select(1u,major_spp,is_major);
+        let start=slot;
+        slot+=spp;
+        // Find which sample(s) in [start, start + spp) belong to this lane (`idx % FG_RAYS == ray`).
+        var first=start;
+        let rem=start%FG_RAYS;
+        if ray>=rem {first=start+(ray-rem);} else {first=start+(FG_RAYS-rem+ray);}
+        if first>=slot {continue;}
         let r=base+e*GI_EMITTER_WORDS;
         let a=gi_emitter_vec(r);
         let e1=gi_emitter_vec(r+3u);
         let e2=gi_emitter_vec(r+6u);
         let radiance=gi_emitter_vec(r+9u);
-        if all(radiance<=vec3<f32>(0.0)) {continue;}
         let sh=gi_emitter_sh(s.world,s.normal,a,a+e1,a+e2);
-        if sh.x<=2.8e-7 {continue;}
-        let seq=fract(base_seq+vec2<f32>(0.754877666,0.569840296)*f32(sub*17u+e*7u));
-        var uv=seq;
-        if uv.x+uv.y>1.0 {uv=vec2<f32>(1.0)-uv;}
-        var x=a+e1*uv.x+e2*uv.y;
-        if dot(x-s.world,s.normal)<=1e-5 {
-            x=a+(e1+e2)*(1.0/3.0);
+        let inv_spp=1.0/f32(spp);
+        let tri_shift=vec2<f32>(0.3819660113,0.6180339887)*f32(e);
+        for(var idx=first;idx<slot;idx+=FG_RAYS) {
+            let sub=idx-start;
+            let seq=fract(base_seq+tri_shift+vec2<f32>(0.754877666,0.569840296)*f32(sub));
+            var uv=seq;
+            if uv.x+uv.y>1.0 {uv=vec2<f32>(1.0)-uv;}
+            var x=a+e1*uv.x+e2*uv.y;
             if dot(x-s.world,s.normal)<=1e-5 {
-                let h0=dot(a-s.world,s.normal);
-                let h1=dot(a+e1-s.world,s.normal);
-                let h2=dot(a+e2-s.world,s.normal);
-                x=select(select(a+e2,a+e1,h1>=h2),a,h0>=h1 && h0>=h2);
+                x=a+(e1+e2)*(1.0/3.0);
+                if dot(x-s.world,s.normal)<=1e-5 {
+                    let h0=dot(a-s.world,s.normal);
+                    let h1=dot(a+e1-s.world,s.normal);
+                    let h2=dot(a+e2-s.world,s.normal);
+                    x=select(select(a+e2,a+e1,h1>=h2),a,h0>=h1 && h0>=h2);
+                }
             }
+            let to=x-origin;
+            let dist=length(to);
+            if dist<=1e-6 {continue;}
+            atomicAdd(&fg_rays[1],1u);
+            if rl_blocked(origin,to/dist,s.epsilon,dist*0.999) {continue;}
+            let c0=radiance*(sh.x*inv_spp);
+            let c1=radiance*(sh.y*inv_spp);
+            let c2=radiance*(sh.z*inv_spp);
+            let c3=radiance*(sh.w*inv_spp);
+            fg_nee_sh[lane][0u]+=c0.x;fg_nee_sh[lane][1u]+=c0.y;fg_nee_sh[lane][2u]+=c0.z;
+            fg_nee_sh[lane][3u]+=c1.x;fg_nee_sh[lane][4u]+=c1.y;fg_nee_sh[lane][5u]+=c1.z;
+            fg_nee_sh[lane][6u]+=c2.x;fg_nee_sh[lane][7u]+=c2.y;fg_nee_sh[lane][8u]+=c2.z;
+            fg_nee_sh[lane][9u]+=c3.x;fg_nee_sh[lane][10u]+=c3.y;fg_nee_sh[lane][11u]+=c3.z;
         }
-        let to=x-origin;
-        let dist=length(to);
-        if dist<=1e-6 {continue;}
-        atomicAdd(&fg_rays[1],1u);
-        if rl_blocked(origin,to/dist,s.epsilon,dist*0.999) {continue;}
-        let c0=radiance*(sh.x*inv_spp);
-        let c1=radiance*(sh.y*inv_spp);
-        let c2=radiance*(sh.z*inv_spp);
-        let c3=radiance*(sh.w*inv_spp);
-        fg_nee_sh[lane][0u]+=c0.x;fg_nee_sh[lane][1u]+=c0.y;fg_nee_sh[lane][2u]+=c0.z;
-        fg_nee_sh[lane][3u]+=c1.x;fg_nee_sh[lane][4u]+=c1.y;fg_nee_sh[lane][5u]+=c1.z;
-        fg_nee_sh[lane][6u]+=c2.x;fg_nee_sh[lane][7u]+=c2.y;fg_nee_sh[lane][8u]+=c2.z;
-        fg_nee_sh[lane][9u]+=c3.x;fg_nee_sh[lane][10u]+=c3.y;fg_nee_sh[lane][11u]+=c3.z;
     }
 }
 // Traces lane `ray` of a probe at s and stores its SH terms in fg_lane_sh[lane]: a miss's as the
@@ -892,12 +972,13 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
         else {
             old=fg_load(prev_index,size);
             let ashift=length(s.prev_world-old.point.xyz)/max(footprint,1e-6);
-            if ashift>1.6 {
+            if ashift>0.85 {
                 old.point.w=0.0;
                 old.sh[6].w=0.0;
             } else if ashift>0.05 {
-                old.point.w=min(old.point.w,mix(10.0,select(1.5,3.0,FG_HALF_RATE),smoothstep(0.4,1.45,ashift)));
-                old.sh[6].w=min(old.sh[6].w,mix(2.0,1.0,smoothstep(0.15,1.0,ashift)));
+                let curved=dot(old.normal.xyz,s.normal)<0.995;
+                old.point.w=min(old.point.w,mix(8.0,select(1.0,2.0,FG_HALF_RATE),smoothstep(0.25,0.75,ashift)));
+                old.sh[6].w=select(min(old.sh[6].w,select(1.5,2.5,FG_HALF_RATE)),0.0,curved || ashift>0.25);
             }
         }
     }
@@ -1137,46 +1218,91 @@ const FG_FILTER_SHORT:f32=24.0;
         let index=fg_tile_at(tile_slot,size,bank);
         let c=fg_plane(index,size);
         if c.point.w<=0.0 {fg_invalidate(fg_filtered(tile_slot,size),size);continue;}
-        // Nyquist-matched, rotationally isotropic 5x5 co-planar Gaussian reconstruction on the
-        // 16x16 probe lattice. Geometric discontinuities are stopped by fg_on_plane; omitting a
-        // luminance bilateral cliff on the coarse 16x16 grid prevents diagonal indirect shadows
-        // (e.g. night emissive panels behind pillars) from aliasing into 16x16 staircase teeth,
-        // while keeping filter width nearly constant across moving and settled probes so shadows
-        // never pop or morph when panning stops. Capping neighbour history dominance keeps fresh
-        // disoccluded probes from being drowned by mature neighbours.
+        // Separate kernels for indirect GI (5x5 co-planar Gaussian, smooth over noisy low-frequency
+        // bounce/sky, with gentle neighbour-history weighting so freshly disoccluded 1-frame probes
+        // don't show 16x16 hemisphere blobs) and direct analytical emitters (tight 3x3 symmetric
+        // Gaussian with history-independent weights and strong one-sided boundary damping so sharp
+        // area shadows and steep 1/r^2 gradients never pull brightness cliffs behind moving pillars).
         let age_t=clamp((c.point.w-1.0)/15.0,0.0,1.0);
-        let sigma=mix(select(1.35,1.60,FG_HALF_RATE),select(1.15,1.25,FG_HALF_RATE),age_t);
+        let sigma_sh=mix(select(1.35,1.65,FG_HALF_RATE),select(1.15,1.25,FG_HALF_RATE),age_t);
+        let sigma_dir=select(0.60,0.75,FG_HALF_RATE);
         let reach=2;
         fg_clear();
-        fg_add_combined(index,size,c.point.w);
-        var total=c.point.w;
+        let sh_center_w=c.point.w;
+        let dir_center_w=min(c.point.w,1.0);
+        fg_add(index,size,sh_center_w);
+        {
+            let d=gi_prepared[fg_at(index,size)+4u];
+            fg_direct_sum[0]+=dir_center_w*bitcast<vec4<f32>>(d.r0);
+            fg_direct_sum[1]+=dir_center_w*bitcast<vec4<f32>>(d.r1);
+            fg_direct_sum[2]+=dir_center_w*bitcast<vec4<f32>>(d.r2);
+        }
+        var total_sh=sh_center_w;
+        var total_dir=dir_center_w;
         for(var y=-reach;y<=reach;y+=1) {
             for(var x=-reach;x<=reach;x+=1) {
+                if x==0 && y==0 {continue;}
                 let t=own+vec2<i32>(x,y);
                 if any(t<vec2<i32>(0)) || any(t>=tiles) {continue;}
+                let r2=x*x+y*y;
+                if abs(x)==2 || abs(y)==2 {
+                    let mid=own+vec2<i32>(x/2,y/2);
+                    var mid_ok=false;
+                    for(var mk=0u;mk<FG_SLOTS;mk+=1u) {
+                        let mat=fg_tile_at(u32(mid.y*tiles.x+mid.x)*FG_SLOTS+mk,size,bank);
+                        if fg_on_plane(fg_plane(mat,size),c.point.xyz,c.normal.xyz)>0.02 {mid_ok=true;break;}
+                    }
+                    if !mid_ok {continue;}
+                }
+                // Check whether the opposite tile is also on this plane: unpaired one-sided
+                // neighbours next to moving occluders or screen edges are strongly damped for
+                // direct analytical emitters so gradients never pull cliffs into disocclusions,
+                // while indirect bounce keeps high coverage to suppress 1-frame hemisphere blobs.
+                let opp=own-vec2<i32>(x,y);
+                var opp_ok=false;
+                if all(opp>=vec2<i32>(0)) && all(opp<tiles) {
+                    for(var ok=0u;ok<FG_SLOTS;ok+=1u) {
+                        let oat=fg_tile_at(u32(opp.y*tiles.x+opp.x)*FG_SLOTS+ok,size,bank);
+                        if fg_on_plane(fg_plane(oat,size),c.point.xyz,c.normal.xyz)>0.05 {opp_ok=true;break;}
+                    }
+                }
+                let pair_sh=select(select(0.80,0.95,FG_HALF_RATE),1.0,opp_ok);
+                let pair_dir=select(0.10,1.0,opp_ok);
+                let g_sh=exp(-f32(r2)/(2.0*sigma_sh*sigma_sh))*pair_sh;
+                let g_dir=select(0.0,exp(-f32(r2)/(2.0*sigma_dir*sigma_dir))*pair_dir,abs(x)<=1 && abs(y)<=1);
                 for(var k=0u;k<FG_SLOTS;k+=1u) {
                     let at=fg_tile_at(u32(t.y*tiles.x+t.x)*FG_SLOTS+k,size,bank);
                     if at==index {continue;}
                     let p=fg_plane(at,size);
                     let geo=fg_on_plane(p,c.point.xyz,c.normal.xyz);
                     if geo<=1e-4 {continue;}
-                    // 3D world-space proximity weight: keeps grazing-horizon floor tiles from
-                    // blending probes many footprints closer to lights while matching non-RT's
-                    // wider 16-ray filter footprint on oblique walls.
                     let d_world=length(p.point.xyz-c.point.xyz)/max(max(c.normal.w,p.normal.w),1e-6);
-                    let d_excess=max(d_world-select(0.0,2.0,FG_HALF_RATE),0.0);
-                    let dist_w=exp(-d_excess*d_excess*(1.0/12.5));
-                    let hist_w=min(p.point.w,max(c.point.w*2.5,4.0));
-                    let w=geo*dist_w*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*hist_w;
-                    if w<=1e-4 {continue;}
-                    fg_add_combined(at,size,w);
-                    total+=w;
+                    let d_sh_excess=max(d_world-select(0.0,2.0,FG_HALF_RATE),0.0);
+                    let dist_sh=exp(-d_sh_excess*d_sh_excess*(1.0/12.5));
+                    let dist_dir=exp(-d_world*d_world*(1.0/12.5));
+                    let sh_hist_w=min(p.point.w,max(sh_center_w*2.5,4.0));
+                    let w_sh=geo*dist_sh*sh_hist_w*g_sh;
+                    if w_sh>1e-4 {
+                        fg_add(at,size,w_sh);
+                        total_sh+=w_sh;
+                    }
+                    let w_dir=geo*dist_dir*min(p.point.w,1.0)*g_dir;
+                    if w_dir>1e-4 {
+                        let d=gi_prepared[fg_at(at,size)+4u];
+                        fg_direct_sum[0]+=w_dir*bitcast<vec4<f32>>(d.r0);
+                        fg_direct_sum[1]+=w_dir*bitcast<vec4<f32>>(d.r1);
+                        fg_direct_sum[2]+=w_dir*bitcast<vec4<f32>>(d.r2);
+                        total_dir+=w_dir;
+                    }
                 }
             }
         }
         var out:FgProbe;
         out.point=c.point;out.normal=c.normal;
-        for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=fg_sum[v]/total;}
+        let inv_sh=1.0/max(total_sh,1e-6);
+        let inv_dir=1.0/max(total_dir,1e-6);
+        for(var v=0u;v<7u;v+=1u) {out.sh[v]=fg_sum[v]*inv_sh;}
+        for(var v=0u;v<3u;v+=1u) {out.sh[7u+v]=fg_sum[7u+v]*inv_sh+fg_direct_sum[v]*inv_dir;}
         out.direct=array<vec4<f32>,3>(vec4<f32>(0.0),vec4<f32>(0.0),vec4<f32>(0.0));
         fg_store(fg_filtered(tile_slot,size),size,out);
     }
@@ -1258,7 +1384,7 @@ var<workgroup> fg_orphan_count:atomic<u32>;
         }
         fg_depth[q.y*size.x+q.x]=dist;
     }
-    if mine.placement!=0u && fg_tiles(q,size,mine,false)<=1e-4 {
+    if mine.placement!=0u && fg_tiles(q,size,mine,false)<=0.08 {
         // Pick the covered orphan pixel closest to block center so adaptive probes on curved
         // surfaces and edges keep stable normals across frames instead of resetting history.
         atomicAdd(&fg_orphan_count,1u);
@@ -1267,7 +1393,7 @@ var<workgroup> fg_orphan_count:atomic<u32>;
     }
     workgroupBarrier();
     if lane!=0u {return;}
-    let pick=select(atomicLoad(&fg_orphan),FG_NONE,FG_HALF_RATE && atomicLoad(&fg_orphan_count)<4u);
+    let pick=select(atomicLoad(&fg_orphan),FG_NONE,FG_HALF_RATE && atomicLoad(&fg_orphan_count)<2u);
     let index=fg_adaptive_in(group.xy,size,fg_write_bank());
     let at=fg_at(index,size)+2u;
     let c=gi_prepared[at];
@@ -1342,9 +1468,10 @@ var<workgroup> fg_pair:array<u32,2>;
     let bank=fg_write_bank();
     fg_clear();
     var total=fg_tiles(id,size,s,true);
-    if total<=1e-4 {
-        // No tile probe on this plane: 3x3 history- and plane-weighted spatial filter over the
-        // surrounding adaptive probes, eliminating single-probe noise on curved limbs and edges.
+    if total<=0.08 {
+        // Weak or missing tile coverage on this plane: include the 3x3 adaptive probes on this
+        // plane with symmetric weights so freshly disoccluded thin ledges, steps, and curved
+        // limbs never get overpowered by mature neighbours.
         let blocks=vec2<i32>((size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK);
         let f=(vec2<f32>(id)+vec2<f32>(0.5))/f32(FG_BLOCK)-vec2<f32>(0.5);
         let own_b=clamp(vec2<i32>(id/FG_BLOCK),vec2<i32>(0),blocks-vec2<i32>(1));
@@ -1355,7 +1482,7 @@ var<workgroup> fg_pair:array<u32,2>;
                 let index=fg_adaptive_in(vec2<u32>(b),size,bank);
                 let p=fg_plane(index,size);
                 let d=vec2<f32>(b)-f;
-                let w=exp(-dot(d,d)*0.5)*fg_on_plane(p,s.world,s.normal)*max(p.point.w,1.0);
+                let w=exp(-dot(d,d)*0.5)*fg_on_plane(p,s.world,s.normal)*min(p.point.w,1.0);
                 if w<=1e-6 {continue;}
                 fg_add_combined(index,size,w);
                 total+=w;
