@@ -334,8 +334,8 @@ pub(in crate::renderer) struct ReceiverPipelines {
     /// empty, or the reuse keys (`reuse`).
     lean: bool,
     group_layout: Owned<wgpu::BindGroupLayout>,
-    /// The final gather's five kernels and their group 2 layout (`program::final_gather`).
-    gather: Option<[Owned<wgpu::ComputePipeline>; 5]>,
+    /// The final gather's six kernels and their group 2 layout (`program::final_gather`).
+    gather: Option<[Owned<wgpu::ComputePipeline>; 6]>,
     gather_group: Option<Owned<wgpu::BindGroupLayout>>,
 }
 
@@ -404,7 +404,7 @@ impl Renderer {
                 "GI prepared receiver",
                 u64::from(size.width) * u64::from(size.height) * BYTES
                     + if program::final_gather() {
-                        (u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS * 3
+                        (u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS * 4
                             + u64::from(size.width.div_ceil(FG_BLOCK)) * u64::from(size.height.div_ceil(FG_BLOCK)) * 2)
                             * FG_PROBE_BYTES
                     } else {
@@ -666,6 +666,7 @@ impl Renderer {
             gather = Some([
                 build_entry(&layout, "fg_trace"),
                 build_entry(&layout, "fg_filter"),
+                build_entry(&layout, "fg_filter2"),
                 build_entry(&layout, "fg_classify"),
                 build_entry(&layout, "fg_adapt"),
                 build_entry(&layout, "fg_resolve"),
@@ -727,7 +728,7 @@ impl Renderer {
         let bindings = state.bindings.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let shade = &**bindings.shade[shading as usize].as_ref().unwrap();
-        if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in), Some(probe_state), Some(fg_depth)) = (
+        if let (Some([trace, filter, filter2, classify, adapt, resolve]), Some(layout), Some(stand_in), Some(probe_state), Some(fg_depth)) = (
             pipelines.gather.as_ref(),
             pipelines.gather_group.as_ref(),
             target.requests_stand_in.as_ref(),
@@ -746,11 +747,13 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 32, resource: fg_depth.value.as_entire_binding() },
                 ],
             });
-            // Grids: probe tiles, the filter's 8x4 tiles a group, blocks, two blocks a group,
+            // Grids: probe tiles, the filters' 8x4 tiles a group, blocks, two blocks a group,
             // and the resolve's indirect pixel grid (None).
-            let steps: [(&'static str, &wgpu::ComputePipeline, Option<[u32; 2]>); 5] = [
+            let filter_grid = [target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4)];
+            let steps: [(&'static str, &wgpu::ComputePipeline, Option<[u32; 2]>); 6] = [
                 ("fg_trace", trace, Some(target.tiles)),
-                ("fg_filter", filter, Some([target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4)])),
+                ("fg_filter", filter, Some(filter_grid)),
+                ("fg_filter2", filter2, Some(filter_grid)),
                 ("fg_classify", classify, Some(target.blocks)),
                 ("fg_adapt", adapt, Some([target.blocks[0].div_ceil(2), target.blocks[1]])),
                 ("fg_resolve", resolve, None),

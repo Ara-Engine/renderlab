@@ -4699,7 +4699,10 @@ impl Renderer {
                 self.gi.emitter_moved_frames.saturating_sub(1)
             };
             self.gi.emitter_relight_frames = if moved_emitter {
-                4
+                // Software GI cache uses half the per-frame fixed ray budget of hardware RT
+                // (98k vs 196k), so give it twice as many relight frames to sweep the same
+                // total rays after an emitting placement moves.
+                if software { 8 } else { 4 }
             } else {
                 self.gi.emitter_relight_frames.saturating_sub(1)
             };

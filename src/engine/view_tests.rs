@@ -1915,3 +1915,306 @@ fn arena_night_shadows_and_stairs_repro() {
         );
     }
 }
+
+/// Reproducer for horizontal wavy banding / mottled blotches on grazing indirect-lit South wall
+/// in My project 5 Play mode (HardwareRt and NonRt, still and walking forward/turning).
+#[test]
+#[ignore]
+fn arena_night_south_wall_repro() {
+    const W: u32 = 1600;
+    const H: u32 = 960;
+    let dump_dir = std::env::var_os("RENDERLAB_WALL_BANDS_DUMP").map(std::path::PathBuf::from);
+    if let Some(dir) = &dump_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    let vtx = |position: [f32; 3], normal: [f32; 3]| Vertex {
+        position,
+        normal,
+        uv: [0.0; 2],
+        color: [1.0; 4],
+    };
+    let make_cylinder = |center: Vec3, radius: f32, half_h: f32| -> (Vec<Vertex>, Vec<u32>) {
+        const SEGS: u32 = 32;
+        let mut verts = Vec::new();
+        let mut idxs = Vec::new();
+        for i in 0..SEGS {
+            let a0 = (i as f32 / SEGS as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / SEGS as f32) * std::f32::consts::TAU;
+            let (s0, c0) = a0.sin_cos();
+            let (s1, c1) = a1.sin_cos();
+            let (n0, n1) = ([s0, 0.0, c0], [s1, 0.0, c1]);
+            let base = verts.len() as u32;
+            verts.push(vtx((center + Vec3::new(radius * s0, -half_h, radius * c0)).to_array(), n0));
+            verts.push(vtx((center + Vec3::new(radius * s1, -half_h, radius * c1)).to_array(), n1));
+            verts.push(vtx((center + Vec3::new(radius * s1, half_h, radius * c1)).to_array(), n1));
+            verts.push(vtx((center + Vec3::new(radius * s0, half_h, radius * c0)).to_array(), n0));
+            idxs.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        (verts, idxs)
+    };
+    const FIELDS: &str = "alpha:f32 };";
+    const BUILT: &str = "decal_mr.x,alpha);";
+    const RETURN: &str = "    return exposed;";
+    let emissive_wgsl = format!(
+        "struct Parameters {{ glow:vec3<f32>, everywhere:f32, bounce:vec3<f32>, mapped:f32 }};\n\
+         const DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0),0.0,vec3<f32>(0.0),0.0);\n\
+         fn ara_glows(input:SurfaceInput) -> bool {{ return params.everywhere>0.5 || abs(input.material.base_color.a-0.737)<0.002; }}\n\
+         {}\n\
+         fn emission(s:Surface, input:SurfaceInput) -> vec3<f32> {{ return select(vec3<f32>(0.0),max(params.bounce,vec3<f32>(0.0)),ara_glows(input)); }}\n",
+        crate::STANDARD_PROGRAM
+            .replace(FIELDS, "alpha:f32, glow:vec3<f32> };")
+            .replace(BUILT, "decal_mr.x,alpha,select(vec3<f32>(0.0),max(params.glow,vec3<f32>(0.0)),ara_glows(input)));")
+            .replace(RETURN, "    return min(exposed+exposed_product(s.glow,vec3<f32>(1.0)),vec3<f32>(65504.0));")
+            .replace("s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),", "s.n,s.base,s.alpha,s.metal,s.rough,s.glow,")
+            .replace("    s.alpha=m.alpha;\n    return s;", "    s.alpha=m.alpha;\n    s.glow=m.emission;\n    return s;")
+    );
+
+    for path in [RenderPath::HardwareRt, RenderPath::NonRt] {
+        let adapter = test_adapter();
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let mut engine = Engine::new(&adapter, EngineDescriptor { path, experimental_ray_query, ..Default::default() }).unwrap();
+        let emissive_prog = engine.create_program("ara_emissive", &emissive_wgsl).unwrap();
+        let spawn_mesh = |engine: &mut Engine, vertices: &[Vertex], indices: &[u32], colour, roughness| {
+            let mesh = engine.create_mesh(&MeshData { vertices, indices }).unwrap();
+            let material = engine.create_material(&MaterialDesc { base_color: colour, roughness, double_sided: true, ..Default::default() }).unwrap();
+            engine.spawn(mesh, material, Mat4::IDENTITY).unwrap()
+        };
+        let spawn_box = |engine: &mut Engine, c, h, colour, roughness| {
+            let (v, i) = cube(c, h);
+            spawn_mesh(engine, &v, &i, colour, roughness)
+        };
+        // Exact My project 5 geometry
+        spawn_box(&mut engine, [0.0, -0.25, 0.0], [20.0, 0.25, 20.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn_box(&mut engine, [0.0, 2.0, -19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [0.0, 2.0, 19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [-19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [0.0, 1.0, -8.0], [4.0, 1.0, 3.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn_box(&mut engine, [-12.4, 2.5, 4.0], [0.6, 2.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [-7.6, 2.5, 4.0], [0.6, 2.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [-10.0, 4.5, 4.0], [1.8, 0.5, 0.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        for [px, pz] in [[-14.0, -14.0], [14.0, -14.0], [-14.0, 14.0], [14.0, 14.0]] {
+            let (cv, ci) = make_cylinder(Vec3::new(px, 2.0, pz), 0.6, 2.0);
+            spawn_mesh(&mut engine, &cv, &ci, [0.70, 0.67, 0.62, 1.0], 0.90);
+        }
+        spawn_box(&mut engine, [6.0, 0.6, 6.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [-6.0, 0.6, 9.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [9.0, 0.6, -2.0], [0.3, 0.6, 1.0], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [12.0, 0.6, 11.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [-14.0, 0.6, -5.0], [0.3, 0.6, 1.0], [0.52, 0.18, 0.04, 1.0], 0.78);
+        for pos in [[5.0, 0.4, 12.0], [5.9, 0.4, 12.0], [5.45, 1.2, 12.0], [-7.0, 0.4, 13.0], [-1.2, 2.4, -9.0], [0.0, 2.4, -9.5]] {
+            spawn_box(&mut engine, pos, [0.4, 0.4, 0.4], [0.4, 0.24, 0.12, 1.0], 0.55);
+        }
+        {
+            let (vertices, indices) = cube([0.0, 3.0, -19.303816], [2.0, 0.5, 0.05]);
+            let mesh = engine.create_mesh(&MeshData { vertices: &vertices, indices: &indices }).unwrap();
+            let mat = engine.create_material(&MaterialDesc { base_color: [0.8, 0.8, 0.8, 0.737], roughness: 0.4, double_sided: true, program: Some(emissive_prog), ..Default::default() }).unwrap();
+            engine.set_material_parameters(mat, &[
+                ("glow", crate::Value::Vec3([3000.0, 2250.0, 1450.0])),
+                ("everywhere", crate::Value::F32(0.0)),
+                ("bounce", crate::Value::Vec3([3000.0, 2250.0, 1450.0])),
+                ("mapped", crate::Value::F32(0.0)),
+            ]).unwrap();
+            let obj = engine.spawn(mesh, mat, Mat4::IDENTITY).unwrap();
+            engine.set_casts_shadows(obj, false).unwrap();
+        }
+        let sun_q = glam::Quat::from_euler(glam::EulerRot::XYZ, -35.0f32.to_radians(), -32.0f32.to_radians(), 0.0);
+        let toward = (sun_q * Vec3::Z).normalize();
+        engine.set_sun(Some(Sun { travel: -toward, illuminance: [4.0 * 0.64161, 4.0 * 0.73686, 4.0], angular_radius: 0.5357f32.to_radians() * 0.5 })).unwrap();
+        let lm_to_cd = |lm: f32, c: [f32; 3]| { let s = lm / (4.0 * std::f32::consts::PI); [c[0] * s, c[1] * s, c[2] * s] };
+        engine.set_lights(&[
+            crate::engine::Light::Point { position: Vec3::new(0.0, 3.6, -8.0), candela: lm_to_cd(6000.0, [1.0, 0.72, 0.45]), range: Some(14.0), source_radius: 0.1, cast_shadows: Some(true) },
+            crate::engine::Light::Point { position: Vec3::new(-10.0, 4.4, 5.5), candela: lm_to_cd(5000.0, [1.0, 0.72, 0.45]), range: Some(14.0), source_radius: 0.1, cast_shadows: Some(true) },
+            crate::engine::Light::Point { position: Vec3::new(12.0, 2.5, 12.0), candela: lm_to_cd(4000.0, [1.0, 0.72, 0.45]), range: Some(14.0), source_radius: 0.1, cast_shadows: Some(true) },
+            crate::engine::Light::Spot { position: Vec3::new(0.0, 3.0, -19.35), travel: Vec3::Z, candela: lm_to_cd(8000.0, [1.0, 0.75, 0.48]), range: Some(16.0), inner: 0.0, outer: 1.55, source_radius: 0.5, cast_shadows: Some(true) },
+        ]).unwrap();
+        engine.set_sky(crate::engine::Sky::Atmosphere(crate::engine::AtmosphereMedium::default())).unwrap();
+        engine.set_settings(crate::engine::Settings {
+            aerial_perspective: true,
+            height_fog: Some(crate::engine::HeightFog { density: 0.004, falloff: 1.0 / 30.0, ..Default::default() }),
+            ..Default::default()
+        }).unwrap();
+        let view = engine.create_view(&ViewDesc {
+            look: ViewLook {
+                exposure: Exposure::Manual { stops: -1.5 },
+                post: crate::PostSettings { bloom: 0.05, motion_blur: false, tonemapper: crate::Tonemapper::Filmic, ..Default::default() },
+                ..Default::default()
+            },
+            ..ViewDesc::new(W, H)
+        }).unwrap();
+        let save = |name: &str, img: &Image| {
+            let Some(dir) = &dump_dir else { return };
+            let p = dir.join(name);
+            let file = std::fs::File::create(&p).unwrap();
+            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder.write_header().unwrap().write_image_data(&img.rgba8).unwrap();
+        };
+        let step = |engine: &mut Engine, camera: &Camera| {
+            engine.tick(1.0 / 60.0).unwrap();
+            engine.render_view(view, camera).unwrap();
+        };
+        let tag = if path == RenderPath::HardwareRt { "rt" } else { "nonrt" };
+        // Exact player view facing -X along South wall (z=19.5) with moon over South wall and Pillar 3 on right.
+        let cam_at = |x: f32, yaw_deg: f32| {
+            let eye = Vec3::new(x, 1.65, 16.2);
+            let dir = glam::Quat::from_rotation_y(yaw_deg.to_radians()) * Vec3::new(-1.0, 0.08, 0.14).normalize();
+            Camera::look_at(eye, eye + dir * 10.0, Vec3::Y, 75.0f32.to_radians(), 0.05, 4000.0).unwrap()
+        };
+        // 1) Settled still frame at x = -2.0
+        engine.cut_view(view);
+        for _ in 0..64 { step(&mut engine, &cam_at(-2.0, 0.0)); }
+        let still = engine.capture_view(view).unwrap();
+        save(&format!("south_{tag}_still.png"), &still);
+        // 2) Walking forward along the wall (x: +6.0 -> -2.0 at 7 m/s runSpeed = 0.1167 m/frame)
+        engine.cut_view(view);
+        for _ in 0..16 { step(&mut engine, &cam_at(6.0, 0.0)); }
+        for f in 1..=68 {
+            let x = 6.0 - 8.0 * (f as f32 / 68.0);
+            step(&mut engine, &cam_at(x, 0.0));
+        }
+        let walk = engine.capture_view(view).unwrap();
+        save(&format!("south_{tag}_walk.png"), &walk);
+        // 3) Turning camera rapidly left -> center at x = -2.0
+        engine.cut_view(view);
+        for _ in 0..16 { step(&mut engine, &cam_at(-2.0, -35.0)); }
+        for f in 1..=20 {
+            let yaw = -35.0 + 35.0 * (f as f32 / 20.0);
+            step(&mut engine, &cam_at(-2.0, yaw));
+        }
+        let pan = engine.capture_view(view).unwrap();
+        save(&format!("south_{tag}_pan.png"), &pan);
+        // 4) Frame 3 after cut (freshly revealed / short history)
+        engine.cut_view(view);
+        for _ in 0..3 { step(&mut engine, &cam_at(-2.0, 0.0)); }
+        let cut3 = engine.capture_view(view).unwrap();
+        save(&format!("south_{tag}_cut3.png"), &cut3);
+
+        // Regression checks across the grazing South wall (horizontal bands, vertical column
+        // tears, blotches), lower cover-box shadow, and far pillar shadows on both paths.
+        let luma_at = |img: &Image, x: usize, y: usize| -> f64 {
+            let i = (y * img.width as usize + x) * 4;
+            0.2126 * img.rgba8[i] as f64
+                + 0.7152 * img.rgba8[i + 1] as f64
+                + 0.0722 * img.rgba8[i + 2] as f64
+        };
+        let std_of = |xs: &[f64]| -> f64 {
+            let m = xs.iter().sum::<f64>() / xs.len() as f64;
+            (xs.iter().map(|v| (v - m) * (v - m)).sum::<f64>() / xs.len() as f64).sqrt()
+        };
+        let hp_metrics = |img: &Image| -> (f64, f64) {
+            let (x0, x1, y0, y1) = (80usize, 520usize, 280usize, 620usize);
+            let (cw, ch, r) = (x1 - x0, y1 - y0, 24usize);
+            let mut tmp = vec![0.0f64; cw * ch];
+            let mut hp = vec![0.0f64; cw * ch];
+            for y in 0..ch {
+                let mut acc = 0.0;
+                for x in 0..cw {
+                    acc += luma_at(img, x0 + x, y0 + y);
+                    tmp[y * cw + x] = acc;
+                }
+            }
+            let mut hblur = vec![0.0f64; cw * ch];
+            for y in 0..ch {
+                for x in 0..cw {
+                    let lo = x.saturating_sub(r);
+                    let hi = (x + r).min(cw - 1);
+                    let sum = tmp[y * cw + hi] - if lo > 0 { tmp[y * cw + lo - 1] } else { 0.0 };
+                    hblur[y * cw + x] = sum / (hi - lo + 1) as f64;
+                }
+            }
+            for x in 0..cw {
+                let mut acc = 0.0;
+                for y in 0..ch {
+                    acc += hblur[y * cw + x];
+                    tmp[y * cw + x] = acc;
+                }
+            }
+            let mut row_means = vec![0.0f64; ch];
+            for y in 0..ch {
+                let lo = y.saturating_sub(r);
+                let hi = (y + r).min(ch - 1);
+                let denom = (hi - lo + 1) as f64;
+                let mut rsum = 0.0;
+                for x in 0..cw {
+                    let vsum = tmp[hi * cw + x] - if lo > 0 { tmp[(lo - 1) * cw + x] } else { 0.0 };
+                    let v = luma_at(img, x0 + x, y0 + y) - vsum / denom;
+                    hp[y * cw + x] = v;
+                    rsum += v;
+                }
+                row_means[y] = rsum / cw as f64;
+            }
+            (std_of(&hp), std_of(&row_means))
+        };
+        let diff_metrics = |img: &Image, reference: &Image, x0: usize, x1: usize, y0: usize, y1: usize| -> (f64, f64, f64) {
+            let (cw, ch) = (x1 - x0, y1 - y0);
+            let mut all = Vec::with_capacity(cw * ch);
+            let mut row_m = vec![0.0f64; ch];
+            let mut col_m = vec![0.0f64; cw];
+            for y in 0..ch {
+                for x in 0..cw {
+                    let d = luma_at(img, x0 + x, y0 + y) - luma_at(reference, x0 + x, y0 + y);
+                    all.push(d);
+                    row_m[y] += d / cw as f64;
+                    col_m[x] += d / ch as f64;
+                }
+            }
+            (std_of(&all), std_of(&row_m), std_of(&col_m))
+        };
+        let pillar_amp = |img: &Image| -> f64 {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for x in 640usize..770usize {
+                let mut sum = 0.0;
+                for y in 460usize..560usize {
+                    sum += luma_at(img, x, y);
+                }
+                let m = sum / 100.0;
+                lo = lo.min(m);
+                hi = hi.max(m);
+            }
+            hi - lo
+        };
+
+        for (name, img) in [("still", &still), ("walk", &walk), ("pan", &pan), ("cut3", &cut3)] {
+            let (hp_std, hp_row) = hp_metrics(img);
+            let (sm_std, sm_row, sm_col) = diff_metrics(img, &still, 80, 520, 280, 620);
+            let (cov_std, _, _) = diff_metrics(img, &still, 420, 620, 650, 760);
+            let p_amp = pillar_amp(img);
+            eprintln!(
+                "south_wall path={tag} mode={name:5} hp={hp_std:.2} hp_row={hp_row:.2} smooth_diff={sm_std:.2} row={sm_row:.2} col={sm_col:.2} cov_diff={cov_std:.2} pillar_amp={p_amp:.1}"
+            );
+            assert!(
+                hp_std < 0.85 && hp_row < 0.48,
+                "{tag}/{name}: grazing South wall banding/blotches regressed (hp={hp_std:.2}, hp_row={hp_row:.2})"
+            );
+            if name == "walk" || name == "pan" {
+                assert!(
+                    sm_std < 1.50 && sm_row < 0.60 && sm_col < 0.65,
+                    "{tag}/{name}: moving grazing wall stability regressed (diff={sm_std:.2}, row={sm_row:.2}, col={sm_col:.2})"
+                );
+                assert!(
+                    cov_std < 6.0,
+                    "{tag}/{name}: moving lower-wall emitter shadow smeared (cov_diff={cov_std:.2})"
+                );
+            } else if name == "cut3" {
+                assert!(
+                    sm_std < 2.20 && sm_row < 0.80 && sm_col < 1.30,
+                    "{tag}/{name}: post-cut grazing wall blotches regressed (diff={sm_std:.2}, row={sm_row:.2}, col={sm_col:.2})"
+                );
+                assert!(
+                    p_amp > 100.0,
+                    "{tag}/{name}: post-cut pillar shadow contrast washed out (amp={p_amp:.1})"
+                );
+            } else {
+                assert!(
+                    p_amp > 105.0,
+                    "{tag}/{name}: still pillar shadow contrast washed out (amp={p_amp:.1})"
+                );
+            }
+        }
+    }
+}
