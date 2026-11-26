@@ -268,18 +268,24 @@ fn fg_basis(n:vec3<f32>)->mat3x3<f32> {
     let a=-1.0/(s+n.z);let b=n.x*n.y*a;
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
 }
-// Uniform hemisphere direction k of `count`, turned by r.
+// 4x4 Bayer index (0..15): every 2x2 tile quad partitions [0, 1) evenly across quarters so
+// adjacent probes sample complementary azimuths (180 degrees apart horizontally) and cancel
+// horizon/sky variance inside fg_filter instead of clumping into low-frequency blotches.
+fn fg_bayer4(p:vec2<u32>)->u32 {
+    let x=p.x&3u;let y=p.y&3u;
+    let hi=(((x^y)&1u)<<3u)|((y&1u)<<2u);
+    let lo=((((x>>1u)^(y>>1u))&1u)<<1u)|((y>>1u)&1u);
+    return hi|lo;
+}
+// Uniform hemisphere direction k of `count`, stratified across neighboring tiles via `tile_xy`.
 // The height z (uniform in solid angle) is stratified by k over `count` and the azimuth follows a
-// golden-ratio sequence, both jittered and turned by r, so every count covers the hemisphere
-// evenly. A side x side grid left two cells near the zenith empty at 14 rays: the irradiance's
-// cosine term then read low (gicut's furnace: a slab under an open sky 8% dark).
-fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
-    // Per-probe fixed spatial hash advanced temporally by the R2 low-discrepancy sequence, with
-    // per-ray golden-ratio z stratification so consecutive frames converge smoothly without
-    // correlated elevation-ring oscillation.
-    let base=vec2<f32>(f32(r&0xffffu),f32(r>>16u))*(1.0/65536.0);
+// golden-ratio sequence, both jittered by a 4x4 Bayer spatial phase and advanced temporally by R2,
+// so every count covers the hemisphere evenly and adjacent tiles cancel horizon discontinuities.
+fn fg_direction(n:vec3<f32>,k:u32,count:u32,tile_xy:vec2<u32>)->vec3<f32> {
+    let bx=f32(fg_bayer4(tile_xy+vec2<u32>(2u,1u)))*(1.0/16.0);
+    let by=f32(fg_bayer4(tile_xy))*(1.0/16.0);
     let t=f32(fg_frame()&1023u);
-    let seq=fract(base+vec2<f32>(0.754877666,0.569840296)*t);
+    let seq=fract(vec2<f32>(bx,by)+vec2<f32>(0.754877666,0.569840296)*t);
     let z=(f32(k)+fract(seq.x+f32(k)*0.3819660113))/f32(count);
     let rr=sqrt(max(1.0-z*z,0.0));
     let phi=6.283185307179586*fract(f32(k)*0.6180339887498949+seq.y);
@@ -414,6 +420,10 @@ fn fg_find_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
     let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
     let center=vec2<i32>(floor(rp.xy/f32(FG_TILE)));
     let bank=fg_read_bank();
+    // Account for oblique foreshortening along the tangent plane so grazing walls keep their
+    // history while moving; plane-normal distance (`tol`) still prevents cross-depth leaks.
+    let view_to=lighting.eye-s.world;
+    let view_cos=max(abs(dot(view_to,s.normal))*inverseSqrt(max(dot(view_to,view_to),1e-12)),0.25);
     var best=0.0;
     var chosen=0xffffffffu;
     for(var oy=-1;oy<=1;oy+=1) {
@@ -425,8 +435,9 @@ fn fg_find_prev_tile(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
                 let scale=max(footprint,p.normal.w);
                 let tol=FG_PLANE*scale;
                 if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.78 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
-                let d3=length(s.prev_world-p.point.xyz)/max(scale,1e-6);
-                if d3>1.25 {continue;}
+                let tangent_scale=scale/view_cos;
+                let d3=length(s.prev_world-p.point.xyz)/max(tangent_scale,1e-6);
+                if d3>1.5 {continue;}
                 let score=fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*4.0);
                 if score>best {best=score;chosen=idx;}
             }
@@ -441,6 +452,8 @@ fn fg_find_prev_adapt(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
     let blocks=vec2<i32>((size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK);
     let base=vec2<i32>(floor(rp.xy/f32(FG_BLOCK)-vec2<f32>(0.5)));
     let bank=fg_read_bank();
+    let view_to=lighting.eye-s.world;
+    let view_cos=max(abs(dot(view_to,s.normal))*inverseSqrt(max(dot(view_to,view_to),1e-12)),0.25);
     var best=0.0;
     var chosen=0xffffffffu;
     for(var k=0u;k<4u;k+=1u) {
@@ -451,8 +464,9 @@ fn fg_find_prev_adapt(s:FgSurface,size:vec2<u32>,footprint:f32)->u32 {
         let scale=0.5*max(footprint,p.normal.w);
         let tol=FG_PLANE*max(footprint,p.normal.w);
         if p.point.w<=0.0 || dot(p.normal.xyz,s.normal)<=0.78 || abs(dot(p.normal.xyz,s.prev_world-p.point.xyz))>=tol {continue;}
-        let d3=length(s.prev_world-p.point.xyz)/max(scale,1e-6);
-        if d3>1.5 {continue;}
+        let tangent_scale=scale/view_cos;
+        let d3=length(s.prev_world-p.point.xyz)/max(tangent_scale,1e-6);
+        if d3>1.75 {continue;}
         let score=fg_on_plane(p,s.prev_world,s.normal)*exp(-d3*d3*4.0);
         if score>best {best=score;chosen=idx;}
     }
@@ -471,6 +485,8 @@ fn fg_changed_recently(word:u32,frame:u32)->bool { return ((frame-(word>>8u))&0x
 var<workgroup> fg_moved:atomic<u32>;
 var<workgroup> fg_asked:array<atomic<u32>,2>;
 var<workgroup> fg_wg_cold:array<atomic<u32>,2>;
+var<workgroup> fg_wg_geom:array<atomic<u32>,2>;
+var<workgroup> fg_wg_geom_ans:array<atomic<u32>,2>;
 var<workgroup> fg_trace_mask:array<u32,2>;
 // The workgroup's probe rays and emitter shadow rays, added to the external list's spare words 2
 // and 3, which the GI log prints as fg_rays and fg_shadow_rays.
@@ -492,7 +508,7 @@ fn fg_request(cell:vec4<u32>) {
 }
 // Traces lane `ray` of a probe at s and stores its SH terms in fg_lane_sh[lane]: a miss's as the
 // sky's L2, a hit's as the bounce's L1 (zero when the probe has no surface).
-fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
+fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32,tile_xy:vec2<u32>) {
     var radiance=vec3<f32>(0.0);
     var d=vec3<f32>(0.0,0.0,1.0);
     fg_hit=false;
@@ -504,14 +520,18 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
             // An emitter sample takes this lane's one ray (fg_nee), rotated across frames.
             fg_nee(lane,ray,s,fg_hash(r^(fg_frame()*0x27d4eb2fu)));
         } else {
-            d=fg_direction(s.normal,ray-FG_NEE,FG_HEMI,r);
+            d=fg_direction(s.normal,ray-FG_NEE,FG_HEMI,tile_xy);
             radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
             atomicAdd(&fg_rays[0],1u);
-            if fg_hit && fg_no_value && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
+            if fg_hit && fg_no_value && rl_cache_missed.x!=0xffffffffu && atomicAdd(&fg_asked[lane/FG_RAYS],1u)<4u {fg_request(rl_cache_missed);}
+            if fg_hit {
+                atomicAdd(&fg_wg_geom[lane/FG_RAYS],1u);
+                if !fg_unanswered {atomicAdd(&fg_wg_geom_ans[lane/FG_RAYS],1u);}
+            }
             if fg_hit && (fg_unanswered || fg_changing) {atomicAdd(&fg_wg_cold[lane/FG_RAYS],1u);}
             // A hit no cache level answers yet is left out of the bounce average (fg_accumulate
-            // counts answered rays in FG_ANSWERED) while sky rays always keep their exact
-            // 2*pi/FG_HEMI solid-angle share so missing cache cells never over-brighten sky light.
+            // renormalizes answered bounce over geometry hits alone) while sky rays always keep
+            // their exact 2*pi/FG_HEMI solid-angle share so missing cache cells never over-brighten sky light.
             answered=!(fg_hit && fg_unanswered);
         }
     }
@@ -689,25 +709,30 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
         return;
     }
     // Uniform hemisphere: pdf 1/(2 pi). Sky rays ALWAYS carry their exact 2*pi / FG_HEMI share so
-    // unanswered geometry hits never over-amplify sky light (which caused bright flashes whenever
-    // moving into uncached geometry or after mover invalidation). Unanswered bounce hits borrow
-    // their missing fraction from valid on-plane history, or gently clamp to at most 2x when cold.
+    // unanswered geometry hits never over-amplify sky light. Unanswered bounce hits borrow their
+    // exact missing geometry fraction from on-plane history, or renormalize over geometry hits
+    // alone (never diluted by sky hits) when newly revealed.
     let hemi_scale=6.283185307179586/f32(FG_HEMI);
     let missing_frac=clamp((f32(FG_HEMI)-answered)/f32(FG_HEMI),0.0,1.0);
+    let geom_hits=atomicLoad(&fg_wg_geom[probe_slot]);
+    let geom_ans=atomicLoad(&fg_wg_geom_ans[probe_slot]);
+    let geom_missing_frac=select(0.0,clamp(f32(geom_hits-geom_ans)/f32(geom_hits),0.0,1.0),geom_hits>0u);
     let cold_frac=clamp(f32(atomicLoad(&fg_wg_cold[probe_slot]))/f32(FG_HEMI),0.0,1.0);
     sh[FG_ANSWERED]=0.0;
     for(var i=0u;i<FG_BOUNCE;i+=1u) {sh[i]*=hemi_scale;}
-    if has_old && old.point.w>0.0 && missing_frac>0.0 {
+    if has_old && old.point.w>0.0 && geom_missing_frac>0.0 {
         for(var i=0u;i<12u;i+=1u) {
             let b=FG_BOUNCE+i;
-            sh[b]=sh[b]*hemi_scale+old.sh[b/4u][b%4u]*missing_frac+nee[i]*hemi_scale;
+            sh[b]=sh[b]*hemi_scale+old.sh[b/4u][b%4u]*geom_missing_frac+nee[i]*hemi_scale;
         }
-    } else {
-        let bounce_scale=min(6.283185307179586/answered,2.0*hemi_scale);
+    } else if geom_hits>0u && geom_ans>0u {
+        let bounce_scale=hemi_scale*min(f32(geom_hits)/f32(geom_ans),4.0);
         for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*bounce_scale+nee[i]*hemi_scale;}
+    } else {
+        for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*hemi_scale+nee[i]*hemi_scale;}
     }
     let max_hist=select(FG_HISTORY,16.0,s.moved);
-    var count=1.0;
+    var count=select(1.0,0.25,geom_hits>0u && geom_ans==0u);
     if has_old && old.point.w>0.0 {
         count=min(old.point.w+1.0,max_hist);
     }
@@ -718,7 +743,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     // FG_STABLE_RATE engage on schedule on large scenes).
     var fresh:array<vec4<f32>,10>;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {fresh[v]=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);}
-    if fg_note_change(state_index,fresh,old,count,s.normal,missing_frac) {count=min(count,FG_RESTART);}
+    if fg_note_change(state_index,fresh,old,count,s.normal,max(missing_frac,geom_missing_frac)) {count=min(count,FG_RESTART);}
     let warm_eff=select(max(count-6.0,2.0),min(count,2.0),count<=8.0);
     let eff_count=select(count,warm_eff,cold_frac>0.25);
     let blend=1.0/eff_count;
@@ -734,7 +759,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     let tile=group.y*tiles.x+group.x;
     let frame=fg_frame();
     let slot=lane/FG_RAYS;
-    if lane<2u {atomicStore(&fg_asked[lane],0u);atomicStore(&fg_rays[lane],0u);atomicStore(&fg_wg_cold[lane],0u);}
+    if lane<2u {atomicStore(&fg_asked[lane],0u);atomicStore(&fg_rays[lane],0u);atomicStore(&fg_wg_cold[lane],0u);atomicStore(&fg_wg_geom[lane],0u);atomicStore(&fg_wg_geom_ans[lane],0u);}
     if lane==0u {atomicStore(&fg_moved,0u);}
     workgroupBarrier();
     // A change at a tile probe the filter blends in (3 x 3 tiles, both slots) this frame or the
@@ -796,7 +821,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     if lane%FG_RAYS==0u {fg_trace_mask[slot]=u32(traced.placement!=0u);}
     let trace_mask=workgroupUniformLoad(&fg_trace_mask);
     if trace_mask[0]!=0u || trace_mask[1]!=0u {
-        fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(tile_slot));
+        fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(tile_slot),group.xy);
         workgroupBarrier();
         fg_reduce(lane);
         workgroupBarrier();
@@ -860,8 +885,12 @@ const FG_FILTER_SHORT:f32=24.0;
         let c=fg_plane(index,size);
         if c.point.w<=0.0 {fg_invalidate(fg_filtered(tile_slot,size),size);continue;}
         let mature=c.point.w>FG_FILTER_SHORT;
-        let reach=select(2,select(1,2,FG_HALF_RATE),mature);
-        let sigma=select(1.4,select(1.0,1.3,FG_HALF_RATE),mature);
+        let fresh_probe=c.point.w<=8.0;
+        // Freshly revealed probes (walking backward, fast camera turns, cuts) widen their
+        // co-planar reach to 9x9 tiles so Bayer-stratified probes average cleanly and pull in
+        // converged co-planar neighbours from up to 4 tiles away without bleeding across corners.
+        let reach=select(select(3,4,fresh_probe),select(1,2,FG_HALF_RATE),mature);
+        let sigma=select(select(2.0,2.8,fresh_probe),select(1.0,1.3,FG_HALF_RATE),mature);
         let lum_k=select(1.0,0.75,FG_HALF_RATE);
         let e_c=select(0.0,fg_probe_dc_luma(index,size),mature);
         fg_clear();
@@ -1006,7 +1035,7 @@ var<workgroup> fg_pair:array<u32,2>;
     let clamped=min(block,blocks-vec2<u32>(1u));
     let write_idx=fg_adaptive_in(clamped,size,fg_write_bank());
     let state_idx=tiles.x*tiles.y*FG_SLOTS+clamped.y*blocks.x+clamped.x;
-    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(write_idx,size),inside);atomicStore(&fg_asked[b],0u);atomicStore(&fg_rays[b],0u);atomicStore(&fg_wg_cold[b],0u);}
+    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(write_idx,size),inside);atomicStore(&fg_asked[b],0u);atomicStore(&fg_rays[b],0u);atomicStore(&fg_wg_cold[b],0u);atomicStore(&fg_wg_geom[b],0u);atomicStore(&fg_wg_geom_ans[b],0u);}
     let pair=workgroupUniformLoad(&fg_pair);
     if pair[0]==FG_NONE && pair[1]==FG_NONE {return;}
     let pick=pair[b];
@@ -1030,7 +1059,7 @@ var<workgroup> fg_pair:array<u32,2>;
     if lane%FG_RAYS==0u {fg_trace_mask[b]=u32(traced.placement!=0u);}
     let trace_mask=workgroupUniformLoad(&fg_trace_mask);
     if trace_mask[0]!=0u || trace_mask[1]!=0u {
-        fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(state_idx));
+        fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(state_idx),clamped);
         workgroupBarrier();
         fg_reduce(lane);
         workgroupBarrier();

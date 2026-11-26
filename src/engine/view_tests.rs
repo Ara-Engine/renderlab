@@ -281,3 +281,142 @@ fn an_empty_scene_renders_on_both_paths() {
         engine.capture_view(view).unwrap();
     }
 }
+
+/// Walking backward quickly past an obliquely viewed shadowed wall reveals fresh geometry on the
+/// left edge of the screen. Final-gather probes must preserve oblique history and filter newly
+/// revealed tiles cleanly without large sky/bounce blotches on either RT or non-RT.
+#[test]
+#[ignore]
+fn backward_motion_reveals_shadowed_wall_without_gi_blotches() {
+    const W: u32 = 1280;
+    const H: u32 = 720;
+    let dump_dir = std::env::var_os("RENDERLAB_WALL_DUMP").map(std::path::PathBuf::from);
+    for path in [RenderPath::HardwareRt, RenderPath::NonRt] {
+        let adapter = test_adapter();
+        // SAFETY: the test suite's documented experimental-feature acknowledgement.
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let mut engine = Engine::new(
+            &adapter,
+            EngineDescriptor {
+                path,
+                experimental_ray_query,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let spawn = |engine: &mut Engine, c, h, colour, roughness| {
+            let (vertices, indices) = cube(c, h);
+            let mesh = engine
+                .create_mesh(&MeshData {
+                    vertices: &vertices,
+                    indices: &indices,
+                })
+                .unwrap();
+            let material = engine
+                .create_material(&MaterialDesc {
+                    base_color: colour,
+                    roughness,
+                    double_sided: true,
+                    ..Default::default()
+                })
+                .unwrap();
+            engine.spawn(mesh, material, Mat4::IDENTITY).unwrap()
+        };
+        // Matte grey floor and a tall oblique vertical wall (roughness 0.5 matches Ara's default
+        // material so both GI final gather and rough reflections are exercised). The sun sits
+        // behind the wall (azimuth 0 -> -Z) so both the +Z wall face and the near floor are in
+        // shadow, creating the strong sky-vs-dark-floor hemisphere contrast that exposes blotches.
+        spawn(&mut engine, [0.0, -0.05, 0.0], [40.0, 0.05, 40.0], [0.28, 0.30, 0.36, 1.0], 0.85);
+        spawn(&mut engine, [0.0, 3.0, -0.25], [40.0, 3.0, 0.25], [0.52, 0.54, 0.58, 1.0], 0.50);
+        // Far dark enclosure behind the camera so backward-facing probe rays hit real geometry.
+        spawn(&mut engine, [0.0, 2.5, 16.0], [40.0, 2.5, 0.25], [0.35, 0.36, 0.40, 1.0], 0.85);
+        engine.set_sun(Some(Sun::at(0.45, 0.0))).unwrap();
+        let view = engine
+            .create_view(&ViewDesc {
+                look: ViewLook {
+                    exposure: Exposure::Manual { stops: -12.5 },
+                    ..Default::default()
+                },
+                ..ViewDesc::new(W, H)
+            })
+            .unwrap();
+        let cam = |x: f32, yaw: f32| {
+            let eye = Vec3::new(x, 1.65, 2.6);
+            let target = eye + Vec3::new(6.0 * yaw.cos() + 2.5 * yaw.sin(), -0.1, -2.5 * yaw.cos() + 6.0 * yaw.sin());
+            Camera::look_at(eye, target, Vec3::Y, 0.95, 0.05, 120.0).unwrap()
+        };
+        let step = |engine: &mut Engine, camera: &Camera| {
+            engine.tick(1.0 / 60.0).unwrap();
+            engine.render_view(view, camera).unwrap();
+        };
+        // Settle at start pose, then walk rapidly backward + pan left so a wide fresh strip of the
+        // shadowed wall enters from the left edge every frame.
+        let start = cam(6.0, 0.0);
+        for _ in 0..24 {
+            step(&mut engine, &start);
+        }
+        let mut x = 6.0f32;
+        let mut yaw = 0.0f32;
+        for _ in 0..8 {
+            x -= 0.9;
+            yaw -= 0.025;
+            step(&mut engine, &cam(x, yaw));
+        }
+        let moving = engine.capture_view(view).unwrap();
+        let final_cam = cam(x, yaw);
+        for _ in 0..48 {
+            step(&mut engine, &final_cam);
+        }
+        let settled = engine.capture_view(view).unwrap();
+
+        if let Some(dir) = &dump_dir {
+            let _ = std::fs::create_dir_all(dir);
+            let tag = if path == RenderPath::HardwareRt { "rt" } else { "nonrt" };
+            for (kind, img) in [("moving", &moving), ("settled", &settled)] {
+                let path = dir.join(format!("wall_{tag}_{kind}.png"));
+                let file = std::fs::File::create(&path).unwrap();
+                let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder.write_header().unwrap().write_image_data(&img.rgba8).unwrap();
+            }
+        }
+
+        // Measure 32x32 block-mean RMS and max deviation on the newly-revealed left half of the wall.
+        let (mut sq, mut max_diff, mut n) = (0.0f64, 0.0f64, 0u32);
+        let (mut sum_m, mut sum_s) = (0.0f64, 0.0f64);
+        for ty in (224..480).step_by(32) {
+            for tx in (32..576).step_by(32) {
+                let (mut m, mut s) = (0.0f64, 0.0f64);
+                for dy in 0..32 {
+                    for dx in 0..32 {
+                        let i = ((ty + dy) * W as usize + (tx + dx)) * 4;
+                        let lum = |b: &[u8]| 0.2126 * f64::from(b[i]) + 0.7152 * f64::from(b[i + 1]) + 0.0722 * f64::from(b[i + 2]);
+                        m += lum(&moving.rgba8);
+                        s += lum(&settled.rgba8);
+                    }
+                }
+                m /= 1024.0;
+                s /= 1024.0;
+                let d = (m - s).abs();
+                sq += d * d;
+                max_diff = max_diff.max(d);
+                sum_m += m;
+                sum_s += s;
+                n += 1;
+            }
+        }
+        let rms = (sq / f64::from(n)).sqrt();
+        let mean_m = sum_m / f64::from(n);
+        let mean_s = sum_s / f64::from(n);
+        eprintln!(
+            "wall_disocclusion path={path:?} block_rms={rms:.2} block_max={max_diff:.2} mean_moving={mean_m:.2} mean_settled={mean_s:.2}"
+        );
+        let max_limit = if path == RenderPath::HardwareRt { 2.0 } else { 3.0 };
+        assert!(
+            rms < 1.8 && max_diff < max_limit,
+            "{path:?}: newly revealed wall shows blotches (block_rms={rms:.2}, block_max={max_diff:.2}, mean={mean_m:.2} vs {mean_s:.2})"
+        );
+    }
+}
