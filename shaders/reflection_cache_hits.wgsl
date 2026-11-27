@@ -26,7 +26,7 @@ fn rl_cache_borrow(world:vec3<f32>, level:u32, bin:u32, slot:u32) -> vec3<f32> {
         let p=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
         if p==0xffffffffu || (gi_word(gi_hot(p)+15u)&GI_SPLIT_HOT)!=0u { continue; }
         let lw=rl_cache_outgoing[p].w;
-        if lw<=0.0 || lw==0.5 || lw==1.5 { continue; }
+        if lw<=0.0 || lw==0.5 || lw==1.5 || (gi_word(gi_hot(p))&GI_VALID)==0u || (gi_word(gi_cold(p)+GI_C_STATE)&GI_ORPHAN)!=0u { continue; }
         let lender=rl_cache_outgoing[gi_borrow_at(p)];
         if gi_borrow_own(lender) { return gi_borrow_radiance(r,lender); }
     }
@@ -52,7 +52,7 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
     let slot=gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin)))));
     // Only a settled value (w >= 1.0: 1.0 own bounce, 1.5 needs borrow); changing cells hold
     // 0.75 / 0.5 and absent or unshaded ones hold 0.
-    if slot==0xffffffffu { return vec4<f32>(0.0); }
+    if slot==0xffffffffu || (gi_word(gi_hot(slot))&GI_VALID)==0u || (gi_word(gi_cold(slot)+GI_C_STATE)&GI_ORPHAN)!=0u { return vec4<f32>(0.0); }
     let o=rl_cache_outgoing[slot];
     if o.w<1.0 { return vec4<f32>(0.0); }
     var rgb=o.rgb;
@@ -86,6 +86,7 @@ var<private> rl_cache_geometric:vec3<f32>;
 var<private> rl_cache_slots:vec2<u32>;
 fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
     rl_cache_slots=vec2<u32>(0xffffffffu);
+    rl_cache_missed=vec4<u32>(0xffffffffu);
     if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
     let hit=primary_decode(record);
@@ -112,18 +113,38 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
         // them. The cache's own lookup reads finer there too (gi_sample_refined).
         if l>own && (gi_word(gi_hot(slot)+15u)&GI_SPLIT_HOT)!=0u { continue; }
         let o=rl_cache_outgoing[slot];
-        if o.w>0.0 {
+        if o.w>0.0 && (gi_word(gi_hot(slot))&GI_VALID)!=0u && (gi_word(gi_cold(slot)+GI_C_STATE)&GI_ORPHAN)==0u {
             rl_cache_slots=vec2<u32>(slot,at_start);
             var rgb=o.rgb;
             if o.w==0.5 || o.w==1.5 { rgb+=rl_cache_borrow(world,l,bin,slot); }
             // Report w=0.5 while the hit cell is still ungathered or actively bouncing so final
             // gather probes avoid locking cold startup/cut zero-bounce cache frames into long history.
+            // Under fixed settling, cells paused in GI_SETTLED|GI_RETRY advertise w=0.75 to cache
+            // gathers (preserving downstream wakeability) while counting as warm here once settled.
             let fixed_settle=gi_word(GI_H_FIXED_RAYS)!=0u && gi_word(GI_H_FIXED_SETTLE)!=0u;
-            let cold=o.w<1.0 || o.w==1.5 || (fixed_settle && (gi_word(gi_cold(slot)+GI_C_STATE)&GI_SETTLED)==0u);
+            let cold=o.w==0.5 || o.w==1.5 || select(o.w<1.0,(gi_word(gi_cold(slot)+GI_C_STATE)&GI_SETTLED)==0u,fixed_settle);
             return vec4<f32>(rgb,select(1.0,0.5,cold));
         }
     }
     rl_cache_slots.y=at_start;
+    // Fast-sprint fallback: when no cell exists yet from start down to own, check one level
+    // coarser ONLY if it is non-split (safe against thin-slab leakage) while still requesting
+    // the exact cone/own cell below so the next frame sharpens cleanly.
+    let levels=gi_word(GI_H_LEVELS);
+    var fallback_rgb=vec3<f32>(0.0);
+    var fallback_ok=false;
+    if start+1u<levels {
+        let cs=gi_find_pair(gi_key(start+1u,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(start+1u),bin)))));
+        if cs!=0xffffffffu && (gi_word(gi_hot(cs)+15u)&GI_SPLIT_HOT)==0u {
+            let co=rl_cache_outgoing[cs];
+            if co.w>0.0 && (gi_word(gi_hot(cs))&GI_VALID)!=0u && (gi_word(gi_cold(cs)+GI_C_STATE)&GI_ORPHAN)==0u {
+                rl_cache_slots.x=cs;
+                fallback_rgb=co.rgb;
+                if co.w==0.5 || co.w==1.5 { fallback_rgb+=rl_cache_borrow(world,start+1u,bin,cs); }
+                fallback_ok=true;
+            }
+        }
+    }
     // The cell to ask for: the cone level's when it is absent; the hit's own level's when the cone
     // level's is an orphan (its probe found no surface at that level, as at a thin part's coarse
     // cells, so it never gets a value) or split, and the own one is absent; none while the cell
@@ -136,6 +157,7 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
     if ask!=0xffffffffu {
         rl_cache_missed=vec4<u32>(ask|(bin<<8u),bitcast<vec3<u32>>(vec3<i32>(floor(gi_lattice(world,gi_edge(ask),bin)))));
     }
+    if fallback_ok { return vec4<f32>(fallback_rgb,0.5); }
     return vec4<f32>(0.0);
 }
 // The level whose cells a cone `cone` metres wide at `world` covers, at least the point's own.

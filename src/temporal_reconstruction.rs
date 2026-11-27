@@ -1423,6 +1423,10 @@ pub(crate) struct Planner {
     /// U-FIXED: the sun's turn (radians) summed since the last restart; the sun visibility
     /// history's turn step counts it.
     sun_turned: f32,
+    /// Frames remaining after a rapid camera pan/translation (>2.3 deg or >0.15 m/frame) so
+    /// abrupt stops and rapid direction reversals (e.g. shakes) decay smoothly instead of
+    /// snapping the history window from ~5 directly to 256 on the turnaround frame.
+    fast_motion_decay: u32,
     /// Sun-shadow directions every receiver evaluates this frame.
     pub shadow_rays: u32,
     /// P-RELIT: directions a receiver in a restart zone evaluates instead (`Tr1Zones`
@@ -1452,6 +1456,7 @@ impl Planner {
             unchanged: false,
             sun_still: false,
             sun_turned: 0.0,
+            fast_motion_decay: 0,
             shadow_rays: 8,
             restart_rays: 0,
             probe_rays: 8,
@@ -1660,6 +1665,48 @@ impl Planner {
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
         bytes.extend_from_slice(&matrix_bytes(previous_matrix.inverse()));
+        // Camera stillness (with 1e-6 tolerance so sub-micron physics contact jitter on a
+        // resting follow-target never breaks still accumulation, sun reuse or GI idling);
+        // MV1/SK1's surface source handles moving placements/vertices.
+        let still = !self.reset
+            && previous_matrix
+                .to_cols_array()
+                .iter()
+                .zip(matrix.to_cols_array())
+                .all(|(&a, b)| (a - b).abs() <= 1e-6);
+        let fast_camera = if !self.reset && !still {
+            let eye_move = (eye - previous_eye).length();
+            let basis = |m: Mat4| {
+                let w = m.row(3).truncate();
+                let fwd = if w.length_squared() > 1e-12 {
+                    w.normalize()
+                } else {
+                    (-m.row(2).truncate()).normalize_or_zero()
+                };
+                let right = m.row(0).truncate().normalize_or_zero();
+                (fwd, right)
+            };
+            let (prev_fwd, prev_right) = basis(previous_matrix);
+            let (cur_fwd, cur_right) = basis(matrix);
+            let turn_cos = prev_fwd.dot(cur_fwd).clamp(-1.0, 1.0);
+            let roll_cos = prev_right.dot(cur_right).clamp(-1.0, 1.0);
+            eye_move >= 0.15 || turn_cos <= 0.9992 || roll_cos <= 0.9992
+        } else {
+            false
+        };
+        let motion_window_cap = if self.reset {
+            self.fast_motion_decay = 0;
+            settings.window
+        } else if fast_camera {
+            self.fast_motion_decay = 2;
+            settings.window
+        } else if self.fast_motion_decay > 0 {
+            let cap = if self.fast_motion_decay >= 2 { 16.0 } else { 48.0 };
+            self.fast_motion_decay -= 1;
+            cap
+        } else {
+            settings.window
+        };
         let floats: [f32; 24] = [
             previous_eye.x,
             previous_eye.y,
@@ -1680,7 +1727,7 @@ impl Planner {
             // reconstruct like a surface keyed by direction.
             if visible_sky { 0.0 } else { 1.0 },
             settings.window,
-            event_window.max(1.0),
+            event_window.min(motion_window_cap).max(1.0),
             settings.coverage_window,
             settings.blur_budget,
             settings.sharp_window,
@@ -1691,15 +1738,6 @@ impl Planner {
         for f in floats {
             bytes.extend_from_slice(&f.to_ne_bytes());
         }
-        // Camera stillness (with 1e-6 tolerance so sub-micron physics contact jitter on a
-        // resting follow-target never breaks still accumulation, sun reuse or GI idling);
-        // MV1/SK1's surface source handles moving placements/vertices.
-        let still = !self.reset
-            && previous_matrix
-                .to_cols_array()
-                .iter()
-                .zip(matrix.to_cols_array())
-                .all(|(&a, b)| (a - b).abs() <= 1e-6);
         // MV1 motion-source integration: rigid casters must not enter RTDEF2's settled
         // shadow budget just because the camera is stationary. A deforming caster's swept
         // shadow does not hold the whole frame at the moving count (audit 3.3): receivers it

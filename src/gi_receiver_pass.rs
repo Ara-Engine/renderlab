@@ -120,6 +120,7 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     // settled), keeping RT at full-rate 32 rays untouched.
     if head.contains(program::SOFTWARE_REFLECTION_GEOMETRY) {
         for (old, new) in [
+            ("const FG_NON_RT:bool=false;", "const FG_NON_RT:bool=true;"),
             ("const FG_RAYS:u32=32u;", "const FG_RAYS:u32=16u;"),
             ("const FG_HALF_RATE:bool=false;", "const FG_HALF_RATE:bool=true;"),
             ("const FG_HALF_MIN:f32=8.0;", "const FG_HALF_MIN:f32=8.0;"),
@@ -334,8 +335,9 @@ pub(in crate::renderer) struct ReceiverPipelines {
     /// empty, or the reuse keys (`reuse`).
     lean: bool,
     group_layout: Owned<wgpu::BindGroupLayout>,
-    /// The final gather's six kernels and their group 2 layout (`program::final_gather`).
-    gather: Option<[Owned<wgpu::ComputePipeline>; 6]>,
+    /// The final gather's twelve kernels (6 per-pixel direct emitter + 6 indirect probe) and
+    /// their group 2 layout (`program::final_gather`).
+    gather: Option<[Owned<wgpu::ComputePipeline>; 12]>,
     gather_group: Option<Owned<wgpu::BindGroupLayout>>,
 }
 
@@ -354,35 +356,42 @@ pub(super) struct Targets {
     /// new region clears them (`clear_keys`, encoded with the pass) and does not reuse.
     region: [u32; 4],
     clear_keys: bool,
-    /// The final gather (`program::final_gather`; its kernels are in `ReceiverPipelines`): its
-    /// probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK block and the tile probes' filtered
-    /// copies, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe). Its
-    /// group 2 binds the cache's external request list (binding 30) and its own probe state
-    /// (binding 31) instead of the materials group: its probes read cache cells and sample no
-    /// material, and hits without a cell value ask for their cells there. Not in the shared lighting group: one more writable
-    /// buffer there put the reflection hits' pipeline over the per-stage storage limit.
     /// Binding 30's stand-in while the cache has no resources (its own stand-in is bound
     /// read-only in the lighting group): four words, no room for an entry.
     requests_stand_in: Option<Buffer>,
     /// The gather's own probe state (binding 31, gi_receiver_pass.wgsl fg_state), written each
-    /// frame: 20-word header (recently_changed, gather_frame, bank parity, has_prev, previous VP),
-    /// then two words a probe, zero at creation.
+    /// frame: 40-word header (flags, gather_frame, bank parity, has_prev, previous unjittered VP,
+    /// previous unjittered inverse VP, previous eye, previous pixel angle), followed by two banks
+    /// of two words per probe so fg_trace reads previous-bank state without intra-dispatch races.
     probe_state: Option<Buffer>,
-    /// Per-pixel linear camera ray distance written by `fg_classify` and sampled by `fg_resolve`
-    /// for short-range sub-probe corner contact AO (binding 32, zero extra geometry decode pass).
-    fg_depth: Option<Buffer>,
+    /// Per-pixel guide (2 banks x 8 B: linear ray distance + oct24 normal + 8-bit placement hash)
+    /// and exact per-pixel analytical unshadowed emitter irradiance + dominant direction (16 B),
+    /// bound at binding 32 (`32 B/px`; replaces standalone `fg_depth`).
+    fg_direct_guide: Option<Buffer>,
+    /// Per-pixel direct emitter temporal ratio history (2 banks x 16 B: S_rgb, G_rgb, hist_N,
+    /// world penumbra width) plus à-trous ping-pong (2 x 8 B: R_rgb, variance), bound at
+    /// binding 33 (`48 B/px`; stays well under the 256 MiB storage binding cap through 1440p).
+    fg_direct_data: Option<Buffer>,
     gather_frame: u32,
     previous_vp: Option<glam::Mat4>,
+    previous_jittered_inv: Option<glam::Mat4>,
+    previous_eye: Option<glam::Vec3>,
+    previous_pixel_angle: f32,
+    cut_frames: u32,
+    direct_allowed: bool,
+    run_direct: bool,
+    direct_step16: bool,
     size: [u32; 2],
     tiles: [u32; 2],
     blocks: [u32; 2],
 }
-/// Header words at the start of `probe_state` (gi_receiver_pass.wgsl FG_STATE_HEAD).
-const FG_STATE_HEAD: u64 = 20;
+/// Header words at the start of `probe_state` (gi_receiver_pass.wgsl FG_STATE_HEAD):
+/// words 0..40 are uploaded by CPU; word 40 is the GPU-persistent previous emitter-mode register.
+const FG_STATE_HEAD: u64 = 41;
 /// The final gather's probe tile in pixels and probe size in bytes (gi_receiver_pass.wgsl
-/// FG_TILE, FgProbe).
+/// FG_TILE, FgProbe: pure indirect Sky L2 + Bounce L1 = 4 GiPrepared = 192 bytes).
 const FG_TILE: u32 = 16;
-const FG_PROBE_BYTES: u64 = 240;
+const FG_PROBE_BYTES: u64 = 192;
 /// Probes per tile (gi_receiver_pass.wgsl FG_SLOTS): a second where the tile holds a second plane.
 const FG_SLOTS: u64 = 2;
 /// The adaptive probes' block in pixels (gi_receiver_pass.wgsl FG_BLOCK): one probe each.
@@ -398,6 +407,16 @@ fn lean() -> bool {
 }
 impl Renderer {
     pub(super) fn gi_receiver_targets(&self, size: wgpu::Extent3d) -> Targets {
+        let pixels = u64::from(size.width) * u64::from(size.height);
+        let max_bind = u64::from(self.device.limits().max_storage_buffer_binding_size);
+        let direct_allowed = program::final_gather() && (pixels * 48).max(16) <= max_bind;
+        let guide_bytes = if direct_allowed {
+            (pixels * 32).max(16)
+        } else if (pixels * 16).max(16) <= max_bind {
+            (pixels * 16).max(16)
+        } else {
+            16
+        };
         Targets {
             values: Buffer::new(
                 self,
@@ -445,20 +464,35 @@ impl Renderer {
                 Buffer::new(
                     self,
                     "final gather probe state",
-                    FG_STATE_HEAD * 4 + probes * 8,
+                    FG_STATE_HEAD * 4 + probes * 16,
                     wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 )
             }),
-            fg_depth: program::final_gather().then(|| {
+            fg_direct_guide: program::final_gather().then(|| {
                 Buffer::new(
                     self,
-                    "final gather linear depth",
-                    (u64::from(size.width) * u64::from(size.height) * 4).max(4),
+                    "final gather direct guide",
+                    guide_bytes,
+                    wgpu::BufferUsages::STORAGE,
+                )
+            }),
+            fg_direct_data: program::final_gather().then(|| {
+                Buffer::new(
+                    self,
+                    "final gather direct history and filter",
+                    if direct_allowed { (pixels * 48).max(16) } else { 16 },
                     wgpu::BufferUsages::STORAGE,
                 )
             }),
             gather_frame: 0,
             previous_vp: None,
+            previous_jittered_inv: None,
+            previous_eye: None,
+            previous_pixel_angle: 0.0,
+            cut_frames: 0,
+            direct_allowed,
+            run_direct: false,
+            direct_step16: false,
             size: [size.width, size.height],
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
             blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
@@ -504,7 +538,17 @@ impl Renderer {
             let reuse = built && !moved && still && lean && target.computed && table.is_some() && target.table == table;
             self.queue.write_buffer(&keys.value, 0, &u32::from(reuse).to_ne_bytes());
         }
-        let current_vp = camera.matrix(target.size[0], target.size[1]);
+        // Upload UNJITTERED view-projection for stable reprojection, alongside the EXACT jittered
+        // inverse of the previous frame (matching `primary_frame.inverse`) so `fg_world_from_inv`
+        // reconstructs previous-frame guide hit points with zero sub-pixel plane residual.
+        let current_vp = camera.unjittered().matrix(target.size[0], target.size[1]);
+        let current_jittered_inv = camera.matrix(target.size[0], target.size[1]).inverse();
+        let current_eye = camera.view().inverse().w_axis.truncate();
+        let current_pixel_angle =
+            2.0 * (0.5 * camera.fov_y()).tan() / target.size[1].max(1) as f32;
+        let mut direct_step16 = false;
+        let run_direct = target.direct_allowed && self.gi.has_emitters();
+        let mut next_cut_frames = target.cut_frames.saturating_sub(1);
         if gathers {
             self.gi.request_external();
             self.gi.request_emitters();
@@ -515,23 +559,89 @@ impl Renderer {
                     .as_ref()
                     .is_some_and(|s| s.plan.reset);
                 let prev = target.previous_vp.filter(|_| !reset && !moved);
+                if prev.is_none() {
+                    next_cut_frames = 4;
+                }
+                let prev_eye = target
+                    .previous_eye
+                    .filter(|_| prev.is_some())
+                    .unwrap_or(current_eye);
+                let prev_pa = if prev.is_some() && target.previous_pixel_angle > 0.0 {
+                    target.previous_pixel_angle
+                } else {
+                    current_pixel_angle
+                };
+                let camera_still = prev.is_some_and(|p| {
+                    p.to_cols_array()
+                        .iter()
+                        .zip(current_vp.to_cols_array())
+                        .all(|(&a, b)| (a - b).abs() <= 1e-6)
+                });
+                let fast_camera_or_cut = if let Some(p) = prev {
+                    if camera_still {
+                        false
+                    } else {
+                        let eye_move = (current_eye - prev_eye).length();
+                        let basis = |m: glam::Mat4| {
+                            let w = m.row(3).truncate();
+                            let fwd = if w.length_squared() > 1e-12 {
+                                w.normalize()
+                            } else {
+                                (-m.row(2).truncate()).normalize_or_zero()
+                            };
+                            let right = m.row(0).truncate().normalize_or_zero();
+                            (fwd, right)
+                        };
+                        let (prev_fwd, prev_right) = basis(p);
+                        let (cur_fwd, cur_right) = basis(current_vp);
+                        eye_move >= 0.12
+                            || prev_fwd.dot(cur_fwd).clamp(-1.0, 1.0) <= 0.9995
+                            || prev_right.dot(cur_right).clamp(-1.0, 1.0) <= 0.9995
+                    }
+                } else {
+                    true
+                };
+                direct_step16 = fast_camera_or_cut || self.gi.emitter_moved() || next_cut_frames > 0;
+                let prev_m = prev.unwrap_or(current_vp);
+                let prev_inv = target
+                    .previous_jittered_inv
+                    .filter(|_| prev.is_some())
+                    .unwrap_or(current_jittered_inv);
                 let mut words = [0u32; FG_STATE_HEAD as usize];
                 words[0] = u32::from(self.gi.recently_changed())
-                    | (u32::from(self.gi.emitter_moved()) << 1);
+                    | (u32::from(self.gi.emitter_moved()) << 1)
+                    | (u32::from(direct_step16) << 2)
+                    | (u32::from(camera_still) << 3)
+                    | (u32::from(run_direct) << 4);
                 words[1] = target.gather_frame;
                 words[2] = target.gather_frame & 1;
                 words[3] = u32::from(prev.is_some());
-                let m = prev.unwrap_or(current_vp).to_cols_array();
-                for (i, f) in m.iter().enumerate() {
+                for (i, f) in prev_m.to_cols_array().iter().enumerate() {
                     words[4 + i] = f.to_bits();
                 }
-                self.queue.write_buffer(&state.value, 0, &words.iter().flat_map(|w| w.to_ne_bytes()).collect::<Vec<_>>());
+                for (i, f) in prev_inv.to_cols_array().iter().enumerate() {
+                    words[20 + i] = f.to_bits();
+                }
+                words[36] = prev_eye.x.to_bits();
+                words[37] = prev_eye.y.to_bits();
+                words[38] = prev_eye.z.to_bits();
+                words[39] = prev_pa.to_bits();
+                // Word 40 is the GPU-persistent previous estimator mode; preserve it across
+                // normal frames and zero it on cuts/resets so direct & probe histories stay aligned.
+                let upload_len = if prev.is_some() { 40 } else { FG_STATE_HEAD as usize };
+                self.queue.write_buffer(&state.value, 0, &words[..upload_len].iter().flat_map(|w| w.to_ne_bytes()).collect::<Vec<_>>());
             }
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
         target.gather_frame = target.gather_frame.wrapping_add(1);
         target.previous_vp = Some(current_vp);
+        target.previous_jittered_inv = Some(current_jittered_inv);
+        target.previous_eye = Some(current_eye);
+        target.previous_pixel_angle = current_pixel_angle;
+        target.cut_frames = next_cut_frames;
+        target.run_direct = run_direct;
+        target.direct_step16 = direct_step16;
         target.table = table;
         target.clear_keys = moved && target.keys.is_some();
         target.region = region;
@@ -649,7 +759,12 @@ impl Renderer {
             let group = self.ledger.own(
                 self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("final gather, group 2"),
-                    entries: &[storage(30, 16), storage(31, FG_STATE_HEAD * 4), storage(32, 4)],
+                    entries: &[
+                        storage(30, 16),
+                        storage(31, FG_STATE_HEAD * 4),
+                        storage(32, 16),
+                        storage(33, 16),
+                    ],
                 }),
                 ResourceKind::BindGroupLayout,
             );
@@ -664,6 +779,12 @@ impl Renderer {
                 immediate_size: 0,
             });
             gather = Some([
+                build_entry(&layout, "fg_direct_trace"),
+                build_entry(&layout, "fg_direct_atrous_1"),
+                build_entry(&layout, "fg_direct_atrous_2"),
+                build_entry(&layout, "fg_direct_atrous_4"),
+                build_entry(&layout, "fg_direct_atrous_8"),
+                build_entry(&layout, "fg_direct_atrous_16"),
                 build_entry(&layout, "fg_trace"),
                 build_entry(&layout, "fg_filter"),
                 build_entry(&layout, "fg_filter2"),
@@ -728,12 +849,20 @@ impl Renderer {
         let bindings = state.bindings.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let shade = &**bindings.shade[shading as usize].as_ref().unwrap();
-        if let (Some([trace, filter, filter2, classify, adapt, resolve]), Some(layout), Some(stand_in), Some(probe_state), Some(fg_depth)) = (
+        if let (
+            Some([direct_trace, atrous1, atrous2, atrous4, atrous8, atrous16, trace, filter, filter2, classify, adapt, resolve]),
+            Some(layout),
+            Some(stand_in),
+            Some(probe_state),
+            Some(direct_guide),
+            Some(direct_data),
+        ) = (
             pipelines.gather.as_ref(),
             pipelines.gather_group.as_ref(),
             target.requests_stand_in.as_ref(),
             target.probe_state.as_ref(),
-            target.fg_depth.as_ref(),
+            target.fg_direct_guide.as_ref(),
+            target.fg_direct_data.as_ref(),
         ) {
             // The cache's list is replaced when its table grows, so the group follows it each frame.
             let requests = self.gi.external_requests();
@@ -744,20 +873,33 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupEntry { binding: 30, resource: requests.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 31, resource: probe_state.value.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 32, resource: fg_depth.value.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 32, resource: direct_guide.value.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 33, resource: direct_data.value.as_entire_binding() },
                 ],
             });
-            // Grids: probe tiles, the filters' 8x4 tiles a group, blocks, two blocks a group,
-            // and the resolve's indirect pixel grid (None).
+            let direct_grid = [target.size[0].div_ceil(8), target.size[1].div_ceil(4)];
             let filter_grid = [target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4)];
-            let steps: [(&'static str, &wgpu::ComputePipeline, Option<[u32; 2]>); 6] = [
+            let mut steps: Vec<(&'static str, &wgpu::ComputePipeline, Option<[u32; 2]>)> = Vec::with_capacity(12);
+            if target.run_direct {
+                steps.extend_from_slice(&[
+                    ("fg_direct_trace", direct_trace, Some(direct_grid)),
+                    ("fg_direct_atrous_1", atrous1, Some(direct_grid)),
+                    ("fg_direct_atrous_2", atrous2, Some(direct_grid)),
+                    ("fg_direct_atrous_4", atrous4, Some(direct_grid)),
+                    ("fg_direct_atrous_8", atrous8, Some(direct_grid)),
+                ]);
+                if target.direct_step16 {
+                    steps.push(("fg_direct_atrous_16", atrous16, Some(direct_grid)));
+                }
+            }
+            steps.extend_from_slice(&[
                 ("fg_trace", trace, Some(target.tiles)),
                 ("fg_filter", filter, Some(filter_grid)),
                 ("fg_filter2", filter2, Some(filter_grid)),
                 ("fg_classify", classify, Some(target.blocks)),
                 ("fg_adapt", adapt, Some([target.blocks[0].div_ceil(2), target.blocks[1]])),
                 ("fg_resolve", resolve, None),
-            ];
+            ]);
             for (name, kernel, grid) in steps {
                 mark(encoder, name);
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

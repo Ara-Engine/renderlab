@@ -687,7 +687,7 @@ const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_softw
 /// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. The software hit keeps
 /// rs_trace's result (`rs`, U-RTVIS's seam): the resolve and cache-terminated hits read its
 /// distance `rs.t` where the hardware path reads `hit.t`.
-const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 6] = [
+const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 7] = [
     // The resolve's hit distance: the software traversal's own (`rs`, the loop seam below; the
     // cache-terminated hits can read `rs.t` the same way).
     ("            rl_dist+=hit.t;rl_dist_n+=1.0;\n", "            rl_dist+=rs.t;rl_dist_n+=1.0;\n"),
@@ -711,6 +711,11 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 6] = [
     (
         "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,SHADOW_CASTER_MASK,tmin,tmax,origin,d));\n    while rayQueryProceed(&query) {}\n    return rayQueryGetCommittedIntersection(&query).kind!=0u;\n",
         "    return rs_blocked(origin,d,tmin,tmax);\n",
+    ),
+    // Any-hit visibility ray returning blocker distance (rl_shadow_hit_t, per-pixel direct emitter pass).
+    (
+        "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,SHADOW_CASTER_MASK,tmin,tmax,origin,d));\n    while rayQueryProceed(&query) {}\n    let hit=rayQueryGetCommittedIntersection(&query);\n    return select(-1.0,hit.t,hit.kind!=0u);\n",
+        "    let hit=rs_trace(origin,d,tmin,tmax,true);\n    return select(-1.0,hit.t,hit.record.x!=0u);\n",
     ),
 ];
 /// Cache-terminated reflection hits (shaders/reflection_cache_hits.wgsl): a rough lobe's hit

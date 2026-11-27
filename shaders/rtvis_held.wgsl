@@ -1,8 +1,11 @@
 // U-RTVIS held sun-shadow budget (docs/rtvis.md), appended to the reconstruction's trace
 // module by temporal_reconstruction.rs `trace_source_held`. Each trace entry asks
 // `rtvis_hold` before its receiver's estimate and records the result with `rtvis_store`.
-// History word per pixel: class << 8 | streak, class 1 every direction blocked, 2 every
-// direction clear, 0 anything else (fractional, a miss, a skip, a moving receiver's start).
+// History word per pixel (r32uint):
+//   bits 0..5  (6 bits): streak (0..63, saturating; covers HELD_STREAK=4 and SUN_REUSE_STREAK=32)
+//   bits 6..7  (2 bits): class (1 every direction blocked, 2 every direction clear, 0 none)
+//   bits 8..19 (12 bits): log2(camera w) * 256 depth code (rejects silhouette disocclusions)
+//   bits 20..31 (12 bits): placement slot hash (rejects cross-object streak stealing in motion)
 // words: enabled, probes, streak, and (U-FIXED) the sun visibility history's use this frame;
 // current: this frame's unjittered camera matrix (the history's depth codes); sun.x: the
 // sun visibility history's turn step (primary_sun_history.wgsl).
@@ -14,8 +17,18 @@ struct RtvisHeld { previous:mat4x4<f32>, words:vec4<u32>, lo:vec4<f32>, hi:vec4<
 // every entry that does not call rtvis_hold), and the class it must agree with.
 var<private> tr1_held_probes:u32=0xffffffffu;
 var<private> tr1_held_lit:bool;
-// The reprojected centre texel's history word (0: none), for this frame's streak.
+// The reprojected centre texel's validated history word (0: none), and this pixel's packed
+// (id_hash << 20 | depth << 8) tag for rtvis_store.
 var<private> rtvis_centre:u32;
+var<private> rtvis_self_tag:u32;
+
+fn rtvis_depth_code(w:f32)->u32 { return u32(i32(round(log2(max(w,1e-6))*256.0)))&4095u; }
+fn rtvis_id_hash(slot:u32)->u32 { return ((slot+1u)*0x9e3779b1u)>>20u; }
+fn rtvis_tag_match(h:u32,prev_depth:u32,id_h:u32)->bool {
+    if (h>>20u)!=id_h {return false;}
+    let d=((h>>8u)-prev_depth)&4095u;
+    return d<=16u || d>=4080u;
+}
 
 // Whether point x may sit in the sun shadow of a placement that moved or is skinned
 // (temporal_zones.wgsl tr1_caster_shadow's test over RtvisHeld's swept bounds).
@@ -72,23 +85,30 @@ fn rtvis_moved(slot:u32)->bool {
         ||any(abs(a[2]-b[2])>eps)||any(abs(a[3]-b[3])>eps);
 }
 // Sets HELD_STOP for this receiver: a still, unskinned receiver outside every moving
-// caster's swept shadow whose reprojected 3x3 history is one class for HELD_STREAK frames.
+// caster's swept shadow whose reprojected 3x3 history matches depth & placement ID and is one
+// class for HELD_STREAK frames.
 fn rtvis_hold(receiver:Receiver,slot:u32) {
     tr1_held_probes=0xffffffffu;rtvis_centre=0u;rtvis_motion_rays=rtvis_motion(receiver.world);
+    let here=rtvis_held.current*vec4<f32>(receiver.world,1.0);
+    let id_h=rtvis_id_hash(slot);
+    rtvis_self_tag=(id_h<<20u)|(rtvis_depth_code(here.w)<<8u);
     let batch=primary_placements[slot]&0x1fffffffu;
     if batch_skinned(primary_batch_info(batch)) || rtvis_moved(slot) {return;}
     let c=rtvis_held.previous*vec4<f32>(receiver.world,1.0);
-    if c.w<=0.0 {return;}
+    if c.w<=1e-6 {return;}
     let size=vec2<i32>(textureDimensions(rtvis_history_in));
     let q=vec2<i32>(floor(fma(c.xy/c.w,vec2<f32>(0.5,-0.5),vec2<f32>(0.5))*vec2<f32>(size)));
     if any(q<vec2<i32>(1)) || any(q>=size-vec2<i32>(1)) {return;}
-    rtvis_centre=textureLoad(rtvis_history_in,q,0).x;
-    if rtvis_crossed(receiver.world) {rtvis_centre=0u;return;}
-    let cls=rtvis_centre>>8u;
+    if rtvis_crossed(receiver.world) {return;}
+    let prev_depth=rtvis_depth_code(c.w);
+    let h0=textureLoad(rtvis_history_in,q,0).x;
+    if !rtvis_tag_match(h0,prev_depth,id_h) {return;}
+    rtvis_centre=h0;
+    let cls=(h0>>6u)&3u;
     if rtvis_held.words.x==0u || cls==0u || rtvis_swept(receiver.world) {return;}
     for(var k=0;k<9;k+=1) {
         let h=textureLoad(rtvis_history_in,q+vec2<i32>(k%3-1,k/3-1),0).x;
-        if (h>>8u)!=cls || (h&0xffu)<rtvis_held.words.z {return;}
+        if !rtvis_tag_match(h,prev_depth,id_h) || ((h>>6u)&3u)!=cls || (h&63u)<rtvis_held.words.z {return;}
     }
     tr1_held_probes=rtvis_held.words.y;tr1_held_lit=cls==2u;
 }
@@ -97,7 +117,8 @@ fn rtvis_store(p:vec2<i32>,visible:u32) {
     var h=0u;
     if visible!=FRESH_SKIP && (visible==0u || visible==tr1_rays) {
         let cls=select(2u,1u,visible==0u);
-        h=(cls<<8u)|select(1u,min((rtvis_centre&0xffu)+1u,255u),(rtvis_centre>>8u)==cls);
+        let streak=select(1u,min((rtvis_centre&63u)+1u,63u),((rtvis_centre>>6u)&3u)==cls);
+        h=rtvis_self_tag|(cls<<6u)|streak;
     }
     textureStore(rtvis_history_out,p,vec4<u32>(h));
 }

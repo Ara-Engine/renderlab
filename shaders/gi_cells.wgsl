@@ -205,6 +205,11 @@ const GI_GATHER_MASK:u32=0x7000u;
 const GI_RETRY:u32=512u;
 // Made for a secondary cell's gather: requests nothing (GI_SECONDARY is set too).
 const GI_TERTIARY:u32=1024u;
+// Fixed-budget pending low-priority wake for a retry-expired cell (GI_SETTLED|GI_RETRY):
+// latched in gi_fixed_bin when any cell moves on or after its stamp, cleared in gi_gather_done
+// (not in GI_KEEP). Shares bit 11 with GI_PRIORITY_PENDING_VISIBLE, which is strictly mutually
+// exclusive with fixed_budget (src/gi_cache.rs: fixed_budget = !(software && priority::on())).
+const GI_WAKE:u32=2048u;
 // Fixed update budget (gi_cache.wgsl GI_H_FIXED_RAYS): an event asked for the cell's update
 // (it is ranked above age), GI_SETTLED marks a converged cell whose last gather moved its
 // bounce by <= 1/2048 with no missing/changing hits (cleared on re-trace, event, or movement),

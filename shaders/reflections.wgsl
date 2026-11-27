@@ -86,6 +86,15 @@ fn rl_blocked(origin:vec3<f32>,d:vec3<f32>,tmin:f32,tmax:f32)->bool {
     while rayQueryProceed(&query) {}
     return rayQueryGetCommittedIntersection(&query).kind!=0u;
 }
+// Any-hit shadow visibility ray returning blocker distance along d (>= 0.0 when blocked,
+// -1.0 when clear): feeds physical penumbra width in the per-pixel direct emitter pass.
+fn rl_shadow_hit_t(origin:vec3<f32>,d:vec3<f32>,tmin:f32,tmax:f32)->f32 {
+    var query:ray_query;
+    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,SHADOW_CASTER_MASK,tmin,tmax,origin,d));
+    while rayQueryProceed(&query) {}
+    let hit=rayQueryGetCommittedIntersection(&query);
+    return select(-1.0,hit.t,hit.kind!=0u);
+}
 // A trusted receiver traces RL_HISTORY_STRATA strata of its set a frame (every
 // count/RL_HISTORY_STRATA-th, from an offset turning with the frame) and folds them into a
 // history of at most RL_HISTORY_CAP x count strata; one that moved over a pixel since the

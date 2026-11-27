@@ -211,14 +211,15 @@ var<workgroup> gi_drain_base:u32;
             // its cells again. Cells reached while their hits still change keep the G gathers.
             // Moving cameras create cells among settled ones, which then gather once, not G
             // times (docs/m7-gc1.md).
-            if missing==0u && atomicLoad(&gi_wg_changing)==0u { left=0u; }
+            let raw_changing=atomicLoad(&gi_wg_changing)!=0u;
+            if missing==0u && !raw_changing { left=0u; }
+            let need_wait=missing!=0u || (gi_fixed_on() && raw_changing);
             var retry=state&GI_RETRY;
-            if missing!=0u {
-                if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
+            if need_wait {
+                if left==0u && retry==0u { left=5u; retry=GI_RETRY; }
             } else {
                 retry=0u;
             }
-            if gi_fixed_on() && (missing!=0u || atomicLoad(&gi_wg_changing)!=0u) { left=1u; }
             gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
             gi_queue_shade(slot);
             gi_gather_done(slot,left);

@@ -103,6 +103,7 @@ const GI_SCAN_RELIGHT:u32=16u;
 const GI_RELIGHT_ALL:u32=0x80000000u;
 const GI_RELIGHT_GATHER_ONLY:u32=0x40000000u;
 const GI_RELIGHT_REQUESTS:u32=0x20000000u;
+const GI_RELIGHT_GATHER_DIRTY:u32=0x10000000u;
 // Work counters: misses, traces, integrations, then statistics.
 const GI_W_MISSES:u32=0u;
 const GI_W_TRACES:u32=1u;
@@ -193,8 +194,12 @@ const GI_W_AIMED_OCCLUDED:u32=251u;
 const GI_W_CREATED_SECONDARY:u32=253u;
 const GI_W_CREATED_TERTIARY:u32=254u;
 const GI_W_EVICTED_SECONDARY:u32=255u;
+// Last frame in which gi_fixed_after observed any cell bounce movement (> 1/512): kept across
+// frames (cleared only on full table clear) so cells whose retry window expired while waiting on
+// a changing dependency (GI_SETTLED|GI_RETRY) wake whenever any cell moves on or after their stamp.
+const GI_W_LAST_MOVED:u32=382u;
 // Whether the last frame's capped claim left pixels' cells for later (gi_fill_select): kept
-// across frames (src/gi_cache.rs clears the counters before it).
+// across frames (src/gi_cache.rs clears the counters before GI_W_LAST_MOVED).
 const GI_W_FILL_PENDING:u32=383u;
 // Gather ray budget (gi_gather_count): this frame's estimated gather rays per admission bin,
 // then 1 + the first bin left for a later frame, for pixels' bins and (the next word) the rest.
@@ -785,7 +790,8 @@ const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
     atomicStore(&gi_work[GI_W_FILL_PENDING],0u);
     if cap==0u { return; }
     var wanted=0u;
-    for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]); }
+    let secondary_end=GI_FILL_GATHER_BINS+GI_FILL_SPREAD;
+    for(var b=GI_FILL_GATHER_BINS;b<secondary_end;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]); }
     let pixel_cap=cap-min(wanted,cap/2u);
     var total=0u;
     // With the fixed budget nothing passes the cap: coarse/class-0 cells arrive first and
@@ -812,7 +818,9 @@ const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
         if gathers>gather_cap {
             atomicStore(&gi_work[GI_W_FILL_CUT+1u],b+1u);
             atomicStore(&gi_work[GI_W_FIXED_FILL_SHARE+1u],gi_fill_share(gather_cap-min(before,gather_cap),h));
-            if gi_fixed_trace_on() { atomicStore(&gi_work[GI_W_FILL_PENDING],1u); }
+            // Only genuine secondary bounce misses (order 5) halve next frame's gather budget;
+            // optional tertiary coarse refinements (order 6) use leftover fill capacity only.
+            if gi_fixed_trace_on() && b<secondary_end { atomicStore(&gi_work[GI_W_FILL_PENDING],1u); }
             return;
         }
     }
@@ -1009,7 +1017,7 @@ fn gi_schedule(slot:u32, gathers:u32) {
     let state=gi_table[cold+GI_C_STATE];
     // With the fixed update budget an event only marks the cell dirty and clears settled:
     // the frame's ranking chooses what gathers (gi_fixed_rank).
-    if gi_fixed_on() { gi_table[cold+GI_C_STATE]=(state|GI_DIRTY)&~GI_SETTLED; return; }
+    if gi_fixed_on() { gi_table[cold+GI_C_STATE]=(state|GI_DIRTY)&~(GI_SETTLED|GI_RETRY|GI_WAKE); return; }
     let left=max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,min(gathers,7u));
     var next=(state&~GI_GATHER_MASK)|(left<<GI_GATHER_SHIFT);
     if (state&GI_BQUEUED)==0u {
@@ -1378,8 +1386,13 @@ const GI_SETUP_CHOSEN:u32=7u;
                     gi_table[gi_hot(slot)+15u]=select(0u,GI_SPLIT_HOT,split);
                     gi_table[gi_hot(slot)+GI_HOT_BOUNCE]=0u;
                     if gi_filter_on(GI_FILTER_BOUNCE) { gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE)]=0u; }
+                    // Clear outgoing/borrow radiance immediately when a previously-valid cell
+                    // becomes an orphan (e.g. a moving emitter vacated this cube). Marking w = -1
+                    // lets gi_gather test orphanhood via immutable gi_outgoing (zero race on GI_C_STATE).
+                    gi_outgoing[slot]=vec4<f32>(0.0,0.0,0.0,-1.0);
+                    if gi_borrow_on() { gi_outgoing[gi_borrow_at(slot)]=vec4<f32>(0.0); }
                     gi_table[cold+GI_C_STATE]=GI_TRACED|GI_ORPHAN|select(0u,GI_SPLIT,split)
-                        |(gi_table[cold+GI_C_STATE]&(GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_SHADE));
+                        |(gi_table[cold+GI_C_STATE]&(GI_BQUEUED|GI_SECONDARY|GI_TERTIARY));
                     atomicAdd(&gi_work[GI_W_ORPHANS],1u);
                     atomicAdd(&gi_work[select(GI_W_ORPHAN_NONE,GI_W_ORPHAN_INSIDE,qualified)],1u);
                 }
@@ -1892,7 +1905,10 @@ fn gi_count_read(at:u32, cold:u32) {
         if (flags&GI_SCAN_CASTER)!=0u { reach=gi_reach(slot,gi_cell(slot)); }
         let stale=reach!=0u || (state&GI_STALE)!=0u;
         if stale { atomicAdd(&gi_work[GI_W_STALE_CELLS],1u); }
-        if stale && gi_stale_due(slot,cold,reach==2u) {
+        // A cell whose own cube a moving emitter overlapped re-probes immediately so a moved
+        // emitter never leaves a ghost cell behind; ordinary movers use normal gi_stale_due pacing.
+        let force_emitter=reach==2u && (gi_frame.bounce.z&GI_RELIGHT_GATHER_DIRTY)!=0u;
+        if stale && (force_emitter || gi_stale_due(slot,cold,reach==2u)) {
             atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
             gi_count_read(GI_W_INVALIDATED_READ,cold);
             gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_STALE;
@@ -1906,6 +1922,15 @@ fn gi_count_read(at:u32, cold:u32) {
         for(var w=0u;w<GI_MAX_WORDS;w+=1u) { gi_table[cold+GI_C_KNOWN+w]=0u; }
         atomicAdd(&gi_work[GI_W_REFRESHED],1u);
         trace=true;
+    }
+    // Moving-emitter relight marks GI_DIRTY and clears GI_SETTLED BEFORE the `trace` early return
+    // so cells whose sky rays crossed the moved emitter's swept bounds do not stay GI_SETTLED
+    // with stale emitter bounce frozen in them after re-tracing.
+    if gi_bounce_on() && (flags&GI_SCAN_RELIGHT)!=0u && gi_fixed_on()
+        && (gi_frame.bounce.z&GI_RELIGHT_GATHER_ONLY)!=0u && (state&GI_ORPHAN)==0u {
+        let gather_dirty=(gi_frame.bounce.z&GI_RELIGHT_GATHER_DIRTY)!=0u;
+        let cur=gi_table[cold+GI_C_STATE]&~(GI_SETTLED|GI_RETRY|GI_WAKE);
+        gi_table[cold+GI_C_STATE]=select(cur,cur|GI_DIRTY,gather_dirty);
     }
     if trace {
         gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]|GI_QUEUED;
@@ -1924,12 +1949,7 @@ fn gi_count_read(at:u32, cold:u32) {
             let gather_only=(relight&GI_RELIGHT_GATHER_ONLY)!=0u;
             let p=relight&0xffu;
             if gather_only && gi_fixed_on() {
-                // Moving emitter: analytical light visibility did not change. Clear GI_SETTLED
-                // and GI_DIRTY on every live cell (seen and unseen) so gi_fixed_rank drains seen
-                // cells in strict oldest-first age order (100% round-robin coverage with zero
-                // random bin-94 starvation), while unseen cells cost 0 rays until touched and
-                // then immediately re-gather first when the camera reveals them.
-                gi_table[cold+GI_C_STATE]=state&~(GI_SETTLED|GI_DIRTY);
+                // Already handled above before the `trace` early return.
             } else if all || p==0u || (slot+((relight>>8u)&0xffu))%p==0u {
                 gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
                 gi_queue_shade(slot);
@@ -2084,7 +2104,11 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
         if level>=gi_word(GI_H_LEVELS) || bin>=6u { continue; }
         let cell=bitcast<vec3<i32>>(vec3<u32>(atomicLoad(&gi_external[at+1u]),atomicLoad(&gi_external[at+2u]),atomicLoad(&gi_external[at+3u])));
         if gi_find_pair(gi_key(level,bin,cell))!=0xffffffffu { continue; }
-        gi_request_one(level,bin,cell,GI_BAND_SECONDARY);
+        // When Final Gather owns primary GI, gi_probe is skipped and genuine external misses ARE
+        // the view's primary readers (GI_BAND_PIXEL); bit 16 marks optional coarse-fallback
+        // refinements (GI_BAND_TERTIARY) so they never starve genuine misses or gather budgets.
+        let band=select(GI_BAND_PIXEL,GI_BAND_TERTIARY,(tag&0x10000u)!=0u);
+        gi_request_one(level,bin,cell,band);
     }
     // The reader's cells: one thread a word, so each slot once.
     for(var w=id.x;w<GI_EXTERNAL_SEEN_WORDS;w+=groups.x*64u) {
@@ -2190,7 +2214,7 @@ fn gi_borrow_hit(world:vec3<f32>, level:u32, bin:u32, slot:u32) -> vec3<f32> {
         let p=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
         if p==0xffffffffu || (gi_table[gi_hot(p)+15u]&GI_SPLIT_HOT)!=0u { continue; }
         let lw=gi_outgoing[p].w;
-        if lw<=0.0 || lw==0.5 || lw==1.5 { continue; }
+        if lw<=0.0 || lw==0.5 || lw==1.5 || (gi_table[gi_hot(p)]&GI_VALID)==0u { continue; }
         let lender=gi_outgoing[gi_borrow_at(p)];
         if gi_borrow_own(lender) { return gi_borrow_radiance(r,lender); }
     }
@@ -2224,7 +2248,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME)-1u;
         }
         let o=gi_outgoing[slot];
-        if o.w>0.0 {
+        if o.w>0.0 && (gi_table[gi_hot(slot)]&GI_VALID)!=0u {
             let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0 && (!gi_fixed_on() || gi_bounce_raw_word(slot,0u)!=0u));
             // A hit on an emitting draw sends its reflected light only: its emission is the
             // emitter list's (gi_emitters.wgsl), sampled as a light by every gather.
@@ -2235,7 +2259,8 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             return vec4<f32>(reflected,select(GI_HIT_MISSING,settled,l==base || orphan));
         }
         if l==base {
-            orphan=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u;
+            // Read orphan state from immutable gi_outgoing.w (< 0) to avoid racing GI_C_STATE.
+            orphan=o.w<0.0;
             if !orphan { cause=GI_W_GATHER_UNSHADED; }
         }
     }
@@ -2332,17 +2357,51 @@ fn gi_fixed_bin(slot:u32) -> u32 {
     let state=gi_table[cold+GI_C_STATE];
     if (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))!=GI_TRACED || (state&GI_QUEUED)!=0u { return 0xffffffffu; }
     let frame=gi_word(GI_H_FRAME);
-    if frame-gi_table[cold+GI_C_SEEN]>1u { return 0xffffffffu; }
+    let seen_age=frame-gi_table[cold+GI_C_SEEN];
+    let relighting=(gi_frame.bounce.z&GI_RELIGHT_GATHER_ONLY)!=0u;
+    let never_gathered=gi_bounce_raw_word(slot,0u)==0u;
+    let age=(frame-(state>>GI_STAMP_SHIFT))&0xfffu;
+    // gi_hit_radiance stamps off-screen secondary hit cells with `frame - 1` and Non-RT stable
+    // probes revisit cells on a 4-frame cadence (`FG_STABLE_RATE = 4`); keep recently-seen
+    // cells ranked through seen_age <= 8 so off-screen secondary bounce converges cleanly
+    // without wasting relight rays on stale off-screen geometry behind the camera.
+    if seen_age>8u { return 0xffffffffu; }
+    // During global relights (moving emitters / light edits), partition bins into three strict
+    // visibility tiers (on-screen seen_age==0, secondary/last-frame ==1, recent <=8), each
+    // ordered oldest-first by gather age so bounded ray budgets sweep 100% of visible cells
+    // round-robin before re-gathering any cell twice (zero random-hash starvation).
+    if relighting {
+        let a=min(age,15u);
+        if seen_age==0u { return select(79u+a,GI_FIXED_NONE,never_gathered); }
+        if seen_age==1u { return select(62u+a,78u,never_gathered); }
+        return select(45u+a,61u,never_gathered);
+    }
     // Never gathered: the unfiltered bounce scale word is 0 until the first gather.
-    if gi_bounce_raw_word(slot,0u)==0u { return GI_FIXED_NONE; }
+    if never_gathered { return GI_FIXED_NONE; }
     if (state&GI_DIRTY)!=0u { return GI_FIXED_DIRTY; }
     if (state&GI_SETTLED)!=0u {
+        // A cell whose bounded retry window expired while a hit was still missing/changing keeps
+        // GI_RETRY alongside GI_SETTLED. If any cell in the cache moved on or after this cell's
+        // last gather frame (frame - last_moved <= cell_age), wake it so late multi-hop updates
+        // (A -> B -> C) always propagate, while converged cycles (no movement) stay quiet.
+        if (state&GI_RETRY)!=0u {
+            if (state&GI_WAKE)!=0u { return 1u; }
+            let last_moved=atomicLoad(&gi_work[GI_W_LAST_MOVED]);
+            let cell_age=select(age,4096u,age==0u);
+            if last_moved!=0u && last_moved<frame && (frame-last_moved)<=cell_age {
+                // Latch GI_WAKE onto GI_C_STATE (exclusive per-slot owner in gi_fixed_rank) so
+                // budget deferrals across the 4096-frame stamp boundary never lose a pending wake,
+                // while keeping GI_SETTLED intact and staying strictly at lowest active bin 1u.
+                gi_table[cold+GI_C_STATE]=state|GI_WAKE;
+                return 1u;
+            }
+        }
         // On scenes with active events (movers/relights), wake 1/1024 of settled cells at lowest
         // priority so indirect bounce from indirect changes stays fresh; static views stay quiet.
         if gi_frame.counts.z==0u || ((slot+frame)&1023u)!=0u { return 0xffffffffu; }
         return 0u;
     }
-    return min((frame-(state>>GI_STAMP_SHIFT))&0xfffu,GI_FIXED_AGES);
+    return min(age,GI_FIXED_AGES-1u);
 }
 // Compacted active-slot ranking: workgroup-local histogram + batched appends of (bin << 24 | slot)
 // into layout.items (unused until gi_setup), avoiding empty-slot writes and global atomic stalls.
@@ -2389,8 +2448,11 @@ var<workgroup> gi_wg_rank_buf:array<u32,64>;
 }
 @compute @workgroup_size(1) fn gi_fixed_select() {
     let rays=gi_word(GI_H_FIXED_RAYS);
-    // Keep half of the budget for new-cell tracing whenever last frame deferred misses.
-    let budget=select(rays,rays/2u,gi_fixed_trace_on() && atomicLoad(&gi_work[GI_W_FILL_PENDING])!=0u);
+    // Reserve half of the budget for new-cell tracing when last frame deferred misses, or 1/8
+    // during boosted moving-emitter relights (still >= 2x a normal frame's fill reserve).
+    let fill_pending=gi_fixed_trace_on() && atomicLoad(&gi_work[GI_W_FILL_PENDING])!=0u;
+    let relight_dirty=(gi_frame.bounce.z&GI_RELIGHT_GATHER_DIRTY)!=0u;
+    let budget=select(rays,select(rays/2u,rays-rays/8u,relight_dirty),fill_pending);
     atomicStore(&gi_work[gi_frame.bounce.x],0u);
     var ranked=0u;
     for(var b=0u;b<=GI_FIXED_NONE;b+=1u) { ranked+=atomicLoad(&gi_work[GI_W_GATHER_HIST+b]); }
@@ -2425,11 +2487,12 @@ var<workgroup> gi_wg_rank_buf:array<u32,64>;
         atomicStore(&gi_work[gi_frame.bounce.y+1u+at],gi_fixed_value(slot));
         let cold=gi_cold(slot);
         let state=gi_table[cold+GI_C_STATE];
-        gi_table[cold+GI_C_STATE]=(state&~GI_GATHER_MASK)|GI_BQUEUED|(1u<<GI_GATHER_SHIFT);
+        let next_left=max((state&GI_GATHER_MASK)>>GI_GATHER_SHIFT,1u);
+        gi_table[cold+GI_C_STATE]=(state&~GI_GATHER_MASK)|GI_BQUEUED|(next_left<<GI_GATHER_SHIFT);
     }
 }
 // After the gathers: compare each gathered cell's bounce L0 max channel against its pre-gather
-// value. Movement > 1/2048 (or a first gather) clears GI_SETTLED and counts for scene idle.
+// value. Movement > 1/512 (or a first gather) clears GI_SETTLED|GI_RETRY and counts for scene idle.
 @compute @workgroup_size(64) fn gi_fixed_after(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let count=min(atomicLoad(&gi_work[gi_frame.bounce.x]),gi_frame.offsets.x);
     for(var i=id.x;i<count;i+=groups.x*64u) {
@@ -2439,23 +2502,32 @@ var<workgroup> gi_wg_rank_buf:array<u32,64>;
         var moved=kept==GI_FIXED_UNSET && now!=GI_FIXED_UNSET;
         if kept!=GI_FIXED_UNSET && now!=GI_FIXED_UNSET {
             let a=bitcast<f32>(kept); let b=bitcast<f32>(now);
-            moved=abs(a-b)*256.0>max(max(a,b),1e-6);
+            moved=abs(a-b)*512.0>max(max(a,b),1e-5);
         }
         if !moved { continue; }
         atomicAdd(&gi_work[GI_W_FIXED_MOVED],1u);
+        atomicStore(&gi_work[GI_W_LAST_MOVED],gi_word(GI_H_FRAME));
         let cold=gi_cold(slot);
-        gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_SETTLED;
+        gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~(GI_SETTLED|GI_RETRY|GI_WAKE);
     }
 }
 // A gather's end: with the fixed budget it stamps the cell and tentatively marks settled when
-// no repeat was asked (gi_fixed_after clears GI_SETTLED if the cell moved); else the schedule.
+// no repeat was asked (gi_fixed_after clears GI_SETTLED|GI_RETRY|GI_WAKE if the cell moved); else the schedule.
 fn gi_gather_done(slot:u32, left:u32) {
     if gi_fixed_on() {
         let cold=gi_cold(slot);
         let state=gi_table[cold+GI_C_STATE];
-        let settle=left==0u && gi_word(GI_H_FIXED_SETTLE)!=0u;
-        gi_table[cold+GI_C_STATE]=(state&~(GI_DIRTY|GI_STAMP_MASK|GI_GATHER_MASK|GI_SETTLED))
-            |((gi_word(GI_H_FRAME)&0xfffu)<<GI_STAMP_SHIFT)|select(0u,GI_SETTLED,settle);
+        // Never settle cells on frame 0/1: frame 0 gathers run before `post_emitters` publishes
+        // the emitter list and before 1st-bounce neighbor cells exist, so settling then would
+        // permanently freeze cells at zero emitter/multi-bounce light on still views.
+        // Preserve GI_RETRY if retry expired while a dependency was still unresolved (gi_gather
+        // cleared GI_RETRY whenever no hit was missing or changing) so gi_fixed_bin can wake the
+        // cell if any upstream cell moves later.
+        let settle=left==0u && gi_word(GI_H_FIXED_SETTLE)!=0u && gi_word(GI_H_FRAME)>1u;
+        gi_table[cold+GI_C_STATE]=(state&~(GI_DIRTY|GI_STAMP_MASK|GI_GATHER_MASK|GI_SETTLED|GI_WAKE))
+            |((gi_word(GI_H_FRAME)&0xfffu)<<GI_STAMP_SHIFT)
+            |((left<<GI_GATHER_SHIFT)&GI_GATHER_MASK)
+            |select(0u,GI_SETTLED,settle);
         return;
     }
     gi_schedule(slot,left);
@@ -2765,14 +2837,20 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             // its cells again. Cells reached while their hits still change keep the G gathers.
             // Moving cameras create cells among settled ones, which then gather once, not G
             // times (docs/m7-gc1.md).
-            if missing==0u && atomicLoad(&gi_wg_changing)==0u { left=0u; }
+            let raw_changing=atomicLoad(&gi_wg_changing)!=0u;
+            if missing==0u && !raw_changing { left=0u; }
+            let need_wait=missing!=0u || (gi_fixed_on() && raw_changing);
             var retry=state&GI_RETRY;
-            if missing!=0u {
-                if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
+            if need_wait {
+                // Keep waiting while any hit is missing or still changing (unified so missing
+                // never masks changing). A bounded 5-gather retry window lets multi-hop chains
+                // (A -> B -> C) stay unsettled until upstream updates propagate while still
+                // guaranteeing termination on converged cycles; any cell whose own bounce moves
+                // clears GI_RETRY in gi_fixed_after to grant a fresh window.
+                if left==0u && retry==0u { left=5u; retry=GI_RETRY; }
             } else {
                 retry=0u;
             }
-            if gi_fixed_on() && ((missing!=0u && (state&GI_RETRY)==0u) || atomicLoad(&gi_wg_changing)!=0u) { left=1u; }
             gi_table[cold+GI_C_STATE]=(state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY))|retry;
             gi_queue_shade(slot);
             gi_gather_done(slot,left);

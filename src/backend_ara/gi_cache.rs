@@ -561,6 +561,7 @@ impl Cache {
                 instances: &[scene.models, scene.normals].concat(),
                 skin_revisions: scene.skin_revisions.clone(),
                 emitter_relight: false,
+                emitter_dirty: false,
             },
         );
         let record = StorageBuffer::new(gpu, &finished.frame)?;
@@ -639,11 +640,12 @@ impl Cache {
         if plan.clear {
             fill(graph, rec, &self.table, header, self.table.len - header)?;
             fill(graph, rec, &self.outgoing, 0, self.outgoing.len)?;
+            fill(graph, rec, &self.work, (shared::COUNTER_WORDS - 2) * 4, 8)?;
             for at in layout.queues {
                 fill(graph, rec, &self.work, u64::from(at) * 4, 4)?;
             }
         }
-        fill(graph, rec, &self.work, 0, shared::COUNTER_WORDS * 4)?;
+        fill(graph, rec, &self.work, 0, (shared::COUNTER_WORDS - 2) * 4)?;
         // Next frame's gather queue starts empty; this frame's holds last frame's appends.
         if plan.bounce {
             fill(graph, rec, &self.work, plan.next_queue_at, 4)?;

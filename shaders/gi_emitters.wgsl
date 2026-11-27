@@ -86,8 +86,13 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
             let t=i%triangles;
             let ia=gi_indices[b].data[t*3u];let ib=gi_indices[b].data[t*3u+1u];let ic=gi_indices[b].data[t*3u+2u];
             let a=world_position(gi_vertices[b].data[ia*3u].xyz,p).xyz;
-            let e1=world_position(gi_vertices[b].data[ib*3u].xyz,p).xyz-a;
-            let e2=world_position(gi_vertices[b].data[ic*3u].xyz,p).xyz-a;
+            var e1=world_position(gi_vertices[b].data[ib*3u].xyz,p).xyz-a;
+            var e2=world_position(gi_vertices[b].data[ic*3u].xyz,p).xyz-a;
+            // Preserve true source-front outward winding under negative-determinant (mirrored)
+            // placements so cross(e1, e2) always points along the mesh's front face.
+            if normals[p].info.x<0.0 {
+                let tmp=e1;e1=e2;e2=tmp;
+            }
             // A degenerate triangle stays listed: its solid angle and power are zero.
             let k=listed+i;
             if k>=most { continue; }
@@ -248,6 +253,16 @@ fn gi_emitter_sh(q:vec3<f32>, n:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>
 
 // One lane's share of a cell's emitters (emitter e on lane e % GI_GATHER_LANES), added to
 // gi_gather_sh. Returns the visibility rays traced.
+fn gi_emitter_faces(r:u32, a:vec3<f32>, e1:vec3<f32>, e2:vec3<f32>, q:vec3<f32>) -> bool {
+    let batch=gi_word(r+12u);
+    let place=gi_word(r+13u);
+    let tris=batch_triangles(primary_batch_info(batch));
+    let flags=primary_placements[place];
+    let single_sided=(flags&0x40000000u)!=0u;
+    let thin=(flags&0x20000000u)!=0u;
+    if !single_sided && (thin || tris<=2u) { return true; }
+    return dot(cross(e1,e2),q-a)>0.0;
+}
 fn gi_emitter_gather(lane:u32, q:vec3<f32>, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>) -> u32 {
     let count=gi_word(GI_H_EMITTER_COUNT);
     if !gi_cache_emitters_on() { return 0u; }
@@ -259,9 +274,14 @@ fn gi_emitter_gather(lane:u32, q:vec3<f32>, origin:vec3<f32>, n:vec3<f32>, key:v
         let e1=gi_emitter_vec(r+3u);
         let e2=gi_emitter_vec(r+6u);
         let radiance=gi_emitter_vec(r+9u);
+        if all(radiance<=vec3<f32>(0.0)) { continue; }
+        if !gi_emitter_faces(r,a,e1,e2,q) { continue; }
         let sh=gi_emitter_sh(q,n,a,a+e1,a+e2);
         // Below a microsteradian an emitter adds nothing a cell can show.
         if sh.x<=2.8e-7 { continue; }
+        let f_vec=vec3<f32>(sh.w,sh.y,sh.z)*(1.0/0.488603);
+        let irrad=max(dot(f_vec,n),0.0);
+        if irrad<=1e-7 { continue; }
         // Visibility along one ray to a fixed point of the triangle, from the cell's own hash
         // (the same point every frame for this cell); a point under the cell's horizon moves to
         // the triangle's centroid, or its highest vertex above the horizon when clipped across it.
@@ -281,10 +301,14 @@ fn gi_emitter_gather(lane:u32, q:vec3<f32>, origin:vec3<f32>, n:vec3<f32>, key:v
         if dist<=1e-6 { continue; }
         rays+=1u;
         if !gi_visible_within(origin,to/dist,dist*0.999) { continue; }
-        gi_gather_sh[0]+=radiance*sh.x;
-        gi_gather_sh[1]+=radiance*sh.y;
-        gi_gather_sh[2]+=radiance*sh.z;
-        gi_gather_sh[3]+=radiance*sh.w;
+        let e_dir=radiance*irrad;
+        let f_unit=select(n,normalize(f_vec),dot(f_vec,f_vec)>1e-12);
+        let dir_l1=mix(n,f_unit,clamp(dot(f_unit,n)*2.0,0.0,1.0));
+        let f_eff=dir_l1/max(dot(dir_l1,n),0.5);
+        gi_gather_sh[0]+=e_dir*0.56418958;
+        gi_gather_sh[1]+=e_dir*(0.48860251*f_eff.y);
+        gi_gather_sh[2]+=e_dir*(0.48860251*f_eff.z);
+        gi_gather_sh[3]+=e_dir*(0.48860251*f_eff.x);
     }
     if rays!=0u { atomicAdd(&gi_work[GI_W_EMITTER_RAYS],rays); }
     return rays;

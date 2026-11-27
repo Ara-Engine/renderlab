@@ -246,6 +246,7 @@ fn tr1_still(s:Tr1Surface)->bool {return tr1.flags.z!=0u && !s.moved;}
 // edges keep full temporal AA instead of strobing.
 var<private> tr1_box_active:bool;
 var<private> tr1_soft_box:bool;
+var<private> tr1_box_flat:bool;
 var<private> tr1_box_lo:vec3<f32>;
 var<private> tr1_box_hi:vec3<f32>;
 var<private> tr1_mover_window:f32;
@@ -353,6 +354,7 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
 // Continuous pixel position (pixel centres at + 0.5) of a point (w = 1) or direction (w = 0).
 fn tr1_pixel(m:mat4x4<f32>,p:vec4<f32>,size:vec2<f32>)->vec2<f32> {
     let c=fma(m[0],vec4<f32>(p.x),fma(m[1],vec4<f32>(p.y),fma(m[2],vec4<f32>(p.z),m[3]*p.w)));
+    if c.w<=1e-6 {return vec2<f32>(-1e6);}
     let centre=0.5*size;
     return fma(c.xy/c.w,centre*vec2<f32>(1.0,-1.0),centre);
 }
@@ -447,8 +449,10 @@ fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
             let near_edge=tr1_dot(diff,diff)<=edge_r*edge_r;
             let s_plane_ok=abs(tr1_dot(s.previous_normal,diff))<=reach;
             let crease_ok=tr1_subpixel_crease && s.id==tr1_self && s_plane_ok;
+            // Account for 6-bit octahedral normal quantization (~0.16 rad) on grazing flat walls.
+            let prev_reach=reach+0.16*sqrt(tr1_dot(diff,diff));
             let plane_ok=s_plane_ok
-                && ((a.x&TR1_NORMAL_MASK)==cur_nbits || abs(tr1_dot(prev_n,diff))<=reach);
+                && ((a.x&TR1_NORMAL_MASK)==cur_nbits || abs(tr1_dot(prev_n,diff))<=prev_reach);
             let normal_ok=tr1_dot(prev_n,cur_n)>=0.88;
             ok=near_edge || crease_ok || (plane_ok && normal_ok);
         }
@@ -589,12 +593,33 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
             h.colour=clamped;
             h.weight=min(h.weight,max(tr1.starts.y,1.0));
         }
-    } else if tr1_soft_box && s.id==tr1_self {
-        let pad=max(tr1_box_hi*0.04,vec3<f32>(8e-4));
-        let clamped=clamp(h.colour,max(tr1_box_lo-pad,vec3<f32>(0.0)),tr1_box_hi+pad);
-        if any(clamped!=h.colour) {
-            h.colour=clamped;
-            h.weight=min(h.weight,1.0);
+    } else if tr1_soft_box {
+        var box_lo=tr1_box_lo;
+        var box_hi=tr1_box_hi;
+        var have_box=s.id==tr1_self;
+        // During global moving-emitter relights (mover_meta.z != 0), also clamp the retained
+        // background surface on silhouette pixels to its own same-object 3x3 range so vacated
+        // shadow boundaries never leave a 1-pixel bright ghost ridge along foreground edges.
+        if !have_box && tr1.mover_meta.z!=0u && s.id!=0u {
+            box_lo=vec3<f32>(3.4e38);box_hi=vec3<f32>(-3.4e38);
+            for(var i=0;i<9;i+=1) {
+                if tr1_ring(i)!=s.id {continue;}
+                let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
+                if !tr1_inside(t,size) {continue;}
+                let c=textureLoad(tr1_sample,tr1_map(t),0).xyz;
+                box_lo=min(box_lo,c);box_hi=max(box_hi,c);have_box=true;
+            }
+        }
+        if have_box {
+            let pad=max(box_hi*0.04,vec3<f32>(8e-4));
+            let clamped=clamp(h.colour,max(box_lo-pad,vec3<f32>(0.0)),box_hi+pad);
+            if any(clamped!=h.colour) {
+                // On large moving-emitter relight jumps (>35% outside the current 3x3) on flat
+                // interior pixels (or a retained background silhouette surface), drop stale history cleanly.
+                let big_jump=(tr1_box_flat || s.id!=tr1_self) && tr1.mover_meta.z!=0u && any(abs(h.colour-clamped)>max(box_hi*0.35,vec3<f32>(0.02)));
+                h.colour=clamped;
+                h.weight=select(min(h.weight,1.0),0.0,big_jump);
+            }
         }
     }
     return h;
@@ -772,7 +797,10 @@ fn tr1_sample_normal(q:vec2<i32>,id:u32)->vec3<f32> {
 // The 5x5 start (tent radius 3 pixels, about 18 effective samples on an open surface): the
 // weighted mean and its effective sample count; zero weight when no sample passes.
 fn tr1_wide_start(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->vec4<f32> {
-    let reach=4.0*tr1.previous_eye.w*s.distance;
+    let pixel_w=tr1.previous_eye.w*s.distance;
+    let reach=4.0*pixel_w;
+    let max_d2=(16.0*pixel_w)*(16.0*pixel_w);
+    let cur_n=select(s.normal,-s.normal,s.side==0u);
     var sum=vec3<f32>(0.0);
     var w1=0.0;
     var w2=0.0;
@@ -780,7 +808,13 @@ fn tr1_wide_start(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->vec4<f32> {
         let o=vec2<i32>(i%5,i/5)-vec2<i32>(2);
         let t=p+o;
         if !tr1_inside(t,size) || tr1_sample_id(t)!=s.id {continue;}
-        if any(o!=vec2<i32>(0)) && (abs(tr1_dot(s.normal,tr1_sample_point(t,s.id)-s.point.xyz))>reach || abs(tr1_dot(s.normal,tr1_sample_normal(t,s.id)))<0.88) {continue;}
+        if any(o!=vec2<i32>(0)) {
+            let tp=tr1_sample_point(t,s.id);
+            let diff=tp-s.point.xyz;
+            let tn_raw=tr1_sample_normal(t,s.id);
+            let tn=select(tn_raw,-tn_raw,tr1_dot(tn_raw,tp-tr1.current_eye.xyz)>0.0);
+            if tr1_dot(diff,diff)>max_d2 || abs(tr1_dot(s.normal,diff))>reach || tr1_dot(cur_n,tn)<0.88 {continue;}
+        }
         let d=abs(vec2<f32>(o)+tr1.jitter.xy)/3.0;
         let w=max(1.0-d.x,0.0)*max(1.0-d.y,0.0);
         sum=fma(textureLoad(tr1_sample,t,0).xyz,vec3<f32>(w),sum);
@@ -894,17 +928,21 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     }
     let sample=textureLoad(tr1_sample,tr1_map(p),0).xyz;
     tr1_box_active=tr1_box_applies(s);
+    // Single-surface interior (not a multi-surface geometric silhouette where jitter alternates
+    // between foreground and background objects): safe for large relight-jump history drops.
+    tr1_box_flat=tr1_soft_box && !tr1_box_active && other<0 && s.id!=0u;
     if tr1_box_active || tr1_soft_box {
         tr1_box_lo=vec3<f32>(3.4e38);tr1_box_hi=vec3<f32>(-3.4e38);
-        var flat=tr1_soft_box && !tr1_box_active && other<0 && s.id!=0u;
+        var flat=tr1_box_flat;
         for(var i=0;i<9;i+=1) {
             let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
             if !tr1_inside(t,size) {continue;}
             if !tr1_box_active && tr1_ring(i)!=s.id {continue;}
-            if flat && i!=4 && abs(tr1_dot(s.normal,tr1_sample_normal(tr1_map(t),s.id)))<0.92 {flat=false;}
+            if !tr1_box_active && i!=4 && abs(tr1_dot(s.normal,tr1_sample_normal(tr1_map(t),s.id)))<0.92 {flat=false;continue;}
             let c=textureLoad(tr1_sample,tr1_map(t),0).xyz;
             tr1_box_lo=min(tr1_box_lo,c);tr1_box_hi=max(tr1_box_hi,c);
         }
+        tr1_box_flat=flat;
         if tr1_soft_box && !tr1_box_active && (!flat || any(tr1_box_hi-tr1_box_lo>max(tr1_box_hi*0.25,vec3<f32>(2e-3)))) {
             tr1_mover_window=tr1.windows.x;
         }

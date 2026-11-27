@@ -136,7 +136,8 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     gs_borrow=vec4<f32>(0.0);
     let cold=gi_cold(slot);
     let hot=gi_hot(slot);
-    if (gi_word(hot)&GI_VALID)==0u || (gi_word(cold+GI_C_STATE)&GI_ORPHAN)!=0u { return vec4<f32>(0.0); }
+    if (gi_word(cold+GI_C_STATE)&GI_ORPHAN)!=0u { return vec4<f32>(0.0,0.0,0.0,-1.0); }
+    if (gi_word(hot)&GI_VALID)==0u { return vec4<f32>(0.0); }
     let identity=gi_word(cold+GI_C_MATERIAL);
     // A point whose placement is unknown or not drawn this frame reflects nothing.
     if identity==0u { return vec4<f32>(0.0,0.0,0.0,1.0); }
@@ -274,7 +275,13 @@ fn gs_triangle_emission(k:u32) -> vec3<f32> {
         // Both depend only on the cell's state, so mixed-frame dispatches agree.
         let gs_out=gi_shade_out[slot];
         if gs_out.w>0.0 {
-            let changing=(gi_word(gi_cold(slot)+GI_C_STATE)&(GI_GATHER_MASK|GI_BQUEUED|GI_DIRTY))!=0u;
+            let cell_state=gi_word(gi_cold(slot)+GI_C_STATE);
+            // Under the fixed update budget, keep both unsettled cells and retry-expired cells
+            // (GI_SETTLED|GI_RETRY) advertising changing to cache gather readers so downstream
+            // cells in a multi-hop chain (A -> B -> C) retain GI_RETRY and wake if upstream moves
+            // later, while gi_fixed_bin leaves expired cells asleep whenever no movement occurred.
+            let fixed_unsettled=gi_word(GI_H_FIXED_RAYS)!=0u && gi_word(GI_H_FIXED_SETTLE)!=0u && (cell_state&GI_SETTLED)==0u;
+            let changing=(cell_state&(GI_BQUEUED|GI_DIRTY|GI_RETRY))!=0u || (cell_state&GI_GATHER_MASK)!=0u || fixed_unsettled;
             let needs_borrow=gi_borrow_on() && gi_word(gi_hot(slot)+GI_HOT_BOUNCE)==0u;
             let w=select(select(1.0,0.75,changing),select(1.5,0.5,changing),needs_borrow);
             gi_shade_out[slot]=vec4<f32>(gs_out.xyz,w);

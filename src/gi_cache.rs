@@ -1430,6 +1430,10 @@ pub(crate) struct FrameInputs<'a> {
     /// True when an emitting placement moved recently: schedules fast fixed-budget gather-only
     /// relights on seen cells without invalidating unchanged analytical light visibility.
     pub(crate) emitter_relight: bool,
+    /// True during a moving-emitter relight burst (~4-5 frames after an emitting placement moves):
+    /// schedules a bounded moving-emitter relight wave (`GI_RELIGHT_GATHER_DIRTY` -> 3-tier
+    /// oldest-first visibility sweep with a 1/8 fill reserve) and clears `GI_SETTLED` on live cells.
+    pub(crate) emitter_dirty: bool,
 }
 
 /// The second half: the frame record and, unless the cache is idle this frame, the
@@ -1808,6 +1812,7 @@ impl Planner {
             instances,
             skin_revisions,
             emitter_relight,
+            emitter_dirty,
         } = inputs;
         let mut boxes: Vec<[f32; 6]> = vec![];
         // Scene, environment and lighting events are the tick's: a later view of the tick
@@ -1949,10 +1954,14 @@ impl Planner {
                 self.relight_phase = (self.relight_phase + 1) % period;
                 relight = period | (self.relight_phase << 8);
             } else if emitter_relight {
-                // Moving emitter with unchanged analytical lights: mark all recently seen cells
-                // dirty for the fixed ray budget (GI_RELIGHT_GATHER_ONLY) and rotate unseen cells.
+                // Moving emitter with unchanged analytical lights: mark cells GI_DIRTY on the
+                // frame the emitter moved (bit 28) and clear GI_SETTLED on follow-up frames
+                // (bit 30) so both 1st and 2nd bounce converge cleanly across seen cells.
                 self.relight_phase = (self.relight_phase + 1) % period;
-                relight = (1 << 30) | period | (self.relight_phase << 8);
+                relight = (1 << 30)
+                    | (u32::from(emitter_dirty) << 28)
+                    | period
+                    | (self.relight_phase << 8);
             }
             if relight != 0 {
                 flags |= 16;
@@ -2248,6 +2257,7 @@ pub(super) struct GiState {
     /// `emitter_moved_frames` (1 frame while moving, for zero-lag direct emitters in final gather)
     /// and `emitter_relight_frames` (3 frames, for 1st/2nd/3rd-bounce convergence in gi_cache/TR1).
     emitter_bounds_hash: Option<[u8; 32]>,
+    has_emitters: bool,
     emitter_moved_frames: u32,
     emitter_relight_frames: u32,
 }
@@ -2509,6 +2519,7 @@ impl GiState {
             emitters_max: EMITTERS_MAX,
             emitter_watch: None,
             emitter_bounds_hash: None,
+            has_emitters: false,
             emitter_moved_frames: 0,
             emitter_relight_frames: 0,
         }
@@ -2546,6 +2557,10 @@ impl GiState {
             || p.relight_catchup > 0
             || p.since_movers <= 2
             || self.emitter_relight_frames > 0
+    }
+    /// Whether any active draw in this frame uses an emitting program (CPU skip for zero-emitter scenes).
+    pub(crate) fn has_emitters(&self) -> bool {
+        self.has_emitters
     }
     /// Whether an emitting placement moved on this tick so final gather refreshes direct emitter
     /// radiance with zero temporal lag and no ghost trails.
@@ -4673,6 +4688,7 @@ impl Renderer {
         // object relights bounce cells across the room and wakes final gather immediately.
         let mut bounds = vec![];
         let mut emitter_hasher = Sha256::new();
+        let mut has_emitters = false;
         for d in draws {
             let program = d.material.map_or(self.standard.id(), |m| m.program.id());
             let emits = self.program_slot(program).traits.emits;
@@ -4680,6 +4696,7 @@ impl Renderer {
                 let raw = [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z];
                 bounds.push(raw);
                 if emits {
+                    has_emitters = true;
                     for c in raw {
                         emitter_hasher.update(c.to_le_bytes());
                     }
@@ -4687,7 +4704,9 @@ impl Renderer {
             }
         }
         let emitter_bounds_hash: [u8; 32] = emitter_hasher.finalize().into();
+        self.gi.has_emitters = has_emitters;
         if tick {
+            let first_emitters = self.gi.emitter_bounds_hash.is_none() && has_emitters;
             let moved_emitter = self
                 .gi
                 .emitter_bounds_hash
@@ -4698,14 +4717,39 @@ impl Renderer {
             } else {
                 self.gi.emitter_moved_frames.saturating_sub(1)
             };
-            self.gi.emitter_relight_frames = if moved_emitter {
-                // Software GI cache uses half the per-frame fixed ray budget of hardware RT
-                // (98k vs 196k), so give it twice as many relight frames to sweep the same
-                // total rays after an emitting placement moves.
-                if software { 8 } else { 4 }
+            self.gi.emitter_relight_frames = if moved_emitter || first_emitters {
+                // Keep relight + soft-box active across 1st/2nd/3rd bounce convergence on both
+                // RT (10 frames) and Non-RT (12 frames), including frame 0->1 when `post_emitters`
+                // publishes initial scene emitters after frame 0 gathers already ran.
+                if software { 12 } else { 10 }
             } else {
                 self.gi.emitter_relight_frames.saturating_sub(1)
             };
+        }
+        // Temporarily boost fixed fill+gather ray budget during moving-emitter relight catchup
+        // (6x RT / 8.5x Non-RT burst at full warp stride, 3x tail — sweeps visible seen_age<=8
+        // cells cleanly via gi_fixed_bin's 3 visibility tiers without the 12x software cliff) and
+        // cold-cache startup right after table clear (4x for 12 RT / 16 Non-RT frames). Preserves
+        // higher overrides.
+        let cold_clear = begun.since_clear < if software { 16 } else { 12 };
+        let emitter_burst = self.gi.emitter_moved_frames > 0
+            || self.gi.emitter_relight_frames >= if software { 8 } else { 6 };
+        if (self.gi.emitter_relight_frames > 0 || cold_clear) && begun.header[45] != 0 {
+            let base = begun.header[45];
+            let boosted = if self.gi.emitter_relight_frames > 0 && emitter_burst {
+                if software {
+                    base.max(base.saturating_mul(17).saturating_div(2).min(835_584))
+                } else {
+                    base.max(base.saturating_mul(6).min(1_179_648))
+                }
+            } else if cold_clear {
+                base.max(base.saturating_mul(4).min(if software { 393_216 } else { 786_432 }))
+            } else {
+                base.max(base.saturating_mul(3).min(if software { 294_912 } else { 589_824 }))
+            };
+            begun.header[45] = boosted;
+            let r = self.gi.resources.as_ref().unwrap();
+            self.queue.write_buffer(&r.table, 45 * 4, &boosted.to_le_bytes());
         }
         let poses = crate::renderer::skinning::placement_poses(draws);
         // The environment as the cache sees it: which map, its content and its rotation.
@@ -4828,6 +4872,7 @@ impl Renderer {
                 instances: &self.gi.arrays.as_ref().unwrap().revision_bytes,
                 skin_revisions,
                 emitter_relight: self.gi.emitter_relight_frames > 0,
+                emitter_dirty: emitter_burst,
             },
         );
         let r = self.gi.resources.as_ref().unwrap();
@@ -5077,12 +5122,13 @@ impl GiState {
         if plan.clear {
             encoder.clear_buffer(&r.table, HEADER_WORDS * 4, None);
             encoder.clear_buffer(&r.outgoing, 0, None);
+            encoder.clear_buffer(&r.work, (COUNTER_WORDS - 2) * 4, Some(8));
             for at in layout.queues {
                 encoder.clear_buffer(&r.work, u64::from(at) * 4, Some(4));
             }
         }
-        // The last counter word (GI_W_FILL_PENDING) carries over to the next frame.
-        encoder.clear_buffer(&r.work, 0, Some((COUNTER_WORDS - 1) * 4));
+        // The last two counter words (GI_W_LAST_MOVED, GI_W_FILL_PENDING) carry over across frames.
+        encoder.clear_buffer(&r.work, 0, Some((COUNTER_WORDS - 2) * 4));
         // Next frame's gather queue starts empty; this frame's holds last frame's appends.
         if plan.bounce {
             encoder.clear_buffer(&r.work, plan.next_queue_at, Some(4));
@@ -5155,7 +5201,7 @@ impl GiState {
         let b = 6 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_gather");
         // Build the emitter list before cache gathers using this frame's updated transforms so
-        // both cache gathers (`gi_emitter_gather`) and final gather (`fg_direct_emitters_lane`)
+        // both cache gathers (`gi_emitter_gather`) and final gather (`fg_direct_trace`)
         // see moving emitters on the exact frame they move.
         let need_emitters = self.emitter_readers || emitters_limit() > 0;
         if plan.bounce && need_emitters && !plan.clear {
@@ -5471,6 +5517,7 @@ mod tests {
             instances: &[],
             skin_revisions: vec![],
             emitter_relight: false,
+            emitter_dirty: false,
         };
         let begun = planner.begin(&config, true, true, true);
         assert_eq!(begun.header[45], fixed_rays(true));

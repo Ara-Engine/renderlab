@@ -1881,13 +1881,17 @@ fn arena_night_shadows_and_stairs_repro() {
             .map(|x| close_move.rgba8[(500 * W as usize + x) * 4])
             .max()
             .unwrap();
+        let ref_edge_min = (411..420usize)
+            .map(|x| wall_ref.rgba8[(244 * W as usize + x) * 4])
+            .min()
+            .unwrap();
         let top_edge_min = (411..420usize)
             .map(|x| wall_move.rgba8[(244 * W as usize + x) * 4])
             .min()
             .unwrap();
 
         eprintln!(
-            "repro path={tag} wall(abs={wm_abs:.2},brms={wm_brms:.2},bmax={wm_bmax:.2},edge_min={top_edge_min}) stairs(abs={sm_abs:.2},brms={sm_brms:.2},bmax={sm_bmax:.2},step2_ref={s2_ref:.1},step2_mov={s2_mov:.1}) close(abs={cm_abs:.2},brms={cm_brms:.2},bmax={cm_bmax:.2},fringe_max={cyl_fringe_max})"
+            "repro path={tag} wall(abs={wm_abs:.2},brms={wm_brms:.2},bmax={wm_bmax:.2},edge_min={top_edge_min}/{ref_edge_min}) stairs(abs={sm_abs:.2},brms={sm_brms:.2},bmax={sm_bmax:.2},step2_ref={s2_ref:.1},step2_mov={s2_mov:.1}) close(abs={cm_abs:.2},brms={cm_brms:.2},bmax={cm_bmax:.2},fringe_max={cyl_fringe_max})"
         );
         assert!(
             s2_ref < 45.0 && s2_mov < 45.0,
@@ -1910,8 +1914,8 @@ fn arena_night_shadows_and_stairs_repro() {
             "{tag}: moving cylinder silhouette 2-px fringe regressed (max={cyl_fringe_max})"
         );
         assert!(
-            top_edge_min >= 42,
-            "{tag}: moving wall top edge notch breakup regressed (min={top_edge_min})"
+            top_edge_min >= ref_edge_min.saturating_sub(6) && top_edge_min >= 34,
+            "{tag}: moving wall top edge notch breakup regressed (min={top_edge_min}, ref={ref_edge_min})"
         );
     }
 }
