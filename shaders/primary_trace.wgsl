@@ -27,6 +27,56 @@ fn primary_triangle_vertices(batch:u32,primitive:u32)->array<vec3<f32>,3> {
         primary_vertices[batch].data[primary_indices[batch].data[base+1u]*3u].xyz,
         primary_vertices[batch].data[primary_indices[batch].data[base+2u]*3u].xyz);
 }
+// Convex smooth-mesh shadow terminator lift (Chiang et al. 2019, half-step): on strictly convex
+// smooth triangles where vertex normals diverge from the flat facet, lifts the shadow point onto
+// the smooth curved surface (<= true radius, >= 1.5x clearance over adjacent chord facets) and
+// supplies the interpolated smooth normal for sun back-facing/horizon checks. Flat and concave
+// triangles produce zero offset and keep the exact geometric normal.
+struct PrimaryTerminator { world:vec3<f32>, normal:vec3<f32>, lifted:bool };
+fn primary_shadow_terminator(point:vec3<f32>,record:vec4<u32>,positions:array<vec3<f32>,3>)->PrimaryTerminator {
+    let slot=record.x-1u;
+    let batch=primary_placements[slot]&0x1fffffffu;
+    let base=record.y*3u;
+    let ia=primary_indices[batch].data[base];
+    let ib=primary_indices[batch].data[base+1u];
+    let ic=primary_indices[batch].data[base+2u];
+    let a0=primary_vertices[batch].data[ia*3u];let a1=primary_vertices[batch].data[ia*3u+1u];
+    let b0=primary_vertices[batch].data[ib*3u];let b1=primary_vertices[batch].data[ib*3u+1u];
+    let c0=primary_vertices[batch].data[ic*3u];let c1=primary_vertices[batch].data[ic*3u+1u];
+    let raw_na=vec3<f32>(a0.w,a1.xy);
+    let raw_nb=vec3<f32>(b0.w,b1.xy);
+    let raw_nc=vec3<f32>(c0.w,c1.xy);
+    if dot(raw_na,raw_na)<1e-8 || dot(raw_nb,raw_nb)<1e-8 || dot(raw_nc,raw_nc)<1e-8 {
+        return PrimaryTerminator(point,vec3<f32>(0.0),false);
+    }
+    let g=primary_geometric(positions[0],positions[1],positions[2],slot);
+    let nxf=normals[slot];
+    let nmat=mat3x3<f32>(nxf.x.xyz,nxf.y.xyz,nxf.z.xyz);
+    let na=unit_normal(nmat*unit_normal(raw_na));
+    let nb=unit_normal(nmat*unit_normal(raw_nb));
+    let nc=unit_normal(nmat*unit_normal(raw_nc));
+    if min(dot(na,g),min(dot(nb,g),dot(nc,g)))<=0.5 {
+        return PrimaryTerminator(point,vec3<f32>(0.0),false);
+    }
+    let pa=world_position(positions[0],slot).xyz;
+    let pb=world_position(positions[1],slot).xyz;
+    let pc=world_position(positions[2],slot).xyz;
+    let min_curve=min(min(dot(pb-pa,na),dot(pc-pa,na)),min(min(dot(pa-pb,nb),dot(pc-pb,nb)),min(dot(pa-pc,nc),dot(pb-pc,nc))));
+    if min_curve>=-1e-6 {
+        return PrimaryTerminator(point,vec3<f32>(0.0),false);
+    }
+    let bary=bitcast<vec2<f32>>(record.zw);
+    let w=vec3<f32>(1.0-bary.x-bary.y,bary);
+    let da=min(dot(point-pa,na),0.0);
+    let db=min(dot(point-pb,nb),0.0);
+    let dc=min(dot(point-pc,nc),0.0);
+    let lift=-0.5*(da*na*w.x+db*nb*w.y+dc*nc*w.z);
+    let ns=unit_normal(na*w.x+nb*w.y+nc*w.z);
+    if dot(ns,g)<=0.5 {
+        return PrimaryTerminator(point,vec3<f32>(0.0),false);
+    }
+    return PrimaryTerminator(point+lift,ns,true);
+}
 // Original triangle indices, then one neighbour per opposite-vertex edge, then
 // padding: 6*T+1 words. Original-only buffers have 3*T words and use the probe.
 fn primary_edge_neighbour(batch:u32,primitive:u32,edge:u32)->u32 {
@@ -271,8 +321,9 @@ fn primary_tile_covered(hit:bool,id:vec2<u32>,group:vec2<u32>)->bool {
     let p=vec2<i32>(id.xy);
     textureStore(primary_hit_output,p,trace.record);
     if trace.record.x==0u {return;}
+    let term=primary_shadow_terminator(trace.point,trace.record,trace.positions);
     let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);
-    textureStore(primary_world_output,p,vec4<f32>(receiver.world,receiver.epsilon));
-    let normal=receiver.geometric;
+    textureStore(primary_world_output,p,vec4<f32>(term.world,receiver.epsilon));
+    let normal=select(receiver.geometric,term.normal,term.lifted);
     textureStore(primary_normal_output,p,vec4<f32>(normal,select(1.0,-1.0,receiver.thin)));
 }

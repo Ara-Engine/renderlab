@@ -21,7 +21,9 @@
     textureStore(primary_hit_output,p,trace.record);
     var visible=FRESH_SKIP;
     if trace.record.x!=0u {
-        let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);
+        var receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);
+        let term=primary_shadow_terminator(receiver.world,trace.record,trace.positions);
+        if term.lifted {receiver.world=term.world;receiver.geometric=term.normal;}
         visible=fresh_estimate(receiver,id.xy,size.x,0u);
     }
     textureStore(fresh_output,p,vec4<u32>(select((256u/FRESH_DIRECTIONS)*visible,256u,visible==FRESH_SKIP)));
@@ -86,6 +88,8 @@ fn primary_near_edge(trace:PrimaryTrace,epsilon:f32)->bool {
             let index=primary_repair_base+countOneBits(mask&((1u<<lane)-1u));
             primary_repairs.items[index]=PrimaryRepairItem(id.x+id.y*size.x,trace.record.x,trace.record.y,trace.record.z,trace.record.w);
         }
+        let term=primary_shadow_terminator(receiver.world,trace.record,trace.positions);
+        if term.lifted {receiver.world=term.world;receiver.geometric=term.normal;}
         visible=fresh_estimate(receiver,id.xy,size.x,0u);
     }
     textureStore(fresh_output,p,vec4<u32>(select((256u/FRESH_DIRECTIONS)*visible,256u,visible==FRESH_SKIP)));
@@ -105,7 +109,9 @@ fn primary_near_edge(trace:PrimaryTrace,epsilon:f32)->bool {
     let trace=primary_repair(PrimaryTrace(record,point,v),ray.near,delta/length(delta));
     if all(trace.record==record) && all(trace.point==point) {return;}
     textureStore(primary_hit_output,p,trace.record);
-    let receiver=primary_receiver(trace.point,trace.positions,slot,p);
+    var receiver=primary_receiver(trace.point,trace.positions,slot,p);
+    let term=primary_shadow_terminator(receiver.world,trace.record,trace.positions);
+    if term.lifted {receiver.world=term.world;receiver.geometric=term.normal;}
     let visible=fresh_estimate(receiver,id,size.x,0u);
     textureStore(fresh_output,p,vec4<u32>(select((256u/FRESH_DIRECTIONS)*visible,256u,visible==FRESH_SKIP)));
 }

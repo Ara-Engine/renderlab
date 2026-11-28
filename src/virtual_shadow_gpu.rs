@@ -3608,6 +3608,7 @@ impl Renderer {
         state.requests_held = requests_hold_on()
             && s.lookup == VirtualLookup::Disk
             && !created
+            && rects.is_empty()
             && held_key == state.requests_key;
         state.requests_key = held_key;
         // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.

@@ -2222,3 +2222,532 @@ fn arena_night_south_wall_repro() {
         }
     }
 }
+
+/// Multi-case reproducer for the four My project 5 Play-mode rendering bugs on both
+/// `NonRt` and `HardwareRt`:
+/// 1) Jumping near the South wall in daylight (VSM missing-page L-shaped light-leak lines);
+/// 2) Rolling dark 24x8 sphere (`e_ball`) shadow terminator / self-shadowing;
+/// 3) Scene-wide temporal GI + TR1 noise while `e_ball` rolls inside `e_lamp2`'s radius;
+/// 4) 16-segment archway (`e_arch`) concave soffit horizontal shadow creases under `e_lamp1`.
+#[test]
+#[ignore]
+fn arena_play_four_bugs_repro() {
+    const W: u32 = 1280;
+    const H: u32 = 720;
+    let dump_dir = std::env::var_os("RENDERLAB_FOUR_BUGS_DUMP").map(std::path::PathBuf::from);
+    if let Some(dir) = &dump_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+
+    let vtx = |position: [f32; 3], normal: [f32; 3]| Vertex {
+        position,
+        normal,
+        uv: [0.0; 2],
+        color: [1.0; 4],
+    };
+    let make_sphere = |radius: f32, segs: u32, rings: u32| -> (Vec<Vertex>, Vec<u32>) {
+        let mut verts = Vec::new();
+        let mut idxs = Vec::new();
+        let rows = 2 * rings + 2;
+        for row in 0..rows {
+            let lat = if row <= rings {
+                std::f32::consts::FRAC_PI_2 - row as f32 * std::f32::consts::FRAC_PI_2 / rings as f32
+            } else {
+                -((row - rings - 1) as f32) * std::f32::consts::FRAC_PI_2 / rings as f32
+            };
+            let (sin, cos) = match row {
+                0 => (1.0, 0.0),
+                r if r == rows - 1 => (-1.0, 0.0),
+                _ => lat.sin_cos(),
+            };
+            for col in 0..=segs {
+                let lon = col as f32 / segs as f32 * std::f32::consts::TAU;
+                let n = Vec3::new(cos * lon.sin(), sin, cos * lon.cos());
+                verts.push(vtx((n * radius).to_array(), n.to_array()));
+            }
+        }
+        for row in 0..rows - 1 {
+            for col in 0..segs {
+                let a = row * (segs + 1) + col;
+                let b = a + segs + 1;
+                for tri in [[a, b, a + 1], [a + 1, b, b + 1]] {
+                    let p0 = Vec3::from_array(verts[tri[0] as usize].position);
+                    let p1 = Vec3::from_array(verts[tri[1] as usize].position);
+                    let p2 = Vec3::from_array(verts[tri[2] as usize].position);
+                    if (p1 - p0).cross(p2 - p0).length_squared() > 1e-12 {
+                        idxs.extend_from_slice(&tri);
+                    }
+                }
+            }
+        }
+        (verts, idxs)
+    };
+    let make_arch = |half: Vec3, segs: u32| -> (Vec<Vertex>, Vec<u32>) {
+        let mut verts = Vec::new();
+        let mut idxs = Vec::new();
+        let Vec3 { x, y, z } = half;
+        let radius = 0.6 * x;
+        let crown = -y + 1.6 * y;
+        let rise = radius.min(0.8 * y);
+        let spring = crown - rise;
+        let head_left = |j: u32| -> (glam::Vec2, glam::Vec2) {
+            if j == 0 {
+                return (glam::Vec2::new(-radius, spring), glam::Vec2::X);
+            }
+            if j == segs / 2 {
+                return (glam::Vec2::new(0.0, crown), glam::Vec2::NEG_Y);
+            }
+            let a = std::f32::consts::PI * (1.0 - j as f32 / segs as f32);
+            let (sin, cos) = a.sin_cos();
+            let p = glam::Vec2::new(radius * cos, spring + rise * sin);
+            let n = glam::Vec2::new(-cos / radius, -sin / rise).normalize();
+            (p, n)
+        };
+        let head = |j: u32| -> (glam::Vec2, glam::Vec2) {
+            if j > segs / 2 {
+                let (p, n) = head_left(segs - j);
+                return (glam::Vec2::new(-p.x, p.y), glam::Vec2::new(-n.x, n.y));
+            }
+            head_left(j)
+        };
+        let push_flat = |verts: &mut Vec<Vertex>, idxs: &mut Vec<u32>, pts: &[Vec3], tris: &[[u32; 3]]| {
+            let n = (pts[tris[0][1] as usize] - pts[tris[0][0] as usize])
+                .cross(pts[tris[0][2] as usize] - pts[tris[0][0] as usize])
+                .normalize();
+            let base = verts.len() as u32;
+            for p in pts {
+                verts.push(vtx(p.to_array(), n.to_array()));
+            }
+            for t in tris {
+                idxs.extend_from_slice(&[base + t[0], base + t[1], base + t[2]]);
+            }
+        };
+        let push_quad = |verts: &mut Vec<Vertex>, idxs: &mut Vec<u32>, c: [Vec3; 4]| {
+            push_flat(verts, idxs, &c, &[[0, 1, 2], [0, 2, 3]]);
+        };
+        let leg = [
+            glam::Vec2::new(-x, -y),
+            glam::Vec2::new(-radius, -y),
+            glam::Vec2::new(-radius, spring),
+            glam::Vec2::new(-x, spring),
+        ];
+        let mut upper = vec![glam::Vec2::new(-x, y), glam::Vec2::new(-x, spring)];
+        upper.extend((0..=segs / 2).map(|j| head(j).0));
+        upper.push(glam::Vec2::new(0.0, y));
+        let leg_tris = vec![[0u32, 1, 2], [0, 2, 3]];
+        let upper_tris: Vec<[u32; 3]> = (1..upper.len() as u32 - 1).map(|i| [0, i, i + 1]).collect();
+        for (mirror, depth) in [(1.0f32, z), (-1.0, z), (1.0, -z), (-1.0, -z)] {
+            let rev = (mirror < 0.0) != (depth < 0.0);
+            for (outline, tris) in [(leg.as_slice(), &leg_tris), (upper.as_slice(), &upper_tris)] {
+                let pts: Vec<Vec3> = outline.iter().map(|p| Vec3::new(mirror * p.x, p.y, depth)).collect();
+                let ts: Vec<[u32; 3]> = tris.iter().map(|&[a, b, c]| if rev { [a, c, b] } else { [a, b, c] }).collect();
+                push_flat(&mut verts, &mut idxs, &pts, &ts);
+            }
+        }
+        for (x0, x1) in [(-x, 0.0), (0.0, x)] {
+            push_quad(&mut verts, &mut idxs, [Vec3::new(x0, y, z), Vec3::new(x1, y, z), Vec3::new(x1, y, -z), Vec3::new(x0, y, -z)]);
+        }
+        for (x0, x1) in [(-x, -radius), (radius, x)] {
+            push_quad(&mut verts, &mut idxs, [Vec3::new(x0, -y, -z), Vec3::new(x1, -y, -z), Vec3::new(x1, -y, z), Vec3::new(x0, -y, z)]);
+        }
+        for (at, y0, y1, neg_x) in [(-x, -y, spring, true), (-x, spring, y, true), (x, -y, spring, false), (x, spring, y, false), (-radius, -y, spring, false), (radius, -y, spring, true)] {
+            let mut c = [Vec3::new(at, y0, -z), Vec3::new(at, y0, z), Vec3::new(at, y1, z), Vec3::new(at, y1, -z)];
+            if !neg_x { c.reverse(); }
+            push_quad(&mut verts, &mut idxs, c);
+        }
+        // Smooth soffit under the arch head (exact Ara geometry.rs).
+        let base = verts.len() as u32;
+        for j in 0..=segs {
+            let (p, n) = head(j);
+            let n3 = Vec3::new(n.x, n.y, 0.0).to_array();
+            verts.push(vtx([p.x, p.y, z], n3));
+            verts.push(vtx([p.x, p.y, -z], n3));
+        }
+        for j in 0..segs {
+            let a = base + 2 * j;
+            idxs.extend_from_slice(&[a, a + 1, a + 3, a, a + 3, a + 2]);
+        }
+        (verts, idxs)
+    };
+
+    let save = |name: &str, img: &Image| {
+        let Some(dir) = &dump_dir else { return };
+        let p = dir.join(name);
+        let file = std::fs::File::create(&p).unwrap();
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), img.width, img.height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&img.rgba8).unwrap();
+    };
+    let rms_region = |a: &Image, b: &Image, x0: u32, y0: u32, x1: u32, y1: u32| -> (f64, u8) {
+        let mut sum = 0.0f64;
+        let mut n = 0usize;
+        let mut max_d = 0u8;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = ((y * a.width + x) * 4) as usize;
+                for c in 0..3 {
+                    let d = a.rgba8[i + c].abs_diff(b.rgba8[i + c]);
+                    max_d = max_d.max(d);
+                    sum += f64::from(d) * f64::from(d);
+                    n += 1;
+                }
+            }
+        }
+        ((sum / n.max(1) as f64).sqrt(), max_d)
+    };
+    // Measure max bright outlier above 5x5 local median in a shadow region (catches 1-3 px light-leak lines).
+    let shadow_leak_outlier = |img: &Image, x0: u32, y0: u32, x1: u32, y1: u32| -> (f32, u32) {
+        let luma = |x: u32, y: u32| -> f32 {
+            let i = ((y * img.width + x) * 4) as usize;
+            0.2126 * img.rgba8[i] as f32 + 0.7152 * img.rgba8[i + 1] as f32 + 0.0722 * img.rgba8[i + 2] as f32
+        };
+        let mut max_ex = 0.0f32;
+        let mut count_gt5 = 0u32;
+        for y in (y0 + 4)..(y1 - 4) {
+            for x in (x0 + 4)..(x1 - 4) {
+                let c = luma(x, y);
+                let bg = 0.25 * (luma(x - 4, y) + luma(x + 4, y) + luma(x, y - 4) + luma(x, y + 4));
+                if bg < 95.0 {
+                    let ex = c - bg;
+                    if ex > max_ex { max_ex = ex; }
+                    if ex > 5.0 { count_gt5 += 1; }
+                }
+            }
+        }
+        (max_ex, count_gt5)
+    };
+
+    let mut nonrt_captures: Option<(Image, Image, Image, Image)> = None;
+    let mut rt_captures: Option<(Image, Image, Image, Image)> = None;
+    for path in [RenderPath::NonRt, RenderPath::HardwareRt] {
+        let tag = if path == RenderPath::HardwareRt { "rt" } else { "nonrt" };
+        let adapter = test_adapter();
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let mut engine = Engine::new(&adapter, EngineDescriptor { path, experimental_ray_query, ..Default::default() }).unwrap();
+
+        let spawn_mesh = |engine: &mut Engine, vertices: &[Vertex], indices: &[u32], colour, roughness, xform: Mat4| {
+            let mesh = engine.create_mesh(&MeshData { vertices, indices }).unwrap();
+            let material = engine.create_material(&MaterialDesc { base_color: colour, roughness, double_sided: true, ..Default::default() }).unwrap();
+            engine.spawn(mesh, material, xform).unwrap()
+        };
+        let spawn_box = |engine: &mut Engine, c, h, colour, roughness| {
+            let (v, i) = cube(c, h);
+            spawn_mesh(engine, &v, &i, colour, roughness, Mat4::IDENTITY)
+        };
+
+        // Arena geometry matching My project 5
+        spawn_box(&mut engine, [0.0, -0.25, 0.0], [20.0, 0.25, 20.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        spawn_box(&mut engine, [0.0, 2.0, -19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [0.0, 2.0, 19.75], [20.0, 2.0, 0.25], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [-19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [19.75, 2.0, 0.0], [0.25, 2.0, 19.5], [0.42, 0.41, 0.39, 1.0], 0.92);
+        spawn_box(&mut engine, [0.0, 1.0, -8.0], [4.0, 1.0, 3.0], [0.18, 0.18, 0.18, 1.0], 0.88);
+        for [px, pz] in [[-14.0, -14.0], [14.0, -14.0], [-14.0, 14.0], [14.0, 14.0]] {
+            spawn_box(&mut engine, [px, 2.0, pz], [0.6, 2.0, 0.6], [0.70, 0.67, 0.62, 1.0], 0.90);
+        }
+        spawn_box(&mut engine, [6.0, 0.6, 6.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        spawn_box(&mut engine, [12.0, 0.6, 11.0], [1.0, 0.6, 0.3], [0.52, 0.18, 0.04, 1.0], 0.78);
+        for pos in [[5.0, 0.4, 12.0], [5.9, 0.4, 12.0], [5.45, 1.2, 12.0], [-7.0, 0.4, 13.0]] {
+            spawn_box(&mut engine, pos, [0.4, 0.4, 0.4], [0.4, 0.24, 0.12, 1.0], 0.55);
+        }
+
+        // Exact 16-segment e_arch at [-10, 2.5, 4]
+        let (av, ai) = make_arch(Vec3::new(3.0, 2.5, 0.5), 16);
+        spawn_mesh(&mut engine, &av, &ai, [0.42, 0.41, 0.39, 1.0], 0.92, Mat4::from_translation(Vec3::new(-10.0, 2.5, 4.0)));
+
+        // Exact 24x8 e_ball at [10, 0.4, 4]
+        let (bv, bi) = make_sphere(0.4, 24, 8);
+        let ball = spawn_mesh(&mut engine, &bv, &bi, [0.03, 0.03, 0.03, 1.0], 0.85, Mat4::from_translation(Vec3::new(10.0, 0.4, 4.0)));
+
+        let lm_to_cd = |lm: f32, c: [f32; 3]| { let s = lm / (4.0 * std::f32::consts::PI); [c[0] * s, c[1] * s, c[2] * s] };
+        let set_day_lights = |engine: &mut Engine| {
+            // Exact My project 5 sun: rotation [-45, -32, 0], intensity 1800 -> sky/sun daylight
+            let sun_q = glam::Quat::from_euler(glam::EulerRot::XYZ, -45.0f32.to_radians(), -32.0f32.to_radians(), 0.0);
+            let toward = (sun_q * Vec3::Z).normalize();
+            engine.set_sun(Some(Sun {
+                travel: -toward,
+                illuminance: [1800.0 * 1.0, 1800.0 * 0.806274, 1800.0 * 0.663200],
+                angular_radius: 0.5357f32.to_radians() * 0.5,
+            })).unwrap();
+            engine.set_lights(&[
+                crate::engine::Light::Point { position: Vec3::new(0.0, 3.6, -8.0), candela: lm_to_cd(6000.0, [1.0, 0.72, 0.45]), range: Some(14.0), source_radius: 0.1, cast_shadows: Some(true) },
+                crate::engine::Light::Point { position: Vec3::new(-10.0, 4.4, 5.5), candela: lm_to_cd(5000.0, [1.0, 0.72, 0.45]), range: Some(14.0), source_radius: 0.1, cast_shadows: Some(true) },
+                crate::engine::Light::Point { position: Vec3::new(12.0, 2.5, 12.0), candela: lm_to_cd(4000.0, [1.0, 0.72, 0.45]), range: Some(14.0), source_radius: 0.1, cast_shadows: Some(true) },
+                crate::engine::Light::Spot { position: Vec3::new(0.0, 3.0, -19.35), travel: Vec3::Z, candela: lm_to_cd(8000.0, [1.0, 0.75, 0.48]), range: Some(16.0), inner: 0.0, outer: 1.55, source_radius: 0.5, cast_shadows: Some(true) },
+            ]).unwrap();
+            engine.set_sky(crate::engine::Sky::Atmosphere(crate::engine::AtmosphereMedium::default())).unwrap();
+        };
+        set_day_lights(&mut engine);
+
+        let view = engine.create_view(&ViewDesc {
+            look: ViewLook {
+                exposure: Exposure::Manual { stops: -9.5 },
+                post: crate::PostSettings { bloom: 0.05, motion_blur: false, tonemapper: crate::Tonemapper::Filmic, ..Default::default() },
+                ..Default::default()
+            },
+            ..ViewDesc::new(W, H)
+        }).unwrap();
+
+        let step = |engine: &mut Engine, camera: &Camera| {
+            engine.tick(1.0 / 60.0).unwrap();
+            engine.render_view(view, camera).unwrap();
+        };
+
+        // --- CASE 1: Jumping near South wall (z=19.5) looking down-left into shadow ---
+        let wall_cam = |y: f32, x: f32| {
+            let eye = Vec3::new(x, y, 18.2);
+            let target = Vec3::new(x - 6.0, 0.0, 17.5);
+            Camera::look_at(eye, target, Vec3::Y, 75.0f32.to_radians(), 0.05, 4000.0).unwrap()
+        };
+        engine.cut_view(view);
+        for _ in 0..32 { step(&mut engine, &wall_cam(1.65, 2.0)); }
+        let wall_still = engine.capture_view(view).unwrap();
+        save(&format!("c1_wall_{tag}_still.png"), &wall_still);
+
+        let mut worst_ex = 0.0f32;
+        let mut worst_cnt = 0u32;
+        let mut worst_frame = 0u32;
+        let mut worst_img: Option<Image> = None;
+        // 3 consecutive jumps while slowly strafing along the wall (triggers fresh fine VSM pages).
+        let mut vy = 5.0f32;
+        let mut y = 1.65f32;
+        for f in 1..=90u32 {
+            let dt = 1.0 / 60.0;
+            y += vy * dt;
+            vy -= 9.81 * dt;
+            if y <= 1.65 {
+                y = 1.65;
+                vy = 5.0;
+            }
+            let x = 2.0 - 0.04 * f as f32;
+            step(&mut engine, &wall_cam(y, x));
+            if f % 3 == 0 {
+                let img = engine.capture_view(view).unwrap();
+                let (ex, cnt) = shadow_leak_outlier(&img, 180, 180, 1180, 680);
+                if ex > worst_ex {
+                    worst_ex = ex;
+                    worst_cnt = cnt;
+                    worst_frame = f;
+                    worst_img = Some(img);
+                }
+            }
+        }
+        if let Some(img) = &worst_img {
+            save(&format!("c1_wall_{tag}_jump_f{worst_frame}.png"), img);
+        }
+        eprintln!("CASE1 wall_jump path={tag:5} worst_frame={worst_frame:2} max_outlier={worst_ex:.2} px_gt5={worst_cnt}");
+
+        // --- CASE 2 & 3: Rolling ball (shadow on ball + whole-scene noise on distant static walls/floor) ---
+        // View looking at ball at [10, 0.4, 4] from the shadow side (camera at [11.6, 1.5, 2.2])
+        // with wide static floor + East/North walls visible around it.
+        let ball_cam = Camera::look_at(
+            Vec3::new(11.6, 1.55, 2.0),
+            Vec3::new(9.6, 0.45, 4.6),
+            Vec3::Y,
+            75.0f32.to_radians(),
+            0.05,
+            4000.0,
+        ).unwrap();
+        engine.set_transform(ball, Mat4::from_translation(Vec3::new(10.0, 0.4, 4.0))).unwrap();
+        engine.cut_view(view);
+        for _ in 0..46 { step(&mut engine, &ball_cam); }
+        let ball_s1 = engine.capture_view(view).unwrap();
+        step(&mut engine, &ball_cam);
+        let ball_s2 = engine.capture_view(view).unwrap();
+        let (still_noise_rms, still_noise_max) = rms_region(&ball_s1, &ball_s2, 50, 50, 500, 400);
+        save(&format!("c2_ball_{tag}_still.png"), &ball_s2);
+
+        // Now roll the ball slowly across the floor (inside e_lamp2's 14 m radius!)
+        let mut bx = 10.0f32;
+        let mut bz = 4.0f32;
+        let mut angle = 0.0f32;
+        for f in 1..=39u32 {
+            let step_d = 0.03f32;
+            bx -= step_d * 0.6;
+            bz += step_d * 0.8;
+            angle += step_d / 0.4;
+            let xf = Mat4::from_translation(Vec3::new(bx, 0.4, bz)) * Mat4::from_rotation_x(angle);
+            engine.set_transform(ball, xf).unwrap();
+            step(&mut engine, &ball_cam);
+            if f == 12 {
+                let mid = engine.capture_view(view).unwrap();
+                save(&format!("c2_ball_{tag}_roll_f12.png"), &mid);
+            }
+        }
+        let ball_r1 = engine.capture_view(view).unwrap();
+        {
+            let step_d = 0.03f32;
+            bx -= step_d * 0.6;
+            bz += step_d * 0.8;
+            angle += step_d / 0.4;
+            let xf = Mat4::from_translation(Vec3::new(bx, 0.4, bz)) * Mat4::from_rotation_x(angle);
+            engine.set_transform(ball, xf).unwrap();
+            step(&mut engine, &ball_cam);
+        }
+        let ball_r2 = engine.capture_view(view).unwrap();
+        let (roll_noise_rms, roll_noise_max) = rms_region(&ball_r1, &ball_r2, 50, 50, 500, 400);
+        save(&format!("c2_ball_{tag}_roll_f40.png"), &ball_r2);
+        eprintln!(
+            "CASE2_3 ball_day  path={tag:5} static_region_noise still=(rms={still_noise_rms:.2},max={still_noise_max}) roll=(rms={roll_noise_rms:.2},max={roll_noise_max})"
+        );
+        assert!(
+            roll_noise_rms <= still_noise_rms + 0.35,
+            "ball_day static-region noise spiked while rolling on {tag}: still={still_noise_rms:.2} roll={roll_noise_rms:.2}"
+        );
+
+        // Also check Case 3 in indirect/night lighting (where GI noise explodes most dramatically!)
+        engine.set_sun(None).unwrap();
+        engine.set_view(view, &ViewDesc {
+            look: ViewLook {
+                exposure: Exposure::Manual { stops: -1.5 },
+                post: crate::PostSettings { bloom: 0.05, motion_blur: false, tonemapper: crate::Tonemapper::Filmic, ..Default::default() },
+                ..Default::default()
+            },
+            ..ViewDesc::new(W, H)
+        }).unwrap();
+        // Look across the arena toward the North/East walls while ball sits at [10, 0.4, 4] (off-screen/side)
+        let arena_cam = Camera::look_at(
+            Vec3::new(2.0, 1.65, 14.0),
+            Vec3::new(-4.0, 1.8, -6.0),
+            Vec3::Y,
+            75.0f32.to_radians(),
+            0.05,
+            4000.0,
+        ).unwrap();
+        engine.set_transform(ball, Mat4::from_translation(Vec3::new(10.0, 0.4, 4.0))).unwrap();
+        engine.cut_view(view);
+        for _ in 0..48 { step(&mut engine, &arena_cam); }
+        let n_s1 = engine.capture_view(view).unwrap();
+        step(&mut engine, &arena_cam);
+        let n_s2 = engine.capture_view(view).unwrap();
+        let (ns_rms, ns_max) = rms_region(&n_s1, &n_s2, 100, 100, 1180, 620);
+        save(&format!("c3_night_{tag}_still.png"), &n_s2);
+
+        let mut nbx = 10.0f32;
+        for _ in 0..24 {
+            nbx += 0.025;
+            engine.set_transform(ball, Mat4::from_translation(Vec3::new(nbx, 0.4, 4.0))).unwrap();
+            step(&mut engine, &arena_cam);
+        }
+        let n_r1 = engine.capture_view(view).unwrap();
+        nbx += 0.025;
+        engine.set_transform(ball, Mat4::from_translation(Vec3::new(nbx, 0.4, 4.0))).unwrap();
+        step(&mut engine, &arena_cam);
+        let n_r2 = engine.capture_view(view).unwrap();
+        let (nr_rms, nr_max) = rms_region(&n_r1, &n_r2, 100, 100, 1180, 620);
+        save(&format!("c3_night_{tag}_ball_rolling.png"), &n_r2);
+        eprintln!(
+            "CASE3   night_gi  path={tag:5} distant_scene_noise still=(rms={ns_rms:.2},max={ns_max}) ball_rolling=(rms={nr_rms:.2},max={nr_max})"
+        );
+        assert!(
+            nr_rms <= ns_rms + 0.60,
+            "night_gi distant-scene noise spiked while rolling off-screen ball on {tag}: still={ns_rms:.2} rolling={nr_rms:.2}"
+        );
+
+        // --- CASE 4: Archway soffit under e_lamp1 at night ---
+        let arch_cam = Camera::look_at(
+            Vec3::new(-7.6, 2.0, 8.6),
+            Vec3::new(-10.8, 3.1, 4.0),
+            Vec3::Y,
+            60.0f32.to_radians(),
+            0.05,
+            4000.0,
+        ).unwrap();
+        engine.cut_view(view);
+        for _ in 0..48 { step(&mut engine, &arch_cam); }
+        let arch_img = engine.capture_view(view).unwrap();
+        save(&format!("c4_arch_{tag}.png"), &arch_img);
+        let bundle = (wall_still, ball_s2, ball_r2, arch_img);
+        if path == RenderPath::NonRt {
+            nonrt_captures = Some(bundle);
+        } else {
+            rt_captures = Some(bundle);
+        }
+    }
+
+    let (w_n, bs_n, br_n, a_n) = nonrt_captures.unwrap();
+    let (w_r, bs_r, br_r, a_r) = rt_captures.unwrap();
+    let max_chan_diff = |a: &Image, b: &Image, x: u32, y: u32| -> u8 {
+        let i = ((y * a.width + x) * 4) as usize;
+        a.rgba8[i].abs_diff(b.rgba8[i])
+            .max(a.rgba8[i + 1].abs_diff(b.rgba8[i + 1]))
+            .max(a.rgba8[i + 2].abs_diff(b.rgba8[i + 2]))
+    };
+    let luma_u8 = |img: &Image, x: u32, y: u32| -> f32 {
+        let i = ((y * img.width + x) * 4) as usize;
+        (img.rgba8[i] as f32 + img.rgba8[i + 1] as f32 + img.rgba8[i + 2] as f32) / 3.0
+    };
+    // Case 1A: deep wall-shadow floor umbra must have no sparse-VSM page-border L-lines.
+    let (mut umbra_gt3, mut umbra_max) = (0u32, 0u8);
+    for y in (H / 4)..(H - 6) {
+        for x in 6..(W - 6) {
+            if luma_u8(&w_r, x, y) >= 30.0 { continue; }
+            let mut near_sunlit = false;
+            'nbr: for dy in -5i32..=5 {
+                for dx in -5i32..=5 {
+                    if luma_u8(&w_r, (x as i32 + dx) as u32, (y as i32 + dy) as u32) > 40.0 {
+                        near_sunlit = true;
+                        break 'nbr;
+                    }
+                }
+            }
+            if !near_sunlit {
+                let d = max_chan_diff(&w_n, &w_r, x, y);
+                if d > 3 { umbra_gt3 += 1; }
+                umbra_max = umbra_max.max(d);
+            }
+        }
+    }
+    assert!(
+        umbra_gt3 <= 10 && umbra_max <= 6,
+        "Case 1A wall-shadow umbra leaked on NonRt vs RT: px_gt3={umbra_gt3} max={umbra_max}"
+    );
+    // Case 1B: rolling ball floor shadow must have no evicted-page bright square outline.
+    let (mut bshad_gt4, mut bshad_max) = (0u32, 0u8);
+    for y in (H / 2)..(H - 4) {
+        for x in 4..(W - 4) {
+            if luma_u8(&br_r, x, y) >= 55.0 { continue; }
+            let mut near_lit = false;
+            'nbr2: for dy in -3i32..=3 {
+                for dx in -3i32..=3 {
+                    if luma_u8(&br_r, (x as i32 + dx) as u32, (y as i32 + dy) as u32) > 70.0 {
+                        near_lit = true;
+                        break 'nbr2;
+                    }
+                }
+            }
+            if !near_lit {
+                let d = max_chan_diff(&br_n, &br_r, x, y);
+                if d > 4 { bshad_gt4 += 1; }
+                bshad_max = bshad_max.max(d);
+            }
+        }
+    }
+    assert!(
+        bshad_gt4 <= 4 && bshad_max <= 8,
+        "Case 1B rolling-ball floor shadow leaked on NonRt vs RT: px_gt4={bshad_gt4} max={bshad_max}"
+    );
+    // Case 2: ball crown matches between NonRt and RT (smooth shadow terminator on both paths).
+    let mut ball_gt5 = 0u32;
+    for y in (H * 42 / 100)..(H * 72 / 100) {
+        for x in (W * 35 / 100)..(W * 58 / 100) {
+            if max_chan_diff(&bs_n, &bs_r, x, y) > 5 { ball_gt5 += 1; }
+        }
+    }
+    assert!(ball_gt5 <= 160, "Case 2 ball NonRt-vs-RT mismatch: px_gt5={ball_gt5}");
+    // Case 4: archway inner concave soffit has no harsh local-shadow creases or slope blowups.
+    let (mut arch_gt25, mut arch_max) = (0u32, 0u8);
+    for y in 100..580 {
+        for x in 320..960 {
+            let d = max_chan_diff(&a_n, &a_r, x, y);
+            if d > 25 { arch_gt25 += 1; }
+            arch_max = arch_max.max(d);
+        }
+    }
+    assert!(
+        arch_gt25 <= 40 && arch_max <= 35,
+        "Case 4 arch soffit NonRt-vs-RT error too large: px_gt25={arch_gt25} max={arch_max}"
+    );
+}

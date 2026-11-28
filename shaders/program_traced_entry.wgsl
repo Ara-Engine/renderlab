@@ -131,9 +131,22 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let source_geometric=select(-face,face,lit_front);
     let material=primary_materials[hit.batch].value;
     rl_load_parameters(hit.batch);
+    // Convex smooth-mesh shadow terminator lift (Chiang et al. 2019, half-step) for local lights:
+    // flat and concave triangles keep receiver_world bit-for-bit unchanged.
+    var shadow_world=receiver_world;
+    if min(dot(a.normal,geometric),min(dot(b.normal,geometric),dot(c.normal,geometric)))>0.5 {
+        let pa=a.world;let pb=b.world;let pc=c.world;
+        let min_curve=min(min(dot(pb-pa,a.normal),dot(pc-pa,a.normal)),min(min(dot(pa-pb,b.normal),dot(pc-pb,b.normal)),min(dot(pa-pc,c.normal),dot(pb-pc,c.normal))));
+        if min_curve<-1e-6 {
+            let da=min(dot(receiver_world-pa,a.normal),0.0);
+            let db=min(dot(receiver_world-pb,b.normal),0.0);
+            let dc=min(dot(receiver_world-pc,c.normal),0.0);
+            shadow_world=receiver_world-0.5*(da*a.normal*w.x+db*b.normal*w.y+dc*c.normal*w.z);
+        }
+    }
     let surface_input=decal_prepare(SurfaceInput(input.world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
         input.uv,gradients[0],gradients[1],input.color,lit_front,lighting.eye,id,material,
-        primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel),decal_none()));
+        primary_receiver(shadow_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel),decal_none()));
     // Engine inputs computed once per receiver (src/program.rs), before the program's
     // values are live.
     rl_indirect_prepare(surface_input);

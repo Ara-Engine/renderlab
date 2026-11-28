@@ -1900,7 +1900,17 @@ impl Planner {
         ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
-        let mover_light = one_sun.map_or([0.0f32; 4], |l| {
+        let any_sun = i
+            .lights
+            .iter()
+            .zip(i.requests)
+            .find_map(|(l, r)| match (l, r) {
+                (Light::Directional { travel, .. }, r) if !matches!(r, ShadowRequest::None) => {
+                    Some(-travel.normalize())
+                }
+                _ => None,
+            });
+        let mover_light = any_sun.map_or([0.0f32; 4], |l| {
             let safe = l.map(|c| if c.abs() < 1e-6 { 1e-6f32.copysign(c) } else { c });
             let spread = i.directional_disk_angle.tan() * 1.01 + 1e-4;
             [safe.x, safe.y, safe.z, spread]
@@ -2718,8 +2728,13 @@ impl Renderer {
                 ],
             );
         }
-        let local_shadow_moved = !local_caster_boxes.is_empty()
-            && self.lighting.source_lights.iter().any(|l| {
+        // For finite-range shadowed local lights, scope moving-caster soft-box clamping to the
+        // tight world-space shadow cone AABB from the light through the moved caster (pushed into
+        // `moving_boxes`), instead of setting `soft_global_box` across the entire screen. Only an
+        // unlimited-range shadowed local light falls back to `soft_global_box`.
+        let mut local_shadow_global = false;
+        if !local_caster_boxes.is_empty() {
+            for l in &self.lighting.source_lights {
                 let (pos, range, casts) = match *l {
                     Light::Point {
                         position,
@@ -2733,20 +2748,52 @@ impl Renderer {
                         cast_shadows,
                         ..
                     } => (position, range, cast_shadows),
-                    Light::Directional { .. } => return false,
+                    Light::Directional { .. } => continue,
                 };
                 if casts == Some(false) {
-                    return false;
+                    continue;
                 }
-                local_caster_boxes.iter().any(|b| match range {
-                    Some(r) => {
-                        let c = pos.clamp(b.min, b.max);
-                        c.distance_squared(pos) <= r * r
+                for b in &local_caster_boxes {
+                    let Some(r) = range else {
+                        local_shadow_global = true;
+                        continue;
+                    };
+                    let closest = pos.clamp(b.min, b.max);
+                    if closest.distance_squared(pos) > r * r {
+                        continue;
                     }
-                    None => true,
-                })
-            });
-        let soft_global_box = emitter_moved || local_shadow_moved || self.gi.emitter_relighting();
+                    let mut lo = b.min;
+                    let mut hi = b.max;
+                    if closest == pos {
+                        lo = lo.min(pos - Vec3::splat(r));
+                        hi = hi.max(pos + Vec3::splat(r));
+                    } else {
+                        for i in 0..8 {
+                            let c = Vec3::new(
+                                if i & 1 != 0 { b.max.x } else { b.min.x },
+                                if i & 2 != 0 { b.max.y } else { b.min.y },
+                                if i & 4 != 0 { b.max.z } else { b.min.z },
+                            );
+                            let d = c - pos;
+                            let len = d.length();
+                            if len > 1e-4 && len < r {
+                                let far = pos + d * (r / len);
+                                lo = lo.min(far);
+                                hi = hi.max(far);
+                            }
+                        }
+                    }
+                    if let Some(sb) = scene_bounds {
+                        lo = lo.max(sb.min);
+                        hi = hi.min(sb.max);
+                    }
+                    if lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z {
+                        moving_boxes.push(crate::shadow_plan::Bounds { min: lo, max: hi });
+                    }
+                }
+            }
+        }
+        let soft_global_box = emitter_moved || local_shadow_global || self.gi.emitter_relighting();
         let planned = self
             .view
             .reconstruction_state

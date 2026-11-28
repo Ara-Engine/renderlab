@@ -80,11 +80,14 @@ pub(super) fn trace(mut source: String, mode: Mode, normal_probe: bool) -> Resul
                 ),
             )?;
         }
+        // Store the un-lifted receiver before the convex shadow-terminator lift.
+        let interactive_receiver =
+            "    var receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);";
         edit(
             &mut source,
             "primary_trace_interactive",
-            receiver,
-            &format!("{receiver}\n        rl_receiver_store(p,trace,receiver);"),
+            interactive_receiver,
+            &format!("{interactive_receiver}\n        rl_receiver_store(p,trace,receiver);"),
         )?;
         // Raw near-edge hits are overwritten by repair before any reader dispatch.
         let store = "    let p=vec2<i32>(id.xy);textureStore(primary_hit_output,p,trace.record);";
@@ -94,7 +97,7 @@ pub(super) fn trace(mut source: String, mode: Mode, normal_probe: bool) -> Resul
             store,
             &format!("{store}\n    if trace.record.x!=0u {{rl_receiver_store(p,trace,receiver);}}"),
         )?;
-        let repaired = "    let receiver=primary_receiver(trace.point,trace.positions,slot,p);";
+        let repaired = "    var receiver=primary_receiver(trace.point,trace.positions,slot,p);";
         edit(
             &mut source,
             "primary_repair_interactive",

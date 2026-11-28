@@ -105,6 +105,7 @@ var<private> vd_ps:vec4<u32>;
 var<private> vd_single_page:bool;
 var<private> vd_single_base:u32;
 var<private> vd_all_missing:bool;
+var<private> vd_any_missing:bool;
 fn vd_cache_pages(level:u32,a:vec2<i32>,b:vec2<i32>) {
     let n=vsm.counts.y;let pa=vec2<u32>(a)/VSM_PAGE;let pb=vec2<u32>(b)/VSM_PAGE;
     vd_pl=level;vd_pa=pa;
@@ -120,6 +121,16 @@ fn vd_cache_pages(level:u32,a:vec2<i32>,b:vec2<i32>) {
     vd_single_page=single && e.x!=VSM_NONE;
     vd_single_base=e.x<<14u;
     vd_all_missing=single && e.x==VSM_NONE;
+    vd_any_missing=e.x==VSM_NONE || (x1 && e.y==VSM_NONE) || (y1 && e.z==VSM_NONE) || (x1 && y1 && e.w==VSM_NONE);
+}
+// Whether every page spanned by window texels a..b (inclusive, inside [0, side)) is resident.
+fn vd_window_resident(level:u32,a:vec2<i32>,b:vec2<i32>)->bool {
+    let pa=vec2<u32>(a)/VSM_PAGE;let pb=vec2<u32>(b)/VSM_PAGE;
+    if vsm_resident(level,pa)==VSM_NONE {return false;}
+    if pb.x>pa.x && vsm_resident(level,pa+vec2<u32>(1u,0u))==VSM_NONE {return false;}
+    if pb.y>pa.y && vsm_resident(level,pa+vec2<u32>(0u,1u))==VSM_NONE {return false;}
+    if pb.x>pa.x && pb.y>pa.y && vsm_resident(level,pa+vec2<u32>(1u,1u))==VSM_NONE {return false;}
+    return true;
 }
 const VD_UNREAD:u32=0xfffffffeu;
 // The word of texel `cell` (inside the window) of `level`: VSM_NONE where its page is missing
@@ -494,15 +505,19 @@ fn vd_prepare(id:vec2<u32>) {
     vd_px.origin=fma(n,vec3<f32>(world.w),world.xyz);
     vd_px.p=vsm_light(vd_px.origin);
     vd_px.point=vsm_light(world.xyz);
-    // Sparse: while the receiver's page is still arriving (the per-frame raster budget after a
-    // cut, or a full pool), the first coarser level that holds it.
+    // Sparse: while any page touched by the receiver's lookup window (including VD_JITTER) is
+    // still arriving (per-frame raster budget after a cut/jump, or a full pool), step up to the
+    // first coarser level whose full lookup window is resident so page borders never leak light.
     if vsm_sparse() && vd_px.level!=VSM_NONE {
-        let side=f32(vsm.counts.y*VSM_PAGE);
+        let side=i32(vsm.counts.y*VSM_PAGE);
+        let pad=f32(VD_R)+1.0+VD_JITTER;
         var l=vd_px.level;
         loop {
             if l>=vsm.counts.x {l=VSM_NONE;break;}
             let x=(vd_px.p.xy-vsm.levels[l].origin.xy)/vsm_texel(l);
-            if all(x>=vec2<f32>(0.0)) && all(x<vec2<f32>(side)) && vsm_resident(l,vec2<u32>(x)/VSM_PAGE)!=VSM_NONE {break;}
+            let a=vec2<i32>(floor(x-vec2<f32>(pad)));
+            let b=vec2<i32>(floor(x+vec2<f32>(pad)));
+            if all(a>=vec2<i32>(0)) && all(b<vec2<i32>(side)) && vd_window_resident(l,a,b) {break;}
             l+=1u;
         }
         vd_px.stand_in=l!=vd_px.level;
@@ -1150,23 +1165,45 @@ fn vd_map(ceiling:f32) {
     }
     // At most the ladder's length, whatever the receiver's level (vd_prepare keeps it inside).
     for(var k=0u;k<=min(last-vd_px.level,last);k+=1u) {
-        let level=last-k;
+        let band_level=last-k;
         var lo=0.0;
-        if level>vd_px.level {lo=vd_band(level-1u)*vd_px.band;}
+        if band_level>vd_px.level {lo=vd_band(band_level-1u)*vd_px.band;}
         if lo>=ceiling {continue;}
-        let texel=vsm_texel(level);
-        let hi=vd_band(level)*vd_px.band;
-        let origin=vsm.levels[level].origin.xy;
-        let x=(p.xy-origin)/texel;
-        let r=min(slope*min(ceiling,hi)/texel,f32(VD_R));
-        let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
-        let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(side-1));
+        let hi=vd_band(band_level)*vd_px.band;
+        var level=band_level;
+        var texel=vsm_texel(level);
+        var origin=vsm.levels[level].origin.xy;
+        var x=(p.xy-origin)/texel;
+        var r=min(slope*min(ceiling,hi)/texel,f32(VD_R));
+        var a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
+        var b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(side-1));
         var skip=any(b<a);
         // The window's pages (plus 1-texel neighbour border for vd_texel's sheet underside):
-        // the mip test and the texels read them from the cache.
+        // if any page inside the lookup window [a..b] is still arriving on sparse, fall this
+        // height band back to the first coarser resident level so page borders never leak light.
         if !skip && vsm_sparse() {
-            vd_cache_pages(level,max(a-vec2<i32>(1),vec2<i32>(0)),min(b+vec2<i32>(1),vec2<i32>(side-1)));
-            if vd_all_missing {skip=true;}
+            if !vd_window_resident(level,a,b) {
+                vd_px.stand_in=true;
+                var fb=level+1u;
+                var found=false;
+                while fb<=last {
+                    let ft=vsm_texel(fb);
+                    let fo=vsm.levels[fb].origin.xy;
+                    let fx=(p.xy-fo)/ft;
+                    let fr=min(slope*min(ceiling,hi)/ft,f32(VD_R));
+                    let fa=max(vec2<i32>(floor(fx-vec2<f32>(fr))),vec2<i32>(0));
+                    let fb_hi=min(vec2<i32>(floor(fx+vec2<f32>(fr))),vec2<i32>(side-1));
+                    if all(fa<=fb_hi) && vd_window_resident(fb,fa,fb_hi) {
+                        level=fb;texel=ft;origin=fo;x=fx;a=fa;b=fb_hi;found=true;break;
+                    }
+                    fb+=1u;
+                }
+                if !found {skip=true;}
+            }
+            if !skip {
+                vd_cache_pages(level,max(a-vec2<i32>(1),vec2<i32>(0)),min(b+vec2<i32>(1),vec2<i32>(side-1)));
+                if vd_all_missing {skip=true;}
+            }
         }
         // Every texel but the 2x2 whose centres surround the cone's point is half a texel or
         // more from it, so it reaches the cone only above half a texel / slope (vd_texel's cone

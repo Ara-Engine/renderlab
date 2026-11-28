@@ -99,7 +99,9 @@ fn raster_trace(pixel:vec2<u32>,size:vec2<u32>,ids:vec2<u32>,v:array<vec3<f32>,3
     }
     textureStore(primary_epsilon_output,p,vec4<f32>(receiver.epsilon));
     if WRITE_RECEIVERS {
-        textureStore(primary_world_output,p,vec4<f32>(receiver.world,receiver.epsilon));
-        textureStore(primary_normal_output,p,vec4<f32>(receiver.geometric,select(1.0,-1.0,receiver.thin)));
+        let term=primary_shadow_terminator(receiver.world,trace.record,trace.positions);
+        let normal=select(receiver.geometric,term.normal,term.lifted);
+        textureStore(primary_world_output,p,vec4<f32>(term.world,receiver.epsilon));
+        textureStore(primary_normal_output,p,vec4<f32>(normal,select(1.0,-1.0,receiver.thin)));
     }
 }

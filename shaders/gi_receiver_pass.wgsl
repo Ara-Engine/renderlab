@@ -402,7 +402,7 @@ fn fg_touch(slot:u32) {
 const FG_STABLE:u32=4u;
 const FG_STABLE_RATE:u32=4u;
 // Header words in fg_state ahead of the double-buffered per-probe pairs:
-//   0: flags (bit 0: recently_changed; bit 1: emitter_moved; bit 2: direct_step16; bit 3: camera_still; bit 4: direct_allowed)
+//   0: flags (bit 0: recently_changed; bit 1: emitter_moved; bit 2: direct_step16; bit 3: camera_still; bit 4: direct_allowed; bit 5: global_relight)
 //   1: gather_frame
 //   2: bank parity (0 or 1; write_bank = parity, read_bank = 1 - parity)
 //   3: has_prev (1 when words 4..40 hold valid previous-frame unjittered camera state)
@@ -417,6 +417,7 @@ fn fg_emitter_moved()->bool { return (fg_state[0]&2u)!=0u; }
 fn fg_direct_step16()->bool { return (fg_state[0]&4u)!=0u; }
 fn fg_camera_still()->bool { return (fg_state[0]&8u)!=0u; }
 fn fg_direct_allowed()->bool { return (fg_state[0]&16u)!=0u; }
+fn fg_global_relight()->bool { return (fg_state[0]&32u)!=0u; }
 fn fg_frame()->u32 { return fg_state[1]; }
 fn fg_state_at(index:u32,size:vec2<u32>,bank:u32)->u32 {
     return FG_STATE_HEAD+2u*(bank*fg_bank_stride(size)+index);
@@ -1709,9 +1710,10 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
         for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]=sh[FG_BOUNCE+i]*hemi_scale+nee[i];}
     }
     let emitter_moved=fg_emitter_moved();
-    // Moving emitters flush old indirect bounce immediately (1.0 frame while moving, 2.0 while
-    // relighting) so bright dragged light panels leave zero multi-frame bounce trails behind them.
-    let max_hist=select(select(select(FG_HISTORY,16.0,s.moved),2.0,fg_recently_changed()),1.0,emitter_moved);
+    // Global relights / moving emitters flush old indirect bounce immediately (1.0 frame while
+    // moving, 2.0 while relighting) so dragged light panels leave zero bounce trails; ordinary
+    // rigid-body motion keeps full FG_HISTORY on unrelated static surfaces and updates locally.
+    let max_hist=select(select(select(FG_HISTORY,16.0,s.moved),2.0,fg_global_relight()),1.0,emitter_moved);
     let sample_w=select(1.0,2.0,boosted);
     var count=max(sample_w*(1.0-geom_missing_frac),0.25);
     if has_old && old.point.w>0.0 {
@@ -1723,7 +1725,7 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     count=min(count,hist_cap);
     let cold_t=smoothstep(0.25,0.65,cold_frac);
     let warm_eff=select(max(count-6.0,2.0),min(count,2.0),count<=8.0);
-    let startup_cold=fg_recently_changed() || count<=6.0;
+    let startup_cold=fg_global_relight() || count<=6.0;
     let eff_count=mix(count,warm_eff,select(cold_t*0.35,cold_t,startup_cold));
     let blend=clamp(sample_w/max(eff_count,sample_w),0.0,1.0);
     var out:FgProbe;
@@ -1800,14 +1802,14 @@ fn fg_accumulate(write_index:u32,prev_index:u32,state_index:u32,size:vec2<u32>,p
     let prev_state_idx=select(0xffffffffu,prev_idx-rbank*fg_bank_stride(size),prev_idx!=0xffffffffu);
     let r_at=select(0xffffffffu,fg_state_at(prev_state_idx,size,rbank),prev_state_idx!=0xffffffffu);
     let emitter_moved=fg_emitter_moved();
-    let stable=!fg_recently_changed() && !emitter_moved && !probe_shifted && old_w>=28.0 && r_at<arrayLength(&fg_state) && (fg_state[r_at]&0x3fu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
+    let stable=!fg_global_relight() && !emitter_moved && !s.moved && !probe_shifted && old_w>=28.0 && r_at<arrayLength(&fg_state) && (fg_state[r_at]&0x3fu)>=FG_STABLE && atomicLoad(&fg_moved)==0u;
     let turn=select((group.x+group.y+frame)&1u,(group.x+2u*group.y+frame)%FG_STABLE_RATE,stable);
     // On Non-RT, never skip tracing when a probe shifted (>0.10 tile footprints) or lost history,
     // preventing whip-pan & 14 m/s sprint indirect trails while keeping still/slow half-rate wins.
-    let keep=!emitter_moved && !mode_flip && !fg_recently_changed() && shift_dist<=0.10 && atomicLoad(&fg_moved)==0u && FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
+    let keep=!emitter_moved && !mode_flip && !fg_global_relight() && !s.moved && shift_dist<=0.10 && atomicLoad(&fg_moved)==0u && FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     // Free 2x ray boost on history-less whip-pan strip / cut / moving-emitter probes: when slot 1
     // is empty (~75% of screen tiles), repurpose slot 1's idle lanes to trace 64 RT / 32 Non-RT rays!
-    if lane==0u && !use_nee && first.placement!=0u && second.placement==0u && !keep && (prev_idx==0xffffffffu || old_w<3.0 || emitter_moved || fg_recently_changed()) {
+    if lane==0u && !use_nee && first.placement!=0u && second.placement==0u && !keep && (prev_idx==0xffffffffu || old_w<3.0 || emitter_moved || fg_global_relight()) {
         fg_wg_boost=1u;
     }
     let boosted=workgroupUniformLoad(&fg_wg_boost)!=0u;
@@ -2140,9 +2142,9 @@ var<workgroup> fg_pair:array<u32,2>;
     let r_at=select(0xffffffffu,fg_state_at(prev_state_idx,size,rbank),prev_state_idx!=0xffffffffu);
     let emitter_moved=fg_emitter_moved();
     let adapt_changed=r_at<arrayLength(&fg_state) && ((fg_state[r_at]&64u)!=0u || fg_changed_recently(fg_state[r_at],frame));
-    let stable=!fg_recently_changed() && !emitter_moved && !probe_shifted && !adapt_changed && old_w>=28.0 && r_at<arrayLength(&fg_state) && (fg_state[r_at]&0x3fu)>=FG_STABLE;
+    let stable=!fg_global_relight() && !emitter_moved && !s.moved && !probe_shifted && !adapt_changed && old_w>=28.0 && r_at<arrayLength(&fg_state) && (fg_state[r_at]&0x3fu)>=FG_STABLE;
     let turn=select((group.x+block.y+frame)&1u,(group.x+2u*block.y+frame)%FG_STABLE_RATE,stable);
-    let keep=!emitter_moved && !mode_flip && !fg_recently_changed() && shift_dist<=0.25 && !adapt_changed && FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
+    let keep=!emitter_moved && !mode_flip && !fg_global_relight() && !s.moved && shift_dist<=0.25 && !adapt_changed && FG_HALF_RATE && turn!=0u && s.placement!=0u && old_w>=FG_HALF_MIN;
     var traced=s;
     if keep {traced.placement=0u;}
     if lane%FG_RAYS==0u {fg_trace_mask[b]=u32(traced.placement!=0u);}

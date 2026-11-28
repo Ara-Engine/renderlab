@@ -612,7 +612,8 @@ impl Renderer {
                     | (u32::from(self.gi.emitter_moved()) << 1)
                     | (u32::from(direct_step16) << 2)
                     | (u32::from(camera_still) << 3)
-                    | (u32::from(run_direct) << 4);
+                    | (u32::from(run_direct) << 4)
+                    | (u32::from(self.gi.global_relight()) << 5);
                 words[1] = target.gather_frame;
                 words[2] = target.gather_frame & 1;
                 words[3] = u32::from(prev.is_some());

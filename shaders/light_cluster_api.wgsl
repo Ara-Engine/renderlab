@@ -110,32 +110,55 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     // bits 17..19 hold a single-face spot light's physical atlas array slice (0..5).
     let slot=(light.kind.w&0xffffu)-1u;
     if slot>=LC_SLOTS { return 1.0; }
-    let biased=fma(l,vec3<f32>(receiver.epsilon),shadow_origin(receiver,l));
+    let base_origin=fma(l,vec3<f32>(receiver.epsilon),shadow_origin(receiver,l));
+    let geometric=receiver.geometric;
+    let viewed=select(-geometric,geometric,dot(geometric,lighting.eye-receiver.world)>=0.0);
     var layer=slot*6u;
     if (light.kind.w&0x10000u)!=0u {
-        let d=biased-light.position_range.xyz;
+        let d=base_origin-light.position_range.xyz;
         layer+=rl_local_face(d);
     }
-    let m=rl_local_matrix(layer);
-    let clip=m*vec4<f32>(biased,1.0);
+    var m=rl_local_matrix(layer);
+    var clip=m*vec4<f32>(base_origin,1.0);
+    if clip.w<=0.0 { return 1.0; }
+    let extent=vec2<f32>(rl_light_frame.tiles[slot].z);
+    // World-space texel normal bias scaled by sin(theta): zero at perpendicular incidence so
+    // flat contact shadows never detach, and clears concave curved-surface segment seams (such
+    // as arches) where adjacent facets curve toward the light inside a filter tap.
+    let proj_xy=vec2<f32>(length(vec3<f32>(m[0].x,m[1].x,m[2].x)),length(vec3<f32>(m[0].y,m[1].y,m[2].y)));
+    let world_texel=2.0*clip.w/max(min(proj_xy.x,proj_xy.y)*min(extent.x,extent.y),1e-4);
+    let nl_view=clamp(dot(viewed,l),0.0,1.0);
+    let sin_theta=sqrt(max(1.0-nl_view*nl_view,0.0));
+    let n_offset=min(1.5*world_texel*sin_theta,0.06);
+    let biased=fma(viewed,vec3<f32>(n_offset),base_origin);
+    if (light.kind.w&0x10000u)!=0u {
+        let new_layer=slot*6u+rl_local_face(biased-light.position_range.xyz);
+        if new_layer!=layer {
+            layer=new_layer;
+            m=rl_local_matrix(layer);
+        }
+    }
+    clip=m*vec4<f32>(biased,1.0);
     if clip.w<=0.0 { return 1.0; }
     let ndc=clip.xyz/clip.w;
     if any(abs(ndc.xy)>vec2<f32>(1.0)) || ndc.z<0.0 || ndc.z>1.0 { return 1.0; }
-    let extent=vec2<f32>(rl_light_frame.tiles[slot].z);
-    let geometric=receiver.geometric;
     let axis=select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(geometric.x)>0.9);
     let tangent=unit_normal(cross(geometric,axis));
     let bitangent=cross(geometric,tangent);
     let dx=m*vec4<f32>(tangent,0.0);
     let dy=m*vec4<f32>(bitangent,0.0);
     let plane=cross(dx.xyz-ndc*dx.w,dy.xyz-ndc*dy.w);
-    // Depth change per NDC unit on the receiver's plane, limited at grazing incidence to
-    // a 16:1 slope so PCF taps never compare against a near-vertical extrapolation.
+    // Depth change per NDC unit on the receiver's plane. In reversed-Z, d(ndc.z)/d(ndc.xy)
+    // scales with ndc.z / proj_xy * tan(theta), so bound it relative to ndc.z (<= 2.5:1 world
+    // slope) instead of a fixed NDC constant that explodes at grazing angles on curved meshes.
+    let face_proj=vec2<f32>(length(vec3<f32>(m[0].x,m[1].x,m[2].x)),length(vec3<f32>(m[0].y,m[1].y,m[2].y)));
+    let max_slope=2.5*max(ndc.z,1e-4)/max(face_proj,vec2<f32>(1e-3));
     var slope=vec2<f32>(0.0);
-    if plane.z!=0.0 { slope=clamp(-plane.xy/plane.z,vec2<f32>(-16.0),vec2<f32>(16.0)); }
+    if plane.z!=0.0 { slope=clamp(-plane.xy/plane.z,-max_slope,max_slope); }
     // Half a texel of the plane's own slope bounds the stored depth's rasterization offset.
     let texel=2.0/extent;
     let bias=0.5*dot(abs(slope),texel)+1e-6;
+    let max_up=0.15*max(ndc.z,1e-4);
     let t=(ndc.xy*vec2<f32>(0.5,-0.5)+vec2<f32>(0.5))*extent-vec2<f32>(0.5);
     // LC2 PCSS: blocker search in linear light-view depth, then contact-hardening PCF.
     // The 96-texel footprint bound caps map support, never drops a light. Zero radius
@@ -174,7 +197,7 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
                         let weight=select(1.0-fraction.x,fraction.x,i==1u)*select(1.0-fraction.y,fraction.y,j==1u);
                         let coordinate=corner+vec2<i32>(i32(i),i32(j));
                         let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-                        let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+                        let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
                         let stored=textureLoad(rl_local_depth,origin+vec2<i32>(i32(i),i32(j)),rl_local_slice(light.kind.w,layer),0);
                         soft+=weight*select(0.0,1.0,reference>=stored);
                     }
@@ -211,56 +234,56 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
         {
             let coordinate=origin+vec2<i32>(0-1,0-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=left0.w);
             gathered+=visibility*rl_pcf_weight(0,f.x)*rl_pcf_weight(0,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(1-1,0-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=left0.z);
             gathered+=visibility*rl_pcf_weight(1,f.x)*rl_pcf_weight(0,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(2-1,0-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=right0.w);
             gathered+=visibility*rl_pcf_weight(2,f.x)*rl_pcf_weight(0,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(3-1,0-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=right0.z);
             gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(0,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(0-1,1-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=left0.x);
             gathered+=visibility*rl_pcf_weight(0,f.x)*rl_pcf_weight(1,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(1-1,1-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=left0.y);
             gathered+=visibility*rl_pcf_weight(1,f.x)*rl_pcf_weight(1,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(2-1,1-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=right0.x);
             gathered+=visibility*rl_pcf_weight(2,f.x)*rl_pcf_weight(1,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(3-1,1-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=right0.y);
             gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(1,f.y);
         }
@@ -270,56 +293,56 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
         {
             let coordinate=origin+vec2<i32>(0-1,2-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=left2.w);
             gathered+=visibility*rl_pcf_weight(0,f.x)*rl_pcf_weight(2,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(1-1,2-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=left2.z);
             gathered+=visibility*rl_pcf_weight(1,f.x)*rl_pcf_weight(2,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(2-1,2-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=right2.w);
             gathered+=visibility*rl_pcf_weight(2,f.x)*rl_pcf_weight(2,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(3-1,2-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=right2.z);
             gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(2,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(0-1,3-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=left2.x);
             gathered+=visibility*rl_pcf_weight(0,f.x)*rl_pcf_weight(3,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(1-1,3-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=left2.y);
             gathered+=visibility*rl_pcf_weight(1,f.x)*rl_pcf_weight(3,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(2-1,3-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=right2.x);
             gathered+=visibility*rl_pcf_weight(2,f.x)*rl_pcf_weight(3,f.y);
         }
         {
             let coordinate=origin+vec2<i32>(3-1,3-1);
             let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
-            let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+            let reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
             let visibility=select(0.0,1.0,reference>=right2.y);
             gathered+=visibility*rl_pcf_weight(3,f.x)*rl_pcf_weight(3,f.y);
         }
@@ -355,7 +378,10 @@ fn rl_local_tap(light:Light,receiver:Receiver,biased:vec3<f32>,layer:u32,ndc:vec
     var coordinate=vec2<i32>(floor(tap+vec2<f32>(0.5)));
     let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
     var use_layer=layer;
-    var reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+    // Never extrapolate the receiver plane downhill below ndc.z (concave curved surfaces like
+    // arch soffits curve toward the light and self-shadow) or far uphill through real occluders.
+    let max_up=0.15*max(ndc.z,1e-4);
+    var reference=ndc.z+clamp(dot(slope,tap_ndc-ndc.xy),0.0,max_up)+bias;
     var depth_scale=1.0;
     if (light.kind.w&0x10000u)!=0u && any(abs(tap_ndc)>vec2<f32>(1.0)) {
         let right=vec3<f32>(m[0].x,m[1].x,m[2].x);
@@ -365,10 +391,13 @@ fn rl_local_tap(light:Light,receiver:Receiver,biased:vec3<f32>,layer:u32,ndc:vec
         use_layer=((light.kind.w&0xffffu)-1u)*6u+rl_local_face(direction);
         let neighbour=rl_local_matrix(use_layer);
         let normal=receiver.geometric;
+        let base_dist=length(biased-light.position_range.xyz);
+        let dir_len=max(length(direction),1e-6);
         let denominator=dot(normal,direction);
-        if abs(denominator)<1e-6 { return vec2<f32>(1.0,0.0); }
-        let distance=dot(normal,biased-light.position_range.xyz)/denominator;
-        if distance<=0.0 { return vec2<f32>(1.0,0.0); }
+        var distance=base_dist/dir_len;
+        if abs(denominator)>=1e-6 {
+            distance=clamp(dot(normal,biased-light.position_range.xyz)/denominator,0.87*base_dist/dir_len,base_dist/dir_len);
+        }
         let world=light.position_range.xyz+direction*distance;
         let clip=neighbour*vec4<f32>(world,1.0);
         let n=clip.xyz/clip.w;
@@ -379,10 +408,12 @@ fn rl_local_tap(light:Light,receiver:Receiver,biased:vec3<f32>,layer:u32,ndc:vec
         let other_right=vec3<f32>(neighbour[0].x,neighbour[1].x,neighbour[2].x);
         let other_up=vec3<f32>(neighbour[0].y,neighbour[1].y,neighbour[2].y);
         let ray=other_forward+other_right*(centre.x/dot(other_right,other_right))+other_up*(centre.y/dot(other_up,other_up));
+        let ray_len=max(length(ray),1e-6);
         let denom=dot(normal,ray);
-        if abs(denom)<1e-6 { return vec2<f32>(1.0,0.0); }
-        let hit_t=dot(normal,biased-light.position_range.xyz)/denom;
-        if hit_t<=0.0 { return vec2<f32>(1.0,0.0); }
+        var hit_t=base_dist/ray_len;
+        if abs(denom)>=1e-6 {
+            hit_t=clamp(dot(normal,biased-light.position_range.xyz)/denom,0.87*base_dist/ray_len,base_dist/ray_len);
+        }
         let hit=neighbour*vec4<f32>(light.position_range.xyz+ray*hit_t,1.0);
         reference=hit.z/hit.w+bias;
         depth_scale=dot(forward,ray)/dot(other_forward,ray);

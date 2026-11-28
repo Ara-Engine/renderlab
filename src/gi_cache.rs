@@ -2049,6 +2049,9 @@ impl Planner {
             h.update(still_matrix);
             h.update(instances);
             h.update(environment);
+            if let Some(lk) = light_key {
+                h.update(lk);
+            }
             h.update(format!("{s:?}").as_bytes());
             h.update(&still_extent);
             // SK1: a fixed camera and placement can still contain animated geometry.
@@ -2549,13 +2552,19 @@ impl GiState {
     /// shading reads) is still relighting the table, within the last RECENT_CHANGE_FRAMES frames:
     /// readers that skip work on settled views (the final gather's stable probes) do all of it then.
     pub(crate) fn recently_changed(&self) -> bool {
+        self.global_relight() || self.planner.since_movers <= 2
+    }
+    /// Whether a global relight event (clear, cut, light edit, or moving emitter) is active and
+    /// final-gather probes across the whole view should shorten temporal history. Ordinary
+    /// rigid-body motion (`since_movers`) updates nearby probes locally via `s.moved` and
+    /// `fg_adapt_history` so distant static surfaces keep full GI convergence.
+    pub(crate) fn global_relight(&self) -> bool {
         const RECENT_CHANGE_FRAMES: u32 = 8;
         let p = &self.planner;
         p.pending_clear
             || p.since_clear.min(p.since_cut) < RECENT_CHANGE_FRAMES
             || p.light_streak
             || p.relight_catchup > 0
-            || p.since_movers <= 2
             || self.emitter_relight_frames > 0
     }
     /// Whether any active draw in this frame uses an emitting program (CPU skip for zero-emitter scenes).
